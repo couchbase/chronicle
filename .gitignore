@@ -1,0 +1,5 @@
+*~
+*.beam
+_build/
+/TAGS
+/TAGS.root

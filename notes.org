@@ -1,0 +1,59 @@
+* chronicle_config_acceptor (or something else) needs to also pull
+
+  For situations when the node got removed from the cluster but never got
+  notified about it.
+
+* chronicle_config_acceptor needs to support wiping the configuration
+
+  Again, for situations where the node got removed from the topology, but
+  never learned about it.
+
+  Wiping could be safe and unsafe.
+
+  Safe: the cluster and the node are on the same history.
+  Unsafe: otherwise.
+
+* Couchdb VM will need a read-only replica of the config
+
+  - Not clear right now how best to achieve this.
+* Do I need note_committed in chronicle_config_acceptor after all?
+
+  Possibly needed to deal with "replicas" (as opposed to "voters").
+* Storage API
+
+  Low level kv API vs higher-level domain specific API
+* Make sure exactly-once semantic is respected
+
+  When a proposal is initiated by one leader that fails to commit it, then
+  gets picked up by another leader that does commit it, but the first leader
+  retries and commits the proposal the second time.
+
+  See RMWPaxos paper for details.
+
+  https://arxiv.org/abs/2001.03362
+* Look at scalaris' protocol scheduler for testing
+
+  https://github.com/scalaris-team/scalaris/blob/master/src/proto_sched.erl
+* Leader election
+
+  Imagine a transition from a topology ABC to a topology ADE. Let's say it's
+  completed by either node D or E. Let's say the nodes have the following
+  states:
+
+  A: ABC
+  B: ABC+ADE
+  C: ABC+ADE
+  D: ADE
+  E: ADE
+
+  Now also imagine that B and C are down (because they were removed from the
+  cluster). If A gets somehow elected a leader, it won't be able to make any
+  progress.
+
+  One of the ways to deal with this is to require that the leader acquire a
+  majority vote. Alas, this is in contradiction with our desire to have the
+  leader be the node running the latest code.
+
+  Another approach is to have the leader be able to learn information about
+  topologies during leader election. Then as long as A can communicate with D
+  and E, it'll learn about the new topology.

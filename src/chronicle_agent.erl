@@ -1,0 +1,726 @@
+%% @author Couchbase <info@couchbase.com>
+%% @copyright 2020 Couchbase, Inc.
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%      http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%%
+%% TODO: timeouts
+%% TODO: pull is needed to detect situations where a node gets shunned
+%% TODO: check more state invariants
+-module(chronicle_agent).
+
+-compile(export_all).
+
+-behavior(gen_server).
+-include_lib("stdlib/include/ms_transform.hrl").
+-include("chronicle.hrl").
+
+-import(chronicle_utils, [call_async/3,
+                          term_number/1,
+                          compare_positions/2]).
+
+-define(SERVER, ?SERVER_NAME(?MODULE)).
+-define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
+
+%% TODO: get rid of the duplication between #state{} and #metadata{}.
+-record(state, { history_id,
+                 term,
+                 term_voted,
+                 high_seqno,
+                 committed_seqno,
+                 config_entry,
+                 committed_config_entry,
+                 pending_branch,
+
+                 log_tab }).
+
+start_link() ->
+    gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
+
+monitor(Peer) ->
+    chronicle_utils:monitor_process(?SERVER(Peer)).
+
+get_system_state() ->
+    case get_metadata() of
+        {ok, _} ->
+            provisioned;
+        {error, not_provisioned} ->
+            unprovisioned;
+        {error, _} = Error ->
+            exit(Error)
+    end.
+
+get_metadata() ->
+    get_metadata(?PEER()).
+
+get_metadata(Peer) ->
+    gen_server:call(?SERVER(Peer), get_metadata).
+
+get_log(Peer) ->
+    gen_server:call(?SERVER(Peer), get_log).
+
+get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
+    gen_server:call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).
+
+get_history_id() ->
+    case get_metadata() of
+        {ok, Metadata} ->
+            {ok, get_history_id(Metadata)};
+        Error ->
+            Error
+    end.
+
+get_history_id(#metadata{history_id = CommittedHistoryId,
+                         pending_branch = undefined}) ->
+    CommittedHistoryId;
+get_history_id(#metadata{pending_branch =
+                             #branch{history_id = PendingHistoryId}}) ->
+    PendingHistoryId.
+
+%% TODO: should only take the config. The rest should be figured out by the
+%% acceptor?
+provision(HistoryId, Term, Config) ->
+    case gen_server:call(?SERVER, {provision, HistoryId, Term, Config}) of
+        ok ->
+            ok = chronicle_provisioner:sync();
+        Other ->
+            Other
+    end.
+
+wipe() ->
+    case gen_server:call(?SERVER, wipe) of
+        ok ->
+            ok = chronicle_provisioner:sync();
+        Other ->
+            Other
+    end.
+
+establish_term(Peer, Opaque, HistoryId, Term, Position) ->
+    %% TODO: don't abuse gen_server calls here and everywhere else
+    call_async(?SERVER(Peer), Opaque,
+               {establish_term, HistoryId, Term, Position}).
+
+ensure_term(Peer, Opaque, HistoryId, Term) ->
+    call_async(?SERVER(Peer), Opaque, {ensure_term, HistoryId, Term}).
+
+append(Peer, Opaque, HistoryId, Term, CommittedSeqno, Entries) ->
+    call_async(?SERVER(Peer), Opaque,
+               {append, HistoryId, Term, CommittedSeqno, Entries}).
+
+store_branch(Peer, Branch) ->
+    gen_server:call(?SERVER(Peer), {store_branch, Branch}).
+
+undo_branch(Peer, BranchId) ->
+    gen_server:call(?SERVER(Peer), {undo_branch, BranchId}).
+
+%% gen_server callbacks
+init([]) ->
+    {ok, restore_state()}.
+
+handle_call(get_metadata, _From, State) ->
+    handle_get_metadata(State);
+handle_call(get_log, _From, #state{log_tab = Tab} = State) ->
+    {reply, {ok, ets:tab2list(Tab)}, State};
+handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno}, _From, State) ->
+    handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State);
+handle_call({provision, HistoryId, Term, Config}, _From, State) ->
+    handle_provision(HistoryId, Term, Config, State);
+handle_call(wipe, _From, State) ->
+    handle_wipe(State);
+handle_call({establish_term, HistoryId, Term, Position}, _From, State) ->
+    handle_establish_term(HistoryId, Term, Position, State);
+handle_call({ensure_term, HistoryId, Term}, _From, State) ->
+    handle_ensure_term(HistoryId, Term, State);
+handle_call({append, HistoryId, Term, CommittedSeqno, Entries}, _From, State) ->
+    handle_append(HistoryId, Term, CommittedSeqno, Entries, State);
+handle_call({store_branch, Branch}, _From, State) ->
+    handle_store_branch(Branch, State);
+handle_call({undo_branch, BranchId}, _From, State) ->
+    handle_undo_branch(BranchId, State);
+handle_call(_Call, _From, State) ->
+    {reply, nack, State}.
+
+handle_cast(Cast, State) ->
+    ?WARNING("Unexpected cast ~p.~nState:~n~p",
+             [Cast, State]),
+    {noreply, State}.
+
+%% internal
+handle_get_metadata(State) ->
+    Reply =
+        case is_provisioned(State) of
+            true ->
+                {ok, state2metadata(State)};
+            false ->
+                {error, not_provisioned}
+        end,
+
+    {reply, Reply, State}.
+
+state2metadata(#state{history_id = HistoryId,
+                      term = Term,
+                      term_voted = TermVoted,
+                      high_seqno = HighSeqno,
+                      committed_seqno = CommittedSeqno,
+                      config_entry = ConfigEntry,
+                      pending_branch = PendingBranch}) ->
+    {Config, ConfigRevision} =
+        case ConfigEntry of
+            undefined ->
+                {undefined, undefined};
+            #log_entry{value = Value} ->
+                {Value, chronicle_proposer:log_entry_revision(ConfigEntry)}
+        end,
+
+    #metadata{history_id = HistoryId,
+              term = Term,
+              term_voted = TermVoted,
+              high_seqno = HighSeqno,
+              committed_seqno  = CommittedSeqno,
+              config = Config,
+              config_revision = ConfigRevision,
+              pending_branch = PendingBranch}.
+
+handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) ->
+    case check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) of
+        ok ->
+            {reply, {ok, log_range(StartSeqno, EndSeqno, State)}, State};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) ->
+    ?CHECK(check_history_id(HistoryId, State),
+           check_same_term(Term, State),
+           check_log_range(StartSeqno, EndSeqno, State)).
+
+handle_provision(HistoryId, Term, Config, State) ->
+    assert_valid_history_id(HistoryId),
+    assert_valid_term(Term),
+    #config{} = Config,
+
+    case check_not_provisioned(State) of
+        ok ->
+            Seqno = 1,
+            LogEntry = #log_entry{history_id = HistoryId,
+                                  term = Term,
+                                  seqno = Seqno,
+                                  value = Config},
+
+            ?DEBUG("Provisioning with history ~p. Config:~n~p",
+                   [HistoryId, Config]),
+
+            handle_append(HistoryId, Term, Seqno, [LogEntry], State);
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+is_provisioned(#state{history_id = HistoryId}) ->
+    HistoryId =/= ?NO_HISTORY.
+
+check_not_provisioned(State) ->
+    case is_provisioned(State) of
+        true ->
+            {error, already_provisioned};
+        false ->
+            ok
+    end.
+
+handle_wipe(State) ->
+    NewState = State#state{history_id = ?NO_HISTORY,
+                           term = ?NO_TERM,
+                           term_voted = ?NO_TERM,
+                           config_entry = undefined,
+                           pending_branch = undefined},
+    log_wipe(State),
+    persist_state(NewState),
+    announce_system_state(unprovisioned),
+    ?DEBUG("Wiped successfully", []),
+    {reply, ok, NewState}.
+
+handle_establish_term(HistoryId, Term, Position, State) ->
+    assert_valid_history_id(HistoryId),
+    assert_valid_term(Term),
+
+    case check_establish_term(HistoryId, Term, Position, State) of
+        ok ->
+            NewState = State#state{term = Term},
+            persist_state(NewState),
+            announce_metadata(NewState),
+            ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
+            {reply, {ok, state2metadata(State)}, NewState};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_establish_term(HistoryId, Term, Position, State) ->
+    ?CHECK(check_history_id(HistoryId, State),
+           check_later_term(Term, State),
+           check_peer_current(Position, State)).
+
+check_later_term(Term, #state{term = CurrentTerm}) ->
+    case term_number(Term) > term_number(CurrentTerm) of
+        true ->
+            ok;
+        false ->
+            {error, {conflicting_term, CurrentTerm}}
+    end.
+
+check_peer_current(Position, State) ->
+    #state{term_voted = OurTermVoted,
+           high_seqno = OurHighSeqno} = State,
+    OurPosition = {OurTermVoted, OurHighSeqno},
+    case compare_positions(Position, OurPosition) of
+        lt ->
+            {error, {behind, OurPosition}};
+        _ ->
+            ok
+    end.
+
+handle_ensure_term(HistoryId, Term, State) ->
+    case ?CHECK(check_history_id(HistoryId, State),
+                check_not_earlier_term(Term, State)) of
+        ok ->
+            {reply, {ok, state2metadata(State)}, State};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+handle_append(HistoryId, Term, CommittedSeqno, Entries, State) ->
+    assert_valid_history_id(HistoryId),
+    assert_valid_term(Term),
+
+    case check_append(HistoryId, Term, CommittedSeqno, Entries, State) of
+        {ok, Info} ->
+            complete_append(HistoryId, Term, Info, State);
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+maybe_promote_config(#state{committed_seqno = CommittedSeqno,
+                            config_entry = ConfigEntry} = State) ->
+    case ConfigEntry =:= undefined orelse
+        ConfigEntry#log_entry.seqno > CommittedSeqno of
+        true ->
+            State;
+        false ->
+            State#state{committed_config_entry = ConfigEntry}
+    end.
+
+maybe_demote_config(#state{committed_seqno = CommittedSeqno,
+                           config_entry = ConfigEntry} = State) ->
+    case ConfigEntry =:= undefined
+        orelse ConfigEntry#log_entry.seqno =< CommittedSeqno of
+        true ->
+            State;
+        false ->
+            #state{committed_config_entry = CommittedConfigEntry} = State,
+            State#state{config_entry = CommittedConfigEntry}
+    end.
+
+extract_latest_config(Entries, Default) ->
+    lists:foldl(
+      fun (Entry, Acc) ->
+              case Entry#log_entry.value of
+                  #config{} ->
+                      Entry;
+                  #transition{} ->
+                      Entry;
+                  #rsm_command{} ->
+                      Acc
+              end
+      end, Default, Entries).
+
+maybe_update_config(Entries,
+                    #state{committed_seqno = CommittedSeqno} = State) ->
+    %% Promote current pending config to committed state if necessary.
+    NewState0 = maybe_promote_config(State),
+    {CommittedEntries, PendingEntries} =
+        lists:splitwith(fun (#log_entry{seqno = Seqno}) ->
+                                Seqno =< CommittedSeqno
+                        end, Entries),
+
+    #state{committed_config_entry = CommittedConfig} = NewState0,
+    NewCommittedConfig =
+        extract_latest_config(CommittedEntries, CommittedConfig),
+    NewEffectiveConfig =
+        extract_latest_config(PendingEntries, NewCommittedConfig),
+
+
+    State#state{config_entry = NewEffectiveConfig,
+                committed_config_entry = NewCommittedConfig}.
+
+complete_append(HistoryId, Term, Info,
+                #state{committed_seqno = OurCommittedSeqno} = State) ->
+    #{entries := Entries,
+      high_seqno := NewHighSeqno,
+      committed_seqno := NewCommittedSeqno,
+      truncate_uncommitted := TruncateUncommitted} = Info,
+
+    NewState0 =
+        case TruncateUncommitted of
+            true ->
+                %% TODO: this MUST happen atomically with the following append
+                log_truncate(OurCommittedSeqno + 1, State),
+                maybe_demote_config(State);
+            false ->
+                State
+        end,
+
+    log_append(Entries, NewState0),
+
+    NewState1 = NewState0#state{history_id = HistoryId,
+                                term = Term,
+                                term_voted = Term,
+                                committed_seqno = NewCommittedSeqno,
+                                high_seqno = NewHighSeqno,
+                                pending_branch = undefined},
+    NewState = maybe_update_config(Entries, NewState1),
+    persist_state(NewState),
+
+    %% Announce if we got provisioned.
+    case is_provisioned(State) of
+        true ->
+            ok;
+        false ->
+            announce_system_state(provisioned)
+    end,
+
+    announce_metadata(NewState),
+
+    ?DEBUG("Appended entries.~n"
+           "History id: ~p~n"
+           "Term: ~p~n"
+           "Entries: ~p~n"
+           "Config: ~p",
+           [HistoryId, Term, Entries, NewState#state.config_entry]),
+
+    {reply, ok, NewState}.
+
+check_append(HistoryId, Term, CommittedSeqno, Entries, State) ->
+    ?CHECK(check_history_id(HistoryId, State),
+           check_not_earlier_term(Term, State),
+           check_append_obsessive(Term, CommittedSeqno, Entries, State)).
+
+check_append_obsessive(Term, CommittedSeqno, Entries, State) ->
+    case get_entries_seqnos(Entries, State) of
+        {ok, StartSeqno, EndSeqno} ->
+            #state{term_voted = OurTermVoted,
+                   high_seqno = OurHighSeqno,
+                   committed_seqno = OurCommittedSeqno} = State,
+
+            {SafeHighSeqno, Truncate} =
+                case Term =:= OurTermVoted of
+                    true ->
+                        {OurHighSeqno, false};
+                    false ->
+                        %% Last we received any entries was in a different
+                        %% term. So any uncommitted entries might actually be
+                        %% from alternative histories and they need to be
+                        %% truncated.
+                        {OurCommittedSeqno, true}
+                end,
+
+            case StartSeqno > SafeHighSeqno + 1 of
+                true ->
+                    %% TODO: add more information here?
+
+                    %% There's a gap between what entries we've got and what
+                    %% we were given. So the leader needs to send us more.
+                    {error, {missing_entries, state2metadata(State)}};
+                false ->
+                    case EndSeqno < SafeHighSeqno of
+                        true ->
+                            %% Currently, this should never happen, because
+                            %% proposer always sends all history it has. But
+                            %% conceptually it doesn't have to be this way. If
+                            %% proposer starts chunking appends into
+                            %% sub-appends in the future, in combination with
+                            %% message loss, this case will be normal. But
+                            %% consider this a protocol error for now.
+                            {error,
+                             {protocol_error,
+                              {stale_proposer, EndSeqno, SafeHighSeqno}}};
+                        false ->
+                            case check_committed_seqno(Term, CommittedSeqno,
+                                                       EndSeqno, State) of
+                                {ok, FinalCommittedSeqno} ->
+                                    %% TODO: validate that the entries we're
+                                    %% dropping are the same that we've got?
+                                    FinalEntries =
+                                        lists:dropwhile(
+                                          fun (#log_entry{seqno = Seqno}) ->
+                                                  Seqno =< SafeHighSeqno
+                                          end, Entries),
+
+                                    {ok,
+                                     #{entries => FinalEntries,
+                                       high_seqno => EndSeqno,
+                                       committed_seqno => FinalCommittedSeqno,
+                                       truncate_uncommitted => Truncate}};
+                                {error, _} = Error ->
+                                    Error
+                            end
+                    end
+            end;
+        {error, {malformed, Entry}} ->
+            %% TODO: remove logging of the entries
+            ?ERROR("Received an ill-formed append request in term ~p.~n"
+                   "Stumbled upon this entry: ~p~n"
+                   "All entries:~n~p",
+                   [Term, Entry, Entries]),
+            {error, {protocol_error,
+                     {malformed_append, Entry, Entries}}}
+
+    end.
+
+get_entries_seqnos([], #state{high_seqno = HighSeqno}) ->
+    {ok, HighSeqno + 1, HighSeqno};
+get_entries_seqnos([_|_] = Entries, _State) ->
+    get_entries_seqnos(Entries, undefined, undefined).
+
+get_entries_seqnos([], StartSeqno, EndSeqno) ->
+    {ok, StartSeqno, EndSeqno};
+get_entries_seqnos([Entry|Rest], StartSeqno, EndSeqno) ->
+    Seqno = Entry#log_entry.seqno,
+
+    if
+        EndSeqno =:= undefined ->
+            get_entries_seqnos(Rest, Seqno, Seqno);
+        Seqno =:= EndSeqno + 1 ->
+            get_entries_seqnos(Rest, StartSeqno, Seqno);
+        true ->
+            {error, {malformed, Entry}}
+    end.
+
+check_committed_seqno(Term, CommittedSeqno, HighSeqno, State) ->
+    ?CHECK(check_committed_seqno_known(CommittedSeqno, HighSeqno, State),
+           check_committed_seqno_rollback(Term, CommittedSeqno, State)).
+
+check_committed_seqno_rollback(Term, CommittedSeqno,
+                               #state{term_voted = OurTermVoted,
+                                      committed_seqno = OurCommittedSeqno}) ->
+    case CommittedSeqno < OurCommittedSeqno of
+        true ->
+            case Term =:= OurTermVoted of
+                true ->
+                    ?ERROR("Refusing to lower our committed "
+                           "seqno ~p to ~p in term ~p. "
+                           "This should never happen.",
+                           [OurCommittedSeqno, CommittedSeqno, Term]),
+                    {error, {protocol_error,
+                             {committed_seqno_rollback,
+                              CommittedSeqno, OurCommittedSeqno}}};
+                false ->
+                    %% If this append establishes a new term, it's possible
+                    %% that the leader doesn't know the latest committed
+                    %% seqno. This is normal, in a sense that the leader will
+                    %% re-commit the same value again. The receiving peer will
+                    %% keep its committed seqno unchanged.
+                    ?INFO("Leader in term ~p believes seqno ~p "
+                          "to be committed, "
+                          "while we know that ~p was committed in term ~p. "
+                          "Keeping our committed seqno intact.",
+                          [Term, CommittedSeqno,
+                           OurCommittedSeqno, OurTermVoted]),
+                    {ok, OurCommittedSeqno}
+            end;
+        false ->
+            {ok, CommittedSeqno}
+    end.
+
+check_committed_seqno_known(CommittedSeqno, HighSeqno, State) ->
+    case CommittedSeqno > HighSeqno of
+        true ->
+            %% TODO: add more information here?
+            {error, {missing_entries, state2metadata(State)}};
+        false ->
+            ok
+    end.
+
+check_not_earlier_term(Term, #state{term = CurrentTerm}) ->
+    case term_number(Term) >= term_number(CurrentTerm) of
+        true ->
+            ok;
+        false ->
+            {error, {conflicting_term, CurrentTerm}}
+    end.
+
+handle_store_branch(Branch, State) ->
+    assert_valid_branch(Branch),
+
+    case check_compatible_branch(Branch, State) of
+        ok ->
+            %% NOTE: not updating history id here, so that if the node
+            %% is unprovisioned, it gets back to that state upon
+            %% rollback
+            %%
+            %% TODO: think more if we need to support
+            %% branching that involves unprovisioned nodes
+            NewState = State#state{pending_branch = Branch},
+            persist_state(NewState),
+            announce_metadata(NewState),
+
+            ?DEBUG("Stored a branch record:~n~p", [Branch]),
+
+            %% TODO: returing all metadata here for now, but that might be an
+            %% overkill.
+            {reply, {ok, state2metadata(State)}, NewState};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_compatible_branch(NewBranch, #state{pending_branch = PendingBranch}) ->
+    case PendingBranch =:= undefined of
+        true ->
+            ok;
+        false ->
+            PendingId = PendingBranch#branch.history_id,
+            NewId = NewBranch#branch.history_id,
+
+            case PendingId =:= NewId of
+                true ->
+                    ok;
+                false ->
+                    {error, {concurrent_branch, PendingBranch}}
+            end
+    end.
+
+handle_undo_branch(BranchId, State) ->
+    assert_valid_history_id(BranchId),
+    case check_branch_id(BranchId, State) of
+        ok ->
+            NewState = State#state{pending_branch = undefined},
+            persist_state(NewState),
+            announce_metadata(NewState),
+
+            ?DEBUG("Undid branch ~p", [BranchId]),
+            {reply, ok, NewState};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_branch_id(BranchId, #state{pending_branch = OurBranch}) ->
+    case OurBranch of
+        undefined ->
+            {error, no_branch};
+        #branch{history_id = OurBranchId} ->
+            case OurBranchId =:= BranchId of
+                true ->
+                    ok;
+                false ->
+                    {error, {bad_branch, OurBranch}}
+            end
+    end.
+
+check_history_id(HistoryId, State) ->
+    OurHistoryId = get_history_id_int(State),
+    %% TODO: I might need to explicitly prime the history instead of letting
+    %% the ?NO_HISTORY be overwritten by any history. That prevents situations
+    %% where a node is removed and reinitializes itself with no history. But
+    %% some stale and rogue coordinator still in the cluster establishes a
+    %% term with the remove node and essentially screws with its state.
+    case OurHistoryId =:= ?NO_HISTORY orelse HistoryId =:= OurHistoryId of
+        true ->
+            ok;
+        false ->
+            {error, {history_mismatch, OurHistoryId}}
+    end.
+
+%% TODO: get rid of this once #state{} doesn't duplicate #metadata{}.
+get_history_id_int(#state{history_id = CommittedHistoryId,
+                          pending_branch = undefined}) ->
+    CommittedHistoryId;
+get_history_id_int(#state{pending_branch =
+                              #branch{history_id = PendingHistoryId}}) ->
+    PendingHistoryId.
+
+check_same_term(Term, #state{term = OurTerm}) ->
+    case Term =:= OurTerm of
+        true ->
+            ok;
+        false ->
+            {error, {conflicting_term, OurTerm}}
+    end.
+
+check_log_range(StartSeqno, EndSeqno, #state{high_seqno = HighSeqno}) ->
+    case StartSeqno > HighSeqno
+        orelse EndSeqno > HighSeqno
+        orelse StartSeqno > EndSeqno of
+        true ->
+            {error, bad_range};
+        false ->
+            ok
+    end.
+
+persist_state(State) ->
+    ok.
+
+restore_state() ->
+    #state{history_id = ?NO_HISTORY,
+           term = ?NO_TERM,
+           term_voted = ?NO_TERM,
+           high_seqno = ?NO_SEQNO,
+           committed_seqno = ?NO_SEQNO,
+           config_entry = undefined,
+           committed_config_entry = undefined,
+           pending_branch = undefined,
+           log_tab = log_create()}.
+
+assert_valid_history_id(HistoryId) ->
+    true = is_binary(HistoryId).
+
+assert_valid_term(Term) ->
+    {TermNumber, _TermLeader} = Term,
+    true = is_integer(TermNumber).
+
+assert_valid_branch(#branch{history_id = HistoryId,
+                            coordinator = Coordinator}) ->
+    assert_valid_history_id(HistoryId),
+    assert_valid_peer(Coordinator).
+
+assert_valid_peer(_Coordinator) ->
+    %% TODO
+    ok.
+
+announce_metadata(State) ->
+    chronicle_events:sync_notify({metadata, state2metadata(State)}).
+
+announce_system_state(SystemState) ->
+    chronicle_events:sync_notify({system_state, SystemState}).
+
+log_create() ->
+    ets:new(log, [protected, ordered_set, {keypos, #log_entry.seqno}]).
+
+log_append(Entries, #state{log_tab = Tab}) ->
+    true = ets:insert_new(Tab, Entries).
+
+log_range(StartSeqno, EndSeqno, #state{log_tab = Tab}) ->
+    MatchSpec = ets:fun2ms(fun (#log_entry{seqno = EntrySeqno} = Entry)
+                                 when EntrySeqno >= StartSeqno,
+                                      EntrySeqno =< EndSeqno ->
+                                   Entry
+                           end),
+    ets:select(Tab, MatchSpec).
+
+log_truncate(Seqno, #state{committed_seqno = CommittedSeqno, log_tab = Tab}) ->
+    %% Assert we're not truncating anything committed.
+    true = (Seqno > CommittedSeqno),
+
+    MatchSpec = ets:fun2ms(fun (#log_entry{seqno = EntrySeqno})
+                                 when EntrySeqno >= Seqno ->
+                                   true
+                           end),
+    ets:select_delete(Tab, MatchSpec).
+
+log_wipe(#state{log_tab = Tab}) ->
+    ets:delete_all_objects(Tab).

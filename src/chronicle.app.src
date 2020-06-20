@@ -1,0 +1,9 @@
+{application,chronicle,
+             [{description,"Chronicle"},
+              {vsn,"0.0.1"},
+              {licenses,["Apache"]},
+              {links,[{"github","https://github.com/couchbase/chronicle"}]},
+              {modules,[]},
+              {registered,[]},
+              {applications,[kernel,stdlib]},
+              {mod,{chronicle_app,[]}}]}.
