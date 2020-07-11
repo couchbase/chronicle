@@ -32,10 +32,11 @@ start_link() ->
 
 start_rsm(Name, Module, Args) ->
     Spec = #{id => Name,
-             start => {chronicle_rsm, start_link, [Name, Module, Args]},
+             start => {chronicle_single_rsm_sup,
+                       start_link,
+                       [Name, Module, Args]},
              restart => permanent,
-             shutdown => 5000,
-             type => worker},
+             type => supervisor},
     case supervisor:start_child(?SERVER, Spec) of
         {ok, _} ->
             ok;

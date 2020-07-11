@@ -15,14 +15,14 @@
 %%
 -module(chronicle).
 
--export_type([uuid/0, peer_name/0, peer_id/0,
-              leader_term/0, seqno/0, history_id/0, revision/0]).
+-export_type([uuid/0, peer/0, history_id/0,
+              leader_term/0, seqno/0, peer_position/0, revision/0]).
 
 -type uuid() :: binary().
--type peer_name() :: atom().
--type peer_id() :: {peer_name(), uuid()}.
+-type peer() :: atom().
 -type history_id() :: binary().
 
--type leader_term() :: {pos_integer(), peer_id()}.
+-type leader_term() :: {pos_integer(), peer()}.
 -type seqno() :: pos_integer().
+-type peer_position() :: {TermVoted :: leader_term(), HighSeqno :: seqno()}.
 -type revision() :: {history_id(), seqno()}.

@@ -28,6 +28,8 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
+-define(TABLE, ?ETS_TABLE(?MODULE)).
+
 -record(leader, { history_id, term }).
 -record(follower, { leader, history_id, term }).
 -record(observer, {}).
@@ -50,7 +52,14 @@ start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
 get_leader() ->
-    gen_statem:call(?SERVER, get_leader).
+    case ets:lookup(?TABLE, leader) of
+        [] ->
+            {error, no_leader};
+        [{leader, no_leader}] ->
+            {error, no_leader};
+        [{leader, LeaderInfo}] ->
+            {ok, LeaderInfo}
+    end.
 
 announce_leader() ->
     gen_statem:cast(?SERVER, announce_leader).
@@ -77,13 +86,14 @@ init([]) ->
               end
       end),
 
+    ets:new(?TABLE, [named_table, protected, {read_concurrency, true}]),
     {ok, Metadata} = chronicle_agent:get_metadata(),
 
     %% TODO
     {ok, #observer{}, metadata2data(Metadata)}.
 
 handle_event(enter, OldState, State, Data) ->
-    maybe_announce_leader(OldState, State),
+    maybe_publish_leader(OldState, State),
     LeaveData = handle_state_leave(OldState, Data),
     handle_state_enter(State, LeaveData);
 handle_event(info, {chronicle_event, Event}, State, Data) ->
@@ -101,8 +111,6 @@ handle_event(internal, {state_timer, send_heartbeat}, State, Data) ->
     handle_send_heartbeat(State, Data);
 handle_event(cast, announce_leader, State, Data) ->
     handle_announce_leader(State, Data);
-handle_event({call, From}, get_leader, State, Data) ->
-    handle_get_leader(From, State, Data);
 handle_event({call, From},
              {request_vote, Candidate, HistoryId, Position}, State, Data) ->
     handle_request_vote(Candidate, HistoryId, Position, From, State, Data);
@@ -114,7 +122,7 @@ handle_event(Type, Event, _State, _Data) ->
 
 terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data),
-    announce_leader(no_leader).
+    publish_leader(no_leader).
 
 %% internal
 handle_state_leave(OldState, #data{election_worker = Worker} = Data) ->
@@ -175,15 +183,15 @@ get_heartbeat_interval() ->
 
 is_interesting_event({metadata, _Metadata}) ->
     true;
-is_interesting_event({term_failed, _HistoryId, _Term}) ->
+is_interesting_event({term_finished, _HistoryId, _Term}) ->
     true;
 is_interesting_event(_) ->
     false.
 
 handle_chronicle_event({metadata, Metadata}, State, Data) ->
     handle_new_metadata(Metadata, State, Data);
-handle_chronicle_event({term_failed, HistoryId, Term}, State, Data) ->
-    handle_term_failed(HistoryId, Term, State, Data).
+handle_chronicle_event({term_finished, HistoryId, Term}, State, Data) ->
+    handle_term_finished(HistoryId, Term, State, Data).
 
 handle_new_metadata(Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),
@@ -245,13 +253,13 @@ metadata2data(Metadata, Data) ->
     Data#data{metadata = Metadata,
               peers = Peers -- [?PEER()]}.
 
-handle_term_failed(HistoryId, Term, State, Data) ->
+handle_term_finished(HistoryId, Term, State, Data) ->
     case check_is_leader(HistoryId, Term, State) of
         ok ->
-            ?INFO("Term ~p has failed. Stepping down.", [Term]),
+            ?INFO("Term ~p has finished. Stepping down.", [Term]),
             {next_state, #observer{}, Data};
         {error, _} = Error ->
-            ?DEBUG("Received stale note_term_failed message: ~p", [Error]),
+            ?DEBUG("Received stale term_finished message: ~p", [Error]),
             keep_state_and_data
     end.
 
@@ -316,17 +324,6 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
             ?INFO("Election failed: ~p", [Error]),
             {next_state, #observer{}, NewData}
     end.
-
-handle_get_leader(From, State, _Data) ->
-    Reply =
-        case state_leader(State) of
-            no_leader ->
-                {error, no_leader};
-            LeaderInfo ->
-                {ok, LeaderInfo}
-        end,
-
-    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case ?CHECK(check_history_id(HistoryId, Data),
@@ -424,10 +421,10 @@ send_msg(Peer, Msg) ->
     ?SEND(?SERVER(Peer), Msg, [nosuspend, noconnect]).
 
 handle_announce_leader(State, _Data) ->
-    announce_leader(state_leader(State)),
+    do_announce_leader(state_leader(State)),
     keep_state_and_data.
 
-maybe_announce_leader(OldState, State) ->
+maybe_publish_leader(OldState, State) ->
     OldLeaderInfo = state_leader(OldState),
     NewLeaderInfo = state_leader(State),
 
@@ -435,7 +432,7 @@ maybe_announce_leader(OldState, State) ->
         true ->
             ok;
         false ->
-            announce_leader(NewLeaderInfo)
+            publish_leader(NewLeaderInfo)
     end.
 
 check_history_id(HistoryId, Data) ->
@@ -541,7 +538,11 @@ state_leader(State) ->
             no_leader
     end.
 
-announce_leader(LeaderInfo) ->
+publish_leader(LeaderInfo) ->
+    ets:insert(?TABLE, {leader, LeaderInfo}),
+    do_announce_leader(LeaderInfo).
+
+do_announce_leader(LeaderInfo) ->
     chronicle_events:notify({leader, LeaderInfo}).
 
 get_history_id(#data{metadata = Metadata}) ->

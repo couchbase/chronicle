@@ -31,6 +31,14 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
+-define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
+
+%% Used to indicate that a function will send a message with the provided Tag
+%% back to the caller when the result is ready. And the result type is
+%% _ReplyType. This is entirely useless for dializer, but is usefull for
+%% documentation purposes.
+-type replies(Tag, _ReplyType) :: Tag.
+
 %% TODO: get rid of the duplication between #state{} and #metadata{}.
 -record(state, { history_id,
                  term,
@@ -46,9 +54,11 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
+-spec monitor(chronicle:peer()) -> reference().
 monitor(Peer) ->
     chronicle_utils:monitor_process(?SERVER(Peer)).
 
+-spec get_system_state() -> provisioned | unprovisioned.
 get_system_state() ->
     case get_metadata() of
         {ok, _} ->
@@ -59,9 +69,14 @@ get_system_state() ->
             exit(Error)
     end.
 
+-type get_metadata_result() :: {ok, #metadata{}} |
+                               {error, not_provisioned}.
+
+-spec get_metadata() -> get_metadata_result().
 get_metadata() ->
     get_metadata(?PEER()).
 
+-spec get_metadata(chronicle:peer()) -> get_metadata_result().
 get_metadata(Peer) ->
     gen_server:call(?SERVER(Peer), get_metadata).
 
@@ -71,14 +86,7 @@ get_log(Peer) ->
 get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
     gen_server:call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).
 
-get_history_id() ->
-    case get_metadata() of
-        {ok, Metadata} ->
-            {ok, get_history_id(Metadata)};
-        Error ->
-            Error
-    end.
-
+-spec get_history_id(#metadata{}) -> chronicle:history_id().
 get_history_id(#metadata{history_id = CommittedHistoryId,
                          pending_branch = undefined}) ->
     CommittedHistoryId;
@@ -88,6 +96,10 @@ get_history_id(#metadata{pending_branch =
 
 %% TODO: should only take the config. The rest should be figured out by the
 %% acceptor?
+-spec provision(chronicle:history_id(),
+                chronicle:leader_term(),
+                #config{}) ->
+          ok | {error, already_provisioned}.
 provision(HistoryId, Term, Config) ->
     case gen_server:call(?SERVER, {provision, HistoryId, Term, Config}) of
         ok ->
@@ -96,6 +108,7 @@ provision(HistoryId, Term, Config) ->
             Other
     end.
 
+-spec wipe() -> ok.
 wipe() ->
     case gen_server:call(?SERVER, wipe) of
         ok ->
@@ -104,21 +117,78 @@ wipe() ->
             Other
     end.
 
+-type establish_term_result() ::
+        {ok, #metadata{}} |
+        {error, establish_term_error()}.
+
+-type establish_term_error() ::
+        {history_mismatch, chronicle:history_id()} |
+        {conflicting_term, chronicle:leader_term()} |
+        {behind, chronicle:peer_position()}.
+
+-spec establish_local_term(chronicle:history_id(),
+                           chronicle:leader_term()) ->
+          establish_term_result().
+establish_local_term(HistoryId, Term) ->
+    gen_server:call(?SERVER, {establish_term, HistoryId, Term},
+                    ?ESTABLISH_LOCAL_TERM_TIMEOUT).
+
+-spec establish_term(chronicle:peer(),
+                     Opaque,
+                     chronicle:history_id(),
+                     chronicle:leader_term(),
+                     chronicle:peer_position()) ->
+          replies(Opaque, establish_term_result()).
 establish_term(Peer, Opaque, HistoryId, Term, Position) ->
     %% TODO: don't abuse gen_server calls here and everywhere else
     call_async(?SERVER(Peer), Opaque,
                {establish_term, HistoryId, Term, Position}).
 
+-type ensure_term_result() ::
+        {ok, #metadata{}} |
+        {error, ensure_term_error()}.
+
+-type ensure_term_error() ::
+        {history_mismatch, chronicle:history_id()} |
+        {conflicting_term, chronicle:leader_term()}.
+
+-spec ensure_term(chronicle:peer(),
+                  Opaque,
+                  chronicle:history_id(),
+                  chronicle:leader_term()) ->
+          replies(Opaque, ensure_term_result()).
 ensure_term(Peer, Opaque, HistoryId, Term) ->
     call_async(?SERVER(Peer), Opaque, {ensure_term, HistoryId, Term}).
 
+-type append_result() :: ok | {error, append_error()}.
+-type append_error() ::
+        {history_mismatch, chronicle:history_id()} |
+        {conflicting_term, chorincle:leader_term()} |
+        {missing_entries, #metadata{}} |
+        {protocol_error, any()}.
+
+-spec append(chronicle:peer(),
+             Opaque,
+             chronicle:history_id(),
+             chronicle:leader_term(),
+             chronicle:seqno(),
+             [#log_entry{}]) ->
+          replies(Opaque, append_result()).
 append(Peer, Opaque, HistoryId, Term, CommittedSeqno, Entries) ->
     call_async(?SERVER(Peer), Opaque,
                {append, HistoryId, Term, CommittedSeqno, Entries}).
 
+-spec store_branch(chronicle:peer(), #branch{}) ->
+          {ok, #metadata{}} |
+          {error, {concurrent_branch, OurBranch::#branch{}}}.
 store_branch(Peer, Branch) ->
     gen_server:call(?SERVER(Peer), {store_branch, Branch}).
 
+
+-spec undo_branch(chronicle:peer(), chronicle:history_id()) ->
+          ok | {error, Error} when
+      Error :: no_branch |
+               {bad_branch, OurBranch::#branch{}}.
 undo_branch(Peer, BranchId) ->
     gen_server:call(?SERVER(Peer), {undo_branch, BranchId}).
 
@@ -136,6 +206,12 @@ handle_call({provision, HistoryId, Term, Config}, _From, State) ->
     handle_provision(HistoryId, Term, Config, State);
 handle_call(wipe, _From, State) ->
     handle_wipe(State);
+handle_call({establish_term, HistoryId, Term}, _From,
+            #state{term_voted = TermVoted, high_seqno = HighSeqno} = State) ->
+
+    %% TODO: consider simply skipping the position check for this case
+    Position = {TermVoted, HighSeqno},
+    handle_establish_term(HistoryId, Term, Position, State);
 handle_call({establish_term, HistoryId, Term, Position}, _From, State) ->
     handle_establish_term(HistoryId, Term, Position, State);
 handle_call({ensure_term, HistoryId, Term}, _From, State) ->
@@ -239,7 +315,9 @@ handle_wipe(State) ->
     NewState = State#state{history_id = ?NO_HISTORY,
                            term = ?NO_TERM,
                            term_voted = ?NO_TERM,
+                           high_seqno = ?NO_SEQNO,
                            config_entry = undefined,
+                           committed_config_entry = undefined,
                            pending_branch = undefined},
     log_wipe(State),
     persist_state(NewState),

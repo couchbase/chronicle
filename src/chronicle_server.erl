@@ -33,6 +33,7 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 -define(COMMANDS_BATCH_AGE, 20).
+-define(SYNCS_BATCH_AGE, 5).
 
 -record(follower, {}).
 -record(leader, { history_id, term }).
@@ -40,8 +41,11 @@
 %% TODO: reconsider the decision to have proposer run in a separate process
 %% TOOD: this record contains fields only used when the state is leader
 -record(data, { proposer,
-                commands_pending,
-                commands_in_flight }).
+                proposer_ready,
+                term_high_seqno,
+                commands_batch,
+                syncs_batch,
+                requests_in_flight }).
 
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -60,11 +64,17 @@ rsm_command(HistoryId, Term, RSMName, CommandId, Command) ->
     gen_statem:cast(?SERVER, {rsm_command,
                               HistoryId, Term, RSMName, CommandId, Command}).
 
+announce_term() ->
+    gen_statem:cast(?SERVER, announce_term).
+
 %% Meant to only be used by chronicle_proposer.
-reply_commands(Pid, Replies0) ->
+proposer_ready(Pid, HistoryId, Term, HighSeqno) ->
+    Pid ! {proposer_msg, {proposer_ready, HistoryId, Term, HighSeqno}}.
+
+reply_requests(Pid, Replies0) ->
     %% Ignore replies to commands that didn't request a reply.
     Replies = [Reply || {Ref, _} = Reply <- Replies0, Ref =/= noreply],
-    Pid ! {proposer_msg, {reply_commands, Replies}}.
+    Pid ! {proposer_msg, {reply_requests, Replies}}.
 
 %% gen_server callbacks
 callback_mode() ->
@@ -97,20 +107,24 @@ handle_event(info, {'EXIT', Pid, Reason}, State, Data) ->
     handle_process_exit(Pid, Reason, State, Data);
 handle_event(info, {proposer_msg, Msg}, #leader{} = State, Data) ->
     handle_proposer_msg(Msg, State, Data);
-handle_event(info, {batch_ready, commands}, State, Data) ->
-    handle_batch_ready(State, Data);
-handle_event({call, From}, {cas_config, _, _} = Command, State, Data) ->
-    handle_leader_command(Command, any, {from, From}, State, Data);
+handle_event(info, {batch_ready, BatchField}, State, Data) ->
+    handle_batch_ready(BatchField, State, Data);
+handle_event(cast, announce_term, State, Data) ->
+    handle_announce_term(State, Data);
+handle_event({call, From}, {cas_config, NewConfig, Revision}, State, Data) ->
+    handle_cas_config(NewConfig, Revision, From, State, Data);
 handle_event(cast,
              {rsm_command, HistoryId, Term, RSMName, CommandId, RSMCommand},
              State, Data) ->
     Command = {rsm_command, RSMName, CommandId, RSMCommand},
-    handle_leader_command(Command, {HistoryId, Term}, noreply, State, Data);
+    batch_leader_request(Command, {HistoryId, Term}, noreply,
+                         #data.commands_batch, State, Data);
 handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
     %% TODO: shouldn't be batched, or should be batched separately from RSM
     %% commands
     ReplyTo = {send, Pid, Tag},
-    handle_leader_command(sync_quorum, {HistoryId, Term}, ReplyTo, State, Data);
+    batch_leader_request(sync_quorum, {HistoryId, Term},
+                         ReplyTo, #data.syncs_batch, State, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, {reply, From, nack}};
 handle_event(Type, Event, _State, _Data) ->
@@ -126,7 +140,8 @@ is_interesting_event({leader, _}) ->
 is_interesting_event(_) ->
     false.
 
-handle_state_leave(#leader{}, Data) ->
+handle_state_leave(#leader{} = State, Data) ->
+    announce_term_finished(State),
     cleanup_after_proposer(terminate_proposer(Data));
 handle_state_leave(_OldState, Data) ->
     Data.
@@ -134,11 +149,18 @@ handle_state_leave(_OldState, Data) ->
 handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
     {ok, Proposer} = chronicle_proposer:start_link(HistoryId, Term),
 
-    undefined = Data#data.commands_pending,
-    CommandsBatch = chronicle_utils:make_batch(commands, ?COMMANDS_BATCH_AGE),
+    undefined = Data#data.commands_batch,
+    undefined = Data#data.syncs_batch,
+
+    CommandsBatch =
+        chronicle_utils:make_batch(#data.commands_batch, ?COMMANDS_BATCH_AGE),
+    SyncsBatch =
+        chronicle_utils:make_batch(#data.syncs_batch, ?SYNCS_BATCH_AGE),
     Data#data{proposer = Proposer,
-              commands_pending = CommandsBatch,
-              commands_in_flight = #{}};
+              proposer_ready = false,
+              commands_batch = CommandsBatch,
+              syncs_batch = SyncsBatch,
+              requests_in_flight = #{}};
 handle_state_enter(_State, Data) ->
     Data.
 
@@ -159,82 +181,154 @@ handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
     case Pid =:= Proposer of
         true ->
             ?INFO("Proposer terminated with reason ~p", [Reason]),
-            announce_term_failed(State),
-            {next_state, #follower{}, Data#data{proposer = undefined}};
+            {next_state, #follower{}, Data#data{proposer = undefined,
+                                                proposer_ready = false,
+                                                term_high_seqno = undefined}};
         false ->
             {stop, {linked_process_died, Pid, Reason}}
     end.
 
-handle_proposer_msg({reply_commands, Replies}, State, Data) ->
-    handle_reply_commands(Replies, State, Data).
+handle_proposer_msg({proposer_ready, HistoryId, Term, HighSeqno},
+                    State, Data) ->
+    handle_proposer_ready(HistoryId, Term, HighSeqno, State, Data);
+handle_proposer_msg({reply_requests, Replies}, State, Data) ->
+    handle_reply_requests(Replies, State, Data).
 
-handle_reply_commands(Replies, #leader{},
-                      #data{commands_in_flight = InFlight} = Data) ->
+handle_proposer_ready(HistoryId, Term, HighSeqno,
+                      #leader{history_id = HistoryId, term = Term} = State,
+                      #data{proposer_ready = false} = Data) ->
+    NewData = Data#data{proposer_ready = true,
+                        term_high_seqno = HighSeqno},
+    announce_term(State, NewData),
+    {keep_state, NewData}.
+
+handle_reply_requests(Replies, #leader{},
+                      #data{requests_in_flight = InFlight} = Data) ->
     NewInFlight =
         lists:foldl(
           fun ({Ref, Reply}, Acc) ->
                   {ReplyTo, NewAcc} = maps:take(Ref, Acc),
-                  reply_command(ReplyTo, Reply),
+                  reply_request(ReplyTo, Reply),
                   NewAcc
           end, InFlight, Replies),
 
-    {keep_state, Data#data{commands_in_flight = NewInFlight}}.
+    {keep_state, Data#data{requests_in_flight = NewInFlight}}.
 
-reply_command(ReplyTo, Reply) ->
+reply_request(ReplyTo, Reply) ->
     case ReplyTo of
         noreply ->
             ok;
         {from, From} ->
             gen_statem:reply(From, Reply);
         {send, Pid, Tag} ->
-            Pid ! {Tag, Reply}
+            Pid ! {Tag, Reply};
+        {many, ReplyTos} ->
+            lists:foreach(
+              fun (To) ->
+                      reply_request(To, Reply)
+              end, ReplyTos)
     end.
 
-handle_leader_command(_Command, _, ReplyTo, #follower{}, _Data) ->
+handle_leader_request(_, ReplyTo, #follower{}, _Fun) ->
     %% TODO
-    reply_command(ReplyTo, {error, not_leader}),
+    reply_request(ReplyTo, {error, not_leader}),
     keep_state_and_data;
-handle_leader_command(Command, HistoryAndTerm, ReplyTo,
+handle_leader_request(HistoryAndTerm, ReplyTo,
                       #leader{history_id = OurHistoryId, term = OurTerm},
-                      #data{commands_pending = Commands} = Data) ->
+                      Fun) ->
     case HistoryAndTerm =:= any
         orelse HistoryAndTerm =:= {OurHistoryId, OurTerm} of
         true ->
-            NewCommands =
-                chronicle_utils:batch_enq({ReplyTo, Command}, Commands),
-            {keep_state, Data#data{commands_pending = NewCommands}};
+            Fun();
         false ->
-            reply_command(ReplyTo, {error, not_leader})
+            reply_request(ReplyTo, {error, not_leader}),
+            keep_state_and_data
     end.
 
-handle_batch_ready(#leader{}, #data{commands_pending = Batch} = Data) ->
-    {Commands, NewBatch} = chronicle_utils:batch_flush(Batch),
-    true = (Commands =/= []),
-    {keep_state,
-     deliver_commands(Commands, Data#data{commands_pending = NewBatch})}.
+batch_leader_request(Req, HistoryAndTerm,
+                     ReplyTo, BatchField, State, Data) ->
+    handle_leader_request(
+      HistoryAndTerm, ReplyTo, State,
+      fun () ->
+              NewData =
+                  update_batch(
+                    BatchField, Data,
+                    fun (Batch) ->
+                            chronicle_utils:batch_enq({ReplyTo, Req}, Batch)
+                    end),
+              {keep_state, NewData}
+      end).
 
-deliver_commands(Commands, #data{proposer = Proposer,
-                                 commands_in_flight = InFlight} = Data) ->
-    {ProcessedCommands, NewInFlight} =
+handle_batch_ready(BatchField, #leader{}, Data) ->
+    {keep_state, deliver_batch(BatchField, Data)}.
+
+update_batch(BatchField, Data, Fun) ->
+    Batch = element(BatchField, Data),
+    NewBatch = Fun(Batch),
+    setelement(BatchField, Data, NewBatch).
+
+deliver_batch(BatchField, Data) ->
+    Batch = element(BatchField, Data),
+    {Requests, NewBatch} = chronicle_utils:batch_flush(Batch),
+    NewData = setelement(BatchField, Data, NewBatch),
+    deliver_requests(Requests, BatchField, NewData).
+
+deliver_requests([], _Batch, Data) ->
+    Data;
+deliver_requests(Requests, Batch, Data) ->
+    case Batch of
+        #data.syncs_batch ->
+            deliver_syncs(Requests, Data);
+        #data.commands_batch ->
+            deliver_commands(Requests, Data)
+    end.
+
+deliver_syncs(Syncs, #data{proposer = Proposer} = Data) ->
+    Ref = make_ref(),
+    chronicle_proposer:sync_quorum(Proposer, Ref),
+
+    {ReplyTos, _} = lists:unzip(Syncs),
+    store_request(Ref, {many, ReplyTos}, Data).
+
+deliver_commands(Commands, #data{proposer = Proposer} = Data) ->
+    %% All rsm commands don't require a reply. So we don't need to store them.
+    BareCommands = [Command || {_From, Command} <- Commands],
+    chronicle_proposer:append_commands(Proposer, BareCommands),
+    Data.
+
+store_request(Ref, ReplyTo, Data) ->
+    store_requests([{Ref, ReplyTo}], Data).
+
+store_requests(Requests, #data{requests_in_flight = InFlight} = Data) ->
+    NewInFlight =
         lists:foldl(
-          fun ({ReplyTo, Command}, {AccCommands, AccInFlight}) ->
-                  case ReplyTo of
-                      noreply ->
-                          %% Since this command doesn't require a
-                          %% reply, don't store it in
-                          %% command_in_flight.
-                          NewAccCommands = [{noreply, Command} | AccCommands],
-                          {NewAccCommands, AccInFlight};
-                      _ ->
-                          Ref = make_ref(),
-                          NewAccCommands = [{Ref, Command} | AccCommands],
-                          NewAccInFlight = AccInFlight#{Ref => ReplyTo},
-                          {NewAccCommands, NewAccInFlight}
-                  end
-          end, {[], InFlight}, Commands),
+          fun ({Ref, ReplyTo}, Acc) ->
+                  true = (ReplyTo =/= noreply),
+                  Acc#{Ref => ReplyTo}
+          end, InFlight, Requests),
 
-    chronicle_proposer:deliver_commands(Proposer, ProcessedCommands),
-    Data#data{commands_in_flight = NewInFlight}.
+    Data#data{requests_in_flight = NewInFlight}.
+
+handle_announce_term(#leader{} = State, #data{proposer_ready = true} = Data) ->
+    announce_term(State, Data),
+    keep_state_and_data;
+handle_announce_term(_State, _Data) ->
+    keep_state_and_data.
+
+handle_cas_config(NewConfig, Revision, From, State, Data) ->
+    ReplyTo = {from, From},
+    handle_leader_request(
+      any, ReplyTo, State,
+      fun () ->
+              NewData = deliver_cas_config(NewConfig, Revision, ReplyTo, Data),
+              {keep_state, NewData}
+      end).
+
+deliver_cas_config(NewConfig, Revision, ReplyTo,
+                   #data{proposer = Proposer} = Data) ->
+    Ref = make_ref(),
+    chronicle_proposer:cas_config(Proposer, Ref, NewConfig, Revision),
+    store_request(Ref, ReplyTo, Data).
 
 terminate_proposer(#data{proposer = Proposer} = Data) ->
     case Proposer =:= undefined of
@@ -245,27 +339,35 @@ terminate_proposer(#data{proposer = Proposer} = Data) ->
             Data#data{proposer = undefined}
     end.
 
-cleanup_after_proposer(#data{commands_pending = PendingBatch,
-                             commands_in_flight = InFlight} = Data) ->
+cleanup_after_proposer(#data{commands_batch = CommandsBatch,
+                             syncs_batch = SyncsBatch,
+                             requests_in_flight = InFlight} = Data) ->
     ?FLUSH({proposer_msg, _}),
-    {PendingCommands, _} = chronicle_utils:batch_flush(PendingBatch),
+    {PendingCommands, _} = chronicle_utils:batch_flush(CommandsBatch),
+    {PendingSyncs, _} = chronicle_utils:batch_flush(SyncsBatch),
     Reply = {error, leader_gone},
 
     lists:foreach(
       fun ({ReplyTo, _Command}) ->
-              reply_command(ReplyTo, Reply)
-      end, PendingCommands),
+              reply_request(ReplyTo, Reply)
+      end, PendingSyncs ++ PendingCommands),
 
     lists:foreach(
       fun ({_Ref, ReplyTo}) ->
-              reply_command(ReplyTo, Reply)
+              reply_request(ReplyTo, Reply)
       end, maps:to_list(InFlight)),
 
-    Data#data{commands_in_flight = #{},
-              commands_pending = undefined}.
+    Data#data{requests_in_flight = #{},
+              syncs_batch = undefined,
+              commands_batch = undefined}.
 
-announce_term_failed(#leader{history_id = HistoryId, term = Term}) ->
-    chronicle_events:notify({term_failed, HistoryId, Term}).
+announce_term(#leader{history_id = HistoryId, term = Term},
+              #data{term_high_seqno = HighSeqno}) ->
+    true = is_integer(HighSeqno),
+    chronicle_events:notify({term, HistoryId, Term, HighSeqno}).
+
+announce_term_finished(#leader{history_id = HistoryId, term = Term}) ->
+    chronicle_events:notify({term_finished, HistoryId, Term}).
 
 -ifdef(TEST).
 
@@ -315,16 +417,36 @@ simple_test__() ->
 
     ok = rpc_node(b,
                   fun () ->
-                          {ok, Rev} = chronicle_kv:set(kv, a, b),
+                          {ok, Rev} = chronicle_kv:add(kv, a, b),
+                          {error, already_exists} = chronicle_kv:add(kv, a, c),
                           ok = chronicle_rsm:sync_revision(kv, Rev, 10000),
                           {ok, b} = chronicle_kv:get(kv, a),
-                          {ok, _} = chronicle_kv:set(kv, a, c),
+                          {ok, Rev2} = chronicle_kv:set(kv, a, c, Rev),
+                          {error, _} = chronicle_kv:set(kv, a, d, Rev),
                           {ok, _} = chronicle_kv:set(kv, b, d),
-                          ok = chronicle_kv:delete(kv, a),
+                          {error, _} = chronicle_kv:delete(kv, a, Rev),
+                          ok = chronicle_kv:delete(kv, a, Rev2),
 
                           ok = chronicle_rsm:sync(kv, leader, 10000),
                           ok = chronicle_rsm:sync(kv, quorum, 10000),
-                          error = chronicle_kv:get(kv, a),
+                          {error, not_found} = chronicle_kv:get(kv, a),
+
+                          {ok, Rev3} = chronicle_kv:transaction(kv, [],
+                                                                [{set, a, 84},
+                                                                 {set, c, 42}]),
+                          {error, {conflict, _}} =
+                              chronicle_kv:transaction(kv,
+                                                       [{a, Rev2}],
+                                                       [{set, a, 1234}]),
+
+                          {ok, Rev4} =
+                              chronicle_kv:transaction(kv,
+                                                       [{a, Rev3}],
+                                                       [{set, a, 1234},
+                                                        {delete, c}]),
+
+                          ok = chronicle_rsm:sync_revision(kv, Rev4, 10000),
+                          {error, not_found} = chronicle_kv:get(kv, c),
 
                           ok
                   end),

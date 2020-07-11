@@ -26,6 +26,7 @@
 
 %% TODO: move these to the config
 -define(ESTABLISH_TERM_TIMEOUT, 10000).
+-define(CHECK_PEERS_INTERVAL, 5000).
 
 -record(data, { parent,
 
@@ -34,13 +35,15 @@
                 term,
                 quorum,
                 peers,
+                machines,
                 config,
                 config_revision,
                 high_seqno,
                 committed_seqno,
 
                 peer_statuses,
-                monitors,
+                monitors_peers,
+                monitors_refs,
 
                 %% Used only when the state is 'establish_term'.
                 %% TODO: consider using different data records for
@@ -52,11 +55,15 @@
                 %% Used when the state is 'proposing'.
                 pending_entries,
                 pending_high_seqno,
-                pending_froms,
-                sync_requests}).
+                sync_requests,
+
+                config_change_from,
+                postponed_config_changes}).
 
 -record(peer_status, { peer,
+                       needs_sync,
                        acked_seqno,
+                       acked_commit_seqno,
                        sent_seqno,
                        sent_commit_seqno }).
 
@@ -69,8 +76,14 @@ start_link(HistoryId, Term) ->
     gen_statem:start_link(?START_NAME(?MODULE),
                           ?MODULE, [Self, HistoryId, Term], []).
 
-deliver_commands(Pid, Commands) ->
-    gen_statem:cast(Pid, {deliver_commands, Commands}).
+sync_quorum(Pid, Ref) ->
+    gen_statem:cast(Pid, {sync_quorum, Ref}).
+
+cas_config(Pid, Ref, NewConfig, Revision) ->
+    gen_statem:cast(Pid, {cas_config, Ref, NewConfig, Revision}).
+
+append_commands(Pid, Commands) ->
+    gen_statem:cast(Pid, {append_commands, Commands}).
 
 %% gen_statem callbacks
 callback_mode() ->
@@ -87,13 +100,14 @@ init([Parent, HistoryId, Term]) ->
                   history_id = HistoryId,
                   term = Term,
                   peer_statuses = PeerStatuses,
-                  monitors = #{},
+                  monitors_peers = #{},
+                  monitors_refs = #{},
                   %% TODO: store votes, failed_votes and peers as sets
                   votes = [],
                   failed_votes = [],
                   pending_entries = queue:new(),
-                  pending_froms = queue:new(),
-                  sync_requests = SyncRequests},
+                  sync_requests = SyncRequests,
+                  postponed_config_changes = []},
 
     {ok, establish_term, Data}.
 
@@ -101,6 +115,9 @@ handle_event(enter, _OldState, NewState, Data) ->
     handle_state_enter(NewState, Data);
 handle_event(state_timeout, establish_term_timeout, State, Data) ->
     handle_establish_term_timeout(State, Data);
+handle_event(info, check_peers, State, Data) ->
+    proposing = State,
+    {keep_state, check_peers(Data)};
 handle_event(info, {{agent_response, Ref, Peer, Request}, Result}, State,
              #data{peers = Peers} = Data) ->
     case lists:member(Peer, Peers) of
@@ -127,8 +144,22 @@ handle_event(info, {nodedown, Peer, Info}, State, Data) ->
     handle_nodedown(Peer, Info, State, Data);
 handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
-handle_event(cast, {deliver_commands, Commands}, State, Data) ->
-    handle_deliver_commands(Commands, State, Data);
+handle_event(cast, _Request, establish_term, _Data) ->
+    %% Postpone till state is proposing.
+    {keep_state_and_data, postpone};
+handle_event(cast, {sync_quorum, Ref}, proposing, Data) ->
+    handle_sync_quorum(Ref, Data);
+handle_event(cast, {cas_config, Ref, NewConfig, Revision} = Request, proposing,
+             #data{postponed_config_changes = Postponed} = Data) ->
+    case is_config_committed(Data) of
+        true ->
+            handle_cas_config(Ref, NewConfig, Revision, Data);
+        false ->
+            NewPostponed = [{cast, Request} | Postponed],
+            {keep_state, Data#data{postponed_config_changes = NewPostponed}}
+    end;
+handle_event(cast, {append_commands, Commands}, proposing, Data) ->
+    handle_append_commands(Commands, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, [{reply, From, nack}]};
 handle_event(Type, Event, _State, _Data) ->
@@ -138,10 +169,11 @@ handle_event(Type, Event, _State, _Data) ->
 %% internal
 handle_state_enter(establish_term,
                    #data{history_id = HistoryId, term = Term} = Data) ->
-    {ok, Metadata} = chronicle_agent:get_metadata(),
-    CurrentHistoryId = chronicle_agent:get_history_id(Metadata),
-    case CurrentHistoryId =:= HistoryId of
-        true ->
+    %% Establish term locally first. This ensures that the metadata we're
+    %% going to be using won't change (unless another nodes starts a higher
+    %% term) between when we get it here and when we get a majority of votes.
+    case chronicle_agent:establish_local_term(HistoryId, Term) of
+        {ok, Metadata} ->
             Peers = get_establish_peers(Metadata),
             Quorum = get_establish_quorum(Metadata),
             LivePeers = chronicle_peers:get_live_peers(Peers),
@@ -160,9 +192,23 @@ handle_state_enter(establish_term,
 
             case is_quorum_feasible(Peers, DeadPeers, Quorum) of
                 true ->
-                    NewData0 = send_establish_term(LivePeers, Metadata, Data),
-                    NewData = NewData0#data{peers = Peers,
+                    OtherPeers = LivePeers -- [?PEER()],
+
+                    %% Send a fake response to update our state with the
+                    %% knowledge that we've established the term
+                    %% locally. Initally, I wasn't planning to use such
+                    %% somewhat questionable approach and instead would update
+                    %% the state here. But if our local peer is the only peer,
+                    %% then we need to transition to propsing state
+                    %% immediately. But brain-dead gen_statem won't let you
+                    %% transition to a different state from a state_enter
+                    %% callback. So here we are.
+                    NewData0 = send_local_establish_term(Metadata, Data),
+                    NewData1 =
+                        send_establish_term(OtherPeers, Metadata, NewData0),
+                    NewData = NewData1#data{peers = Peers,
                                             quorum = Quorum,
+                                            machines = config_machines(Config),
                                             votes = [],
                                             failed_votes = DeadPeers,
                                             config = Config,
@@ -187,20 +233,36 @@ handle_state_enter(establish_term,
                              [Term, HistoryId, Peers, LivePeers, Quorum]),
                     {stop, {error, no_quorum}}
             end;
-        false ->
-            ?DEBUG("History id changed since election. Stepping down.~n"
-                   "Election history id: ~p~n"
-                   "Current history id: ~p",
-                   [HistoryId, CurrentHistoryId]),
-            {stop, {history_changed, HistoryId, CurrentHistoryId}}
+        {error, Error} ->
+            ?DEBUG("Error trying to establish local term. Stepping down.~n"
+                   "History id: ~p~n"
+                   "Term: ~p~n"
+                   "Error: ~p",
+                   [HistoryId, Term, Error]),
+            {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
-handle_state_enter(proposing, Data) ->
-    replicate(Data).
+handle_state_enter(proposing, #data{parent = Parent,
+                                    history_id = HistoryId,
+                                    term = Term,
+                                    high_seqno = HighSeqno} = Data) ->
+    chronicle_server:proposer_ready(Parent, HistoryId, Term, HighSeqno),
+
+    NewData0 = maybe_resolve_branch(Data),
+    NewData = maybe_complete_config_transition(NewData0),
+    {keep_state, replicate(check_peers(NewData))}.
 
 handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
     ?ERROR("Failed to establish term ~p after ~bms",
            [Term, ?ESTABLISH_TERM_TIMEOUT]),
     {stop, establish_term_timeout}.
+
+check_peers(#data{peers = Peers} = Data) ->
+    LivePeers = chronicle_peers:get_live_peers(Peers),
+    MonitoredPeers = get_monitored_peers(Data),
+    PeersToCheck = LivePeers -- MonitoredPeers,
+
+    erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
+    send_request_position(PeersToCheck, Data).
 
 handle_agent_response(Peer,
                       {establish_term, _, _, _} = Request,
@@ -210,6 +272,8 @@ handle_agent_response(Peer,
                       {append, _, _, _, _} = Request,
                       Result, State, Data) ->
     handle_append_result(Peer, Request, Result, State, Data);
+handle_agent_response(Peer, peer_position, Result, State, Data) ->
+    handle_peer_position_result(Peer, Result, State, Data);
 handle_agent_response(Peer,
                       {sync_quorum, _} = Request,
                       Result, State, Data) ->
@@ -222,9 +286,9 @@ handle_establish_term_result(Peer,
     true = (Term =:= Data#data.term),
 
     case Result of
-        {ok, #metadata{committed_seqno = CommittedSeqno}} ->
-            init_peer_status(Peer, CommittedSeqno, Data),
-            establish_term_handle_vote(Peer, ok, State, Data);
+        {ok, #metadata{committed_seqno = CommittedSeqno} = Metadata} ->
+            init_peer_status(Peer, Metadata, Data),
+            establish_term_handle_vote(Peer, {ok, CommittedSeqno}, State, Data);
         {error, Error} ->
             case handle_common_error(Peer, Error, Data) of
                 {stop, _} = Stop ->
@@ -234,7 +298,17 @@ handle_establish_term_result(Peer,
                              "term ~p (history id ~p, log position ~p) "
                              "on peer ~p: ~p",
                              [Term, HistoryId, Position, Peer, Error]),
-                    establish_term_handle_vote(Peer, failed, State, Data)
+
+                    case Error of
+                        {behind, _} ->
+                            %% We keep going desbite the fact we're behind
+                            %% this peer because we still might be able to get
+                            %% a majority of votes.
+                            establish_term_handle_vote(Peer,
+                                                       failed, State, Data);
+                        _ ->
+                            {stop, {unexpected_error, Peer, Error}}
+                    end
             end
     end.
 
@@ -269,12 +343,27 @@ establish_term_handle_vote(_Peer, _Status, proposing, Data) ->
     %% We'are already proposing. So nothing needs to be done.
     {keep_state, Data};
 establish_term_handle_vote(Peer, Status, establish_term,
-                           #data{votes = Votes,
+                           #data{high_seqno = HighSeqno,
+                                 committed_seqno = OurCommittedSeqno,
+                                 votes = Votes,
                                  failed_votes = FailedVotes} = Data) ->
     NewData =
         case Status of
-            ok ->
-                Data#data{votes = [Peer | Votes]};
+            {ok, CommittedSeqno} ->
+                NewCommittedSeqno = max(OurCommittedSeqno, CommittedSeqno),
+                case NewCommittedSeqno =/= OurCommittedSeqno of
+                    true ->
+                        true = (HighSeqno >= NewCommittedSeqno),
+                        ?INFO("Discovered new committed seqno from peer ~p.~n"
+                              "Old committed seqno: ~p~n"
+                              "New committed seqno: ~p",
+                              [Peer, OurCommittedSeqno, NewCommittedSeqno]);
+                    false ->
+                        ok
+                end,
+
+                Data#data{votes = [Peer | Votes],
+                          committed_seqno = NewCommittedSeqno};
             failed ->
                 Data#data{failed_votes = [Peer | FailedVotes]}
         end,
@@ -293,8 +382,7 @@ establish_term_maybe_transition(#data{term = Term,
                    "Votes: ~p~n",
                    [Term, HistoryId, Votes]),
 
-            NewData = maybe_resolve_branch(Data),
-            {next_state, proposing, NewData};
+            {next_state, proposing, Data};
         false ->
             case is_quorum_feasible(Peers, FailedVotes, Quorum) of
                 true ->
@@ -310,17 +398,42 @@ establish_term_maybe_transition(#data{term = Term,
 
 maybe_resolve_branch(#data{branch = undefined} = Data) ->
     Data;
-maybe_resolve_branch(#data{branch = Branch,
+maybe_resolve_branch(#data{high_seqno = HighSeqno,
+                           committed_seqno = CommittedSeqno,
+                           branch = Branch,
                            config = Config} = Data) ->
+    NewData = Data#data{branch = undefined,
+                        %% Note, that this essintially truncates any
+                        %% uncommitted entries. This is acceptable/safe to do
+                        %% for the following reasons:
+                        %%
+                        %%  1. We are going through a quorum failover, so data
+                        %%  inconsistencies are expected.
+                        %%
+                        %%  2. Since a unanimous quorum is required for
+                        %%  resolving quorum failovers, the leader is
+                        %%  guaranteed to know the highest committed seqno
+                        %%  observed by the surviving part of the cluster. In
+                        %%  other words, we won't truncate something that was
+                        %%  known to have been committed.
+                        high_seqno = CommittedSeqno,
+                        pending_high_seqno = CommittedSeqno},
+
+    %% Note, that the new config may be based on an uncommitted config that
+    %% will get truncated from the history. This can be confusing and it's
+    %% possible to deal with this situation better. But for the time being I
+    %% decided not to bother.
     NewConfig = Config#config{voters = Branch#branch.peers},
 
-    ?INFO("New config after resolving a branch.~n"
+    ?INFO("Resolving a branch.~n"
+          "High seqno: ~p~n"
+          "Committed seqno: ~p~n"
           "Branch:~n~p~n"
           "Latest known config:~n~p~n"
           "New config:~n~p",
-          [Branch, Config, NewConfig]),
+          [HighSeqno, CommittedSeqno, Branch, Config, NewConfig]),
 
-    force_propose_config(NewConfig, Data#data{branch = undefined}).
+    force_propose_config(NewConfig, NewData).
 
 handle_append_result(Peer, Request, Result, proposing, Data) ->
     {append, HistoryId, Term, CommittedSeqno, HighSeqno} = Request,
@@ -332,14 +445,21 @@ handle_append_result(Peer, Request, Result, proposing, Data) ->
         ok ->
             handle_append_ok(Peer, HighSeqno, CommittedSeqno, Data);
         {error, Error} ->
-            case handle_common_error(Peer, Error, Data) of
-                {stop, _} = Stop ->
-                    Stop;
-                ignored ->
+            handle_append_error(Peer, Error, Data)
+    end.
+
+handle_append_error(Peer, Error, Data) ->
+    case handle_common_error(Peer, Error, Data) of
+        {stop, _} = Stop ->
+            Stop;
+        ignored ->
+            case Error of
+                {missing_entries, Metadata} ->
+                    reset_peer_status(Peer, Metadata, Data),
+                    {keep_state, replicate(Data)};
+                _ ->
                     ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
-                    %% TODO: handle this, specifically, handle missing_entries
-                    %% error
-                    {stop, Error}
+                    {stop, {unexpected_error, Peer, Error}}
             end
     end.
 
@@ -350,7 +470,7 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
            "High Seqno: ~p~n"
            "Committed Seqno: ~p",
            [Peer, PeerHighSeqno, PeerCommittedSeqno]),
-    set_peer_acked_seqno(Peer, PeerHighSeqno, Data),
+    set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
 
     case deduce_committed_seqno(Data) of
         {ok, NewCommittedSeqno}
@@ -365,13 +485,12 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                           Entry#log_entry.seqno =< NewCommittedSeqno
                   end, PendingEntries),
 
-            NewData =
-                reply_committed(
-                  Data#data{committed_seqno = NewCommittedSeqno,
-                            high_seqno = NewCommittedSeqno,
-                            pending_entries = NewPendingEntries}),
+            NewData0 = Data#data{committed_seqno = NewCommittedSeqno,
+                                 high_seqno = NewCommittedSeqno,
+                                 pending_entries = NewPendingEntries},
 
-            replicate(NewData);
+            {NewData, Effects} = handle_pending_config_changes(NewData0),
+            {keep_state, replicate(NewData), Effects};
         {ok, NewCommittedSeqno} ->
             true = (NewCommittedSeqno =:= CommittedSeqno),
             keep_state_and_data;
@@ -381,6 +500,17 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
             %% old config, might not yet have a quorum in the current
             %% configuration.
             keep_state_and_data
+    end.
+
+handle_peer_position_result(Peer, Result, proposing, Data) ->
+    ?DEBUG("Peer position response from ~p:~n~p", [Peer, Result]),
+
+    case Result of
+        {ok, Metadata} ->
+            init_peer_status(Peer, Metadata, Data),
+            {keep_state, replicate(Data)};
+        {error, Error} ->
+            {stop, _} = handle_common_error(Peer, Error, Data)
     end.
 
 handle_sync_quorum_result(Peer, {sync_quorum, Ref}, Result, proposing,
@@ -399,6 +529,8 @@ handle_sync_quorum_result(Peer, {sync_quorum, Ref}, Result, proposing,
                         {stop, _} = Stop ->
                             Stop;
                         ignored ->
+                            ?ERROR("Unexpected error in sync quorum: ~p",
+                                   [Error]),
                             sync_quorum_handle_vote(Peer,
                                                     failed, Request, Data),
                             keep_state_and_data
@@ -431,7 +563,7 @@ sync_quorum_maybe_reply(Request, Data) ->
         continue ->
             continue;
         Result ->
-            reply_command(Request#sync_request.ref, Result, Data),
+            reply_request(Request#sync_request.ref, Result, Data),
             done
     end.
 
@@ -489,26 +621,57 @@ maybe_complete_config_transition(#data{config = Config} = Data) ->
         #transition{future_config = FutureConfig} ->
             case is_config_committed(Data) of
                 true ->
-                    propose_config(FutureConfig, Data);
+                    %% Preserve config_change_from if any.
+                    From = Data#data.config_change_from,
+                    propose_config(FutureConfig, From, Data);
                 false ->
                     Data
             end
+    end.
+
+maybe_reply_config_change(#data{config_change_from = From} = Data) ->
+    case is_config_committed(Data) andalso From =/= undefined of
+        true ->
+            Revision = Data#data.config_revision,
+            reply_request(From, {ok, Revision}, Data),
+            Data#data{config_change_from = undefined};
+        false ->
+            Data
+    end.
+
+handle_pending_config_changes(Data) ->
+    NewData0 = maybe_complete_config_transition(Data),
+    NewData1 = maybe_reply_config_change(NewData0),
+
+    #data{postponed_config_changes = Postponed} = NewData1,
+    case is_config_committed(NewData1) andalso Postponed =/= [] of
+        true ->
+            %% Deliver postponed config changes again. We've postponed them
+            %% all the way till this moment to be able to return an error that
+            %% includes the revision of the conflicting config. That way the
+            %% caller can wait to receive the conflicting config before
+            %% retrying.
+            NewData2 = NewData1#data{postponed_config_changes = []},
+            Effects = [{next_event, Type, Request} ||
+                          {Type, Request} <- lists:reverse(Postponed)],
+            {NewData2, Effects};
+        false ->
+            {NewData1, []}
     end.
 
 is_config_committed(#data{config_revision = {_, _, ConfigSeqno},
                           committed_seqno = CommittedSeqno}) ->
     ConfigSeqno =< CommittedSeqno.
 
-replicate(Data0) ->
-    Data = maybe_complete_config_transition(Data0),
+replicate(Data) ->
     #data{committed_seqno = CommittedSeqno,
           pending_high_seqno = HighSeqno} = Data,
 
     case get_peers_to_replicate(HighSeqno, CommittedSeqno, Data) of
         [] ->
-            {keep_state, Data};
+            Data;
         Peers ->
-            {keep_state, send_append(Peers, Data)}
+            send_append(Peers, Data)
     end.
 
 get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
@@ -517,19 +680,22 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
     lists:filtermap(
       fun (Peer) ->
               case get_peer_status(Peer, Data) of
-                  {ok, #peer_status{sent_seqno = PeerSentSeqno,
+                  {ok, #peer_status{needs_sync = NeedsSync,
+                                    sent_seqno = PeerSentSeqno,
                                     sent_commit_seqno = PeerSentCommitSeqno}} ->
-                      case HighSeqno > PeerSentSeqno orelse
-                          CommitSeqno > PeerSentCommitSeqno of
+                      DoSync =
+                          NeedsSync
+                          orelse HighSeqno > PeerSentSeqno
+                          orelse CommitSeqno > PeerSentCommitSeqno,
+
+                      case DoSync of
                           true ->
                               {true, {Peer, PeerSentSeqno}};
                           false ->
                               false
                       end;
                   not_found ->
-                      %% TODO: should request peers position instead of
-                      %% blindly replicating everything
-                      {true, {Peer, ?NO_SEQNO}}
+                      false
               end
       end, LivePeers).
 
@@ -538,6 +704,11 @@ config_peers(#config{voters = Voters}) ->
 config_peers(#transition{current_config = Current,
                          future_config = Future}) ->
     lists:usort(config_peers(Current) ++ config_peers(Future)).
+
+config_machines(#config{state_machines = Machines}) ->
+    maps:keys(Machines);
+config_machines(#transition{future_config = FutureConfig}) ->
+    config_machines(FutureConfig).
 
 get_quorum(Config) ->
     {joint,
@@ -586,7 +757,7 @@ get_establish_peers(Metadata) ->
             BranchPeers
     end.
 
-handle_nodeup(Peer, _Info, State, Data) ->
+handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
     ?INFO("Peer ~p came up", [Peer]),
     case State of
         establish_term ->
@@ -606,7 +777,13 @@ handle_nodeup(Peer, _Info, State, Data) ->
             %%  elected again, we'll retry with a new set of live peers.
             keep_state_and_data;
         proposing ->
-            replicate(Data)
+            case lists:member(Peer, Peers) of
+                true ->
+                    {keep_state, send_request_peer_position(Peer, Data)};
+                false ->
+                    ?INFO("Peer ~p is not in peers:~n~p", [Peer, Peers]),
+                    keep_state_and_data
+            end
     end.
 
 handle_nodedown(Peer, Info, _State, _Data) ->
@@ -631,84 +808,45 @@ handle_down(MRef, Pid, Reason, State, Data) ->
                 establish_term ->
                     establish_term_handle_vote(Peer, failed, State, NewData);
                 proposing ->
-                    reset_peer_status(Peer, NewData),
+                    remove_peer_status(Peer, NewData),
                     {keep_state, NewData}
             end
     end.
 
-handle_deliver_commands(Commands0, proposing,
-                        #data{pending_high_seqno = PendingHighSeqno,
-                              pending_froms = PendingFroms,
-                              pending_entries = PendingEntries} = Data0) ->
-    %% TODO: rework this
-    {Syncs, Commands} =
-        lists:partition(
-          fun ({_, Command}) ->
-                  Command =:= sync_quorum
-          end, Commands0),
-
-    Data = lists:foldl(
-             fun ({Ref, sync_quorum}, AccData) ->
-                     handle_sync_quorum(Ref, AccData)
-             end, Data0, Syncs),
-
-    {NewPendingHighSeqno, NewPendingFroms, NewPendingEntries, NewData0} =
+handle_append_commands(Commands,
+                       #data{pending_high_seqno = PendingHighSeqno,
+                             pending_entries = PendingEntries} = Data) ->
+    {NewPendingHighSeqno, NewPendingEntries, NewData0} =
         lists:foldl(
-          fun ({From, Command},
-               {PrevSeqno, AccFroms, AccEntries, AccData} = Acc) ->
+          fun (Command, {PrevSeqno, AccEntries, AccData} = Acc) ->
                   Seqno = PrevSeqno + 1,
                   case handle_command(Command, Seqno, AccData) of
                       {ok, LogEntry, NewAccData} ->
-                          {Seqno,
-                           queue:in({Seqno, From}, AccFroms),
-                           queue:in(LogEntry, AccEntries),
-                           NewAccData};
-                      {reply, Reply} ->
-                          reply_command(From, Reply, Data),
+                          {Seqno, queue:in(LogEntry, AccEntries), NewAccData};
+                      ignore ->
                           Acc
                   end
           end,
-          {PendingHighSeqno, PendingFroms, PendingEntries, Data}, Commands),
+          {PendingHighSeqno, PendingEntries, Data}, Commands),
 
     NewData1 = NewData0#data{pending_entries = NewPendingEntries,
-                             pending_high_seqno = NewPendingHighSeqno,
-                             pending_froms = NewPendingFroms},
+                             pending_high_seqno = NewPendingHighSeqno},
 
-    replicate(NewData1).
+    {keep_state, replicate(NewData1)}.
 
-handle_command({cas_config, NewConfig, CasRevision}, Seqno, Data) ->
-    handle_cas_config(NewConfig, CasRevision, Seqno, Data);
-handle_command({rsm_command, RSMName, CommandId, Command}, Seqno, Data) ->
-    handle_rsm_command(RSMName, CommandId, Command, Seqno, Data).
-
-handle_cas_config(NewConfig, CasRevision, Seqno,
-                  #data{config = Config,
-                        config_revision = ConfigRevision} = Data) ->
-    %% TODO: this protects against the client proposing transition. But in
-    %% reality, it should be solved in some other way
-    #config{} = NewConfig,
-    case CasRevision =:= ConfigRevision of
+handle_command({rsm_command, RSMName, CommandId, Command}, Seqno,
+               #data{machines = Machines} = Data) ->
+    case lists:member(RSMName, Machines) of
         true ->
-            %% TODO: need to backfill new nodes
-            Transition =
-                #transition{current_config = Config,
-                            future_config = NewConfig},
-
-            LogEntry = make_log_entry(Seqno, Transition, Data),
-            Revision = log_entry_revision(LogEntry),
-            NewData = update_config(Transition, Revision, Data),
-
-            {ok, LogEntry, NewData};
+            RSMCommand = #rsm_command{rsm_name = RSMName,
+                                      id = CommandId,
+                                      command = Command},
+            {ok, make_log_entry(Seqno, RSMCommand, Data), Data};
         false ->
-            {reply, {error, {cas_failed, CasRevision, ConfigRevision}}}
+            ?WARNING("Received a command "
+                     "referencing a non-existing RSM: ~p", [RSMName]),
+            ignore
     end.
-
-handle_rsm_command(RSMName, CommandId, Command, Seqno, Data) ->
-    %% TODO: check that the given rsm exists
-    RSMCommand = #rsm_command{rsm_name = RSMName,
-                              id = CommandId,
-                              command = Command},
-    {ok, make_log_entry(Seqno, RSMCommand, Data), Data}.
 
 handle_sync_quorum(Ref, #data{peers = Peers,
                               sync_requests = SyncRequests} = Data) ->
@@ -720,9 +858,29 @@ handle_sync_quorum(Ref, #data{peers = Peers,
     case sync_quorum_maybe_reply(Request, Data) of
         continue ->
             ets:insert_new(SyncRequests, Request),
-            send_ensure_term(LivePeers, {sync_quorum, Ref}, Data);
+            {keep_state, send_ensure_term(LivePeers, {sync_quorum, Ref}, Data)};
         done ->
-            Data
+            keep_state_and_data
+    end.
+
+handle_cas_config(Ref, NewConfig, CasRevision,
+                  #data{config = Config,
+                        config_revision = ConfigRevision} = Data) ->
+    %% TODO: this protects against the client proposing transition. But in
+    %% reality, it should be solved in some other way
+    #config{} = NewConfig,
+    #config{} = Config,
+    case CasRevision =:= ConfigRevision of
+        true ->
+            %% TODO: need to backfill new nodes
+            Transition = #transition{current_config = Config,
+                                     future_config = NewConfig},
+            NewData = propose_config(Transition, Ref, Data),
+            {keep_state, replicate(NewData)};
+        false ->
+            Reply = {error, {cas_failed, ConfigRevision}},
+            reply_request(Ref, Reply, Data),
+            keep_state_and_data
     end.
 
 make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
@@ -736,7 +894,8 @@ update_config(Config, Revision, Data) ->
     NewData = Data#data{config = Config,
                         config_revision = Revision,
                         peers = NewPeers,
-                        quorum = get_quorum(Config)},
+                        quorum = get_quorum(Config),
+                        machines = config_machines(Config)},
 
     OldPeers = config_peers(Data#data.config),
 
@@ -750,33 +909,35 @@ handle_removed_peers(Peers, Data) ->
     demonitor_agents(Peers, Data).
 
 handle_added_peers(Peers, Data) ->
-    sync_quorum_on_config_update(Peers, Data).
+    NewData = check_peers(Data),
+    sync_quorum_on_config_update(Peers, NewData).
 
 log_entry_revision(#log_entry{history_id = HistoryId,
                               term = Term, seqno = Seqno}) ->
     {HistoryId, Term, Seqno}.
 
-force_propose_config(Config, Data) ->
+force_propose_config(Config, #data{config_change_from = undefined} = Data) ->
     %% This function doesn't check that the current config is committed, which
     %% should be the case for regular config transitions. It's only meant to
     %% be used after resolving a branch.
-    do_propose_config(Config, Data).
+    do_propose_config(Config, undefined, Data).
 
-propose_config(Config, Data) ->
+propose_config(Config, From, Data) ->
     true = is_config_committed(Data),
-    do_propose_config(Config, Data).
+    do_propose_config(Config, From, Data).
 
 %% TODO: right now when this function is called we replicate the proposal in
 %% its own batch. But it can be coalesced with user batches.
-do_propose_config(Config, #data{pending_high_seqno = HighSeqno,
-                                pending_entries = Entries} = Data) ->
+do_propose_config(Config, From, #data{pending_high_seqno = HighSeqno,
+                                      pending_entries = Entries} = Data) ->
     Seqno = HighSeqno + 1,
     LogEntry = make_log_entry(Seqno, Config, Data),
     Revision = log_entry_revision(LogEntry),
 
     NewEntries = queue:in(LogEntry, Entries),
     NewData = Data#data{pending_entries = NewEntries,
-                        pending_high_seqno = Seqno},
+                        pending_high_seqno = Seqno,
+                        config_change_from = From},
     update_config(Config, Revision, NewData).
 
 get_peer_status(Peer, #data{peer_statuses = Tab}) ->
@@ -788,37 +949,57 @@ get_peer_status(Peer, #data{peer_statuses = Tab}) ->
     end.
 
 update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
-    Current =
-        case get_peer_status(Peer, Data) of
-            {ok, PeerStatus} ->
-                PeerStatus;
-            not_found ->
-                %% TODO: this shouldn't be needed once peer statuses are
-                %% initialized properly
-                #peer_status{peer = Peer,
-                             acked_seqno = ?NO_SEQNO,
-                             sent_seqno = ?NO_SEQNO,
-                             sent_commit_seqno = ?NO_SEQNO}
+    {ok, PeerStatus} = get_peer_status(Peer, Data),
+    ets:insert(Tab, Fun(PeerStatus)).
+
+reset_peer_status(Peer, Metadata, Data) ->
+    remove_peer_status(Peer, Data),
+    init_peer_status(Peer, Metadata, Data).
+
+init_peer_status(Peer, Metadata, #data{term = OurTerm,
+                                       peer_statuses = Tab}) ->
+    #metadata{term_voted = PeerTermVoted,
+              committed_seqno = PeerCommittedSeqno,
+              high_seqno = PeerHighSeqno} = Metadata,
+
+    {CommittedSeqno, HighSeqno, NeedsSync} =
+        case PeerTermVoted =:= OurTerm of
+            true ->
+                %% We've lost communication with the peer. But it's already
+                %% voted in our current term, so our histories are compatible.
+                {PeerCommittedSeqno, PeerHighSeqno, false};
+            false ->
+                %% Peer has some uncommitted entries that need to be
+                %% truncated. Normally, that'll just happen in the course of
+                %% normal replication, but if there are no mutations to
+                %% replicate, we need to force replicate to the node.
+                DoSync = PeerHighSeqno > PeerCommittedSeqno,
+
+
+                %% The peer hasn't voted in our term yet, so it may have
+                %% divergent entries in the log that need to be truncated.
+                %%
+                %% TODO: We set all seqno-s to peer's committed seqno. That is
+                %% because entries past peer's committed seqno may come from
+                %% an alternative, never-to-be-committed history. Using
+                %% committed seqno is always safe, but that also means that we
+                %% might need to needlessly resend some of the entries that
+                %% the peer already has.
+                %%
+                %% Somewhat peculiarly, the same logic also applies to our
+                %% local agent. This all can be addressed by including more
+                %% information into establish_term() response and append()
+                %% call. But I'll leave for later.
+                {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
         end,
 
-    ets:insert(Tab, Fun(Current)).
-
-init_peer_status(Peer, Seqno, #data{peer_statuses = Tab}) ->
-    true = ets:insert_new(Tab, #peer_status{peer = Peer,
-                                            acked_seqno = Seqno,
-                                            sent_commit_seqno = Seqno,
-                                            sent_seqno = Seqno}).
-
-reset_peer_status(Peer, #data{peer_statuses = Tab} = Data) ->
-    case get_peer_status(Peer, Data) of
-        {ok, #peer_status{acked_seqno = AckedSeqno} = PeerStatus} ->
-            NewPeerStatus =
-                PeerStatus#peer_status{sent_seqno = AckedSeqno,
-                                       sent_commit_seqno = AckedSeqno},
-            ets:insert(Tab, NewPeerStatus);
-        not_found ->
-            ok
-    end.
+    true = ets:insert_new(Tab,
+                          #peer_status{peer = Peer,
+                                       needs_sync = NeedsSync,
+                                       acked_seqno = HighSeqno,
+                                       sent_seqno = HighSeqno,
+                                       acked_commit_seqno = CommittedSeqno,
+                                       sent_commit_seqno = CommittedSeqno}).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
@@ -826,17 +1007,29 @@ set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
       fun (#peer_status{acked_seqno = AckedSeqno} = PeerStatus) ->
               true = (HighSeqno >= AckedSeqno),
               true = (HighSeqno >= CommittedSeqno),
-              PeerStatus#peer_status{sent_seqno = HighSeqno,
+
+              %% Note, that we update needs_sync without waiting for the
+              %% response. If there's an error, we'll reinitialize peer's
+              %% status and decide again if it needs explicit syncing.
+              PeerStatus#peer_status{needs_sync = false,
+                                     sent_seqno = HighSeqno,
                                      sent_commit_seqno = CommittedSeqno}
       end, Data).
 
-set_peer_acked_seqno(Peer, Seqno, Data) ->
+set_peer_acked_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
       Peer,
-      fun (#peer_status{sent_seqno = SentSeqno} = PeerStatus) ->
-              true = (SentSeqno >= Seqno),
-              PeerStatus#peer_status{acked_seqno = Seqno}
+      fun (#peer_status{sent_seqno = SentHighSeqno,
+                        sent_commit_seqno = SentCommittedSeqno} = PeerStatus) ->
+              true = (SentHighSeqno >= HighSeqno),
+              true = (SentCommittedSeqno >= CommittedSeqno),
+
+              PeerStatus#peer_status{acked_seqno = HighSeqno,
+                                     acked_commit_seqno = CommittedSeqno}
       end, Data).
+
+remove_peer_status(Peer, Data) ->
+    remove_peer_statuses([Peer], Data).
 
 remove_peer_statuses(Peers, #data{peer_statuses = Tab}) ->
     lists:foreach(
@@ -854,6 +1047,16 @@ send_requests(Peers, Request, Data, Fun) ->
       end, Peers),
 
     NewData.
+
+send_local_establish_term(Metadata,
+                          #data{history_id = HistoryId, term = Term} = Data) ->
+    Position = get_position(Metadata),
+
+    send_requests(
+      [?PEER()], {establish_term, HistoryId, Term, Position}, Data,
+      fun (_Peer, Opaque) ->
+              self() ! {Opaque, {ok, Metadata}}
+      end).
 
 send_establish_term(Peers, Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
@@ -933,30 +1136,11 @@ send_ensure_term(Peers, Request,
               chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term)
       end).
 
-reply_committed(#data{history_id = HistoryId,
-                      term = Term,
-                      committed_seqno = CommittedSeqno,
-                      pending_froms = Froms} = Data) ->
-    {Replies, NewFroms} =
-        queue_takefold(
-          fun ({FromSeqno, From}, Acc) ->
-                  case FromSeqno =< CommittedSeqno of
-                      true ->
-                          Revision = {HistoryId, Term, FromSeqno},
-                          Reply = {ok, Revision},
-                          {true, [{From, Reply} | Acc]};
-                      false ->
-                          false
-                  end
-          end, [], Froms),
+send_request_peer_position(Peer, Data) ->
+    send_request_position([Peer], Data).
 
-    case Replies of
-        [] ->
-            Data;
-        _ ->
-            reply_commands(Replies, Data),
-            Data#data{pending_froms = NewFroms}
-    end.
+send_request_position(Peers, Data) ->
+    send_ensure_term(Peers, peer_position, Data).
 
 queue_takefold(Fun, Acc, Queue) ->
     case queue:out(Queue) of
@@ -1021,59 +1205,67 @@ queue_dropwhile_test() ->
     Test([], 42).
 -endif.
 
-reply_command(From, Reply, Data) ->
-    reply_commands([{From, Reply}], Data).
+reply_request(From, Reply, Data) ->
+    reply_requests([{From, Reply}], Data).
 
-reply_commands(Replies, #data{parent = Parent}) ->
-    chronicle_server:reply_commands(Parent, Replies).
+reply_requests(Replies, #data{parent = Parent}) ->
+    chronicle_server:reply_requests(Parent, Replies).
 
-monitor_agents(Peers, #data{monitors = Monitors} = Data) ->
-    NewMonitors =
+monitor_agents(Peers,
+               #data{monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
+    {NewMPeers, NewMRefs} =
         lists:foldl(
-          fun (Peer, Acc) ->
-                  case maps:is_key(Peer, Acc) of
+          fun (Peer, {AccMPeers, AccMRefs} = Acc) ->
+                  case maps:is_key(Peer, AccMPeers) of
                       true ->
                           %% already monitoring
-                          Monitors;
+                          Acc;
                       false ->
                           MRef = chronicle_agent:monitor(Peer),
-                          Acc#{Peer => MRef, MRef => Peer}
+                          {AccMPeers#{Peer => MRef}, AccMRefs#{MRef => Peer}}
                   end
-          end, Monitors, Peers),
+          end, {MPeers, MRefs}, Peers),
 
-    Data#data{monitors = NewMonitors}.
+    Data#data{monitors_peers = NewMPeers, monitors_refs = NewMRefs}.
 
-demonitor_agents(Peers, #data{monitors = Monitors} = Data) ->
-    NewMonitors =
+demonitor_agents(Peers,
+                 #data{monitors_peers = MPeers, monitors_refs = MRefs} =
+                     Data) ->
+    {NewMPeers, NewMRefs} =
         lists:foldl(
-          fun (Peer, Acc) ->
-                  case maps:take(Peer, Acc) of
-                      {MRef, NewAcc} ->
+          fun (Peer, {AccMPeers, AccMRefs} = Acc) ->
+                  case maps:take(Peer, AccMPeers) of
+                      {MRef, NewAccMPeers} ->
                           erlang:demonitor(MRef, [flush]),
-                          maps:remove(MRef, NewAcc);
+                          {NewAccMPeers, maps:remove(MRef, AccMRefs)};
                       error ->
                           Acc
                   end
-          end, Monitors, Peers),
+          end, {MPeers, MRefs}, Peers),
 
-    Data#data{monitors = NewMonitors}.
+    Data#data{monitors_peers = NewMPeers, monitors_refs = NewMRefs}.
 
-take_monitor(MRef, #data{monitors = Monitors} = Data) ->
-    case maps:take(MRef, Monitors) of
-        {Peer, NewMonitors0} ->
-            NewMonitors = maps:remove(Peer, NewMonitors0),
-            {ok, Peer, Data#data{monitors = NewMonitors}};
+take_monitor(MRef,
+             #data{monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
+    case maps:take(MRef, MRefs) of
+        {Peer, NewMRefs} ->
+            NewMPeers = maps:remove(Peer, MPeers),
+            {ok, Peer, Data#data{monitors_peers = NewMPeers,
+                                 monitors_refs = NewMRefs}};
         error ->
             not_found
     end.
 
-get_peer_monitor(Peer, #data{monitors = Monitors}) ->
-    case maps:find(Peer, Monitors) of
+get_peer_monitor(Peer, #data{monitors_peers = MPeers}) ->
+    case maps:find(Peer, MPeers) of
         {ok, _} = Ok ->
             Ok;
         error ->
             not_found
     end.
+
+get_monitored_peers(#data{monitors_peers = MPeers}) ->
+    maps:keys(MPeers).
 
 deduce_committed_seqno(#data{peers = Peers,
                              quorum = Quorum} = Data) ->

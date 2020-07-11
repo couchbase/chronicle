@@ -32,12 +32,17 @@
                     ok
             end
         end).
+-define(ETS_TABLE(Name), list_to_atom("ets-"
+                                      ++ atom_to_list(vnet:vnode())
+                                      ++ "-"
+                                      ++ atom_to_list(Name))).
 -else.
 -define(PEER(), node()).
 -define(START_NAME(Name), {local, Name}).
 -define(SERVER_NAME(Name), Name).
 -define(SERVER_NAME(Peer, Name), {Name, Peer}).
 -define(SEND(Name, Msg, Options), erlang:send(Name, Msg, Options)).
+-define(ETS_TABLE(Name), Name).
 -endif.
 
 -define(SEND(Name, Msg), ?SEND(Name, Msg, [])).
@@ -50,7 +55,7 @@
 %% includeded?
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
--record(config, { voters :: [node()],
+-record(config, { voters :: [chronicle:peer()],
                   state_machines :: #{atom() => #rsm_config{} }}).
 -record(transition,
         { current_config :: #config{},
@@ -85,7 +90,7 @@
                          | unknown
                          | {concurrent_branch, #branch{}}
                          | {incompatible_histories,
-                            [{chronicle:history_id(), [chronicle:peer_id()]}]},
+                            [{chronicle:history_id(), [chronicle:peer()]}]},
                  opaque}).
 
 -define(DEBUG(Fmt, Args), ?LOG(debug, Fmt, Args)).

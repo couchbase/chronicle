@@ -33,27 +33,28 @@
           {chronicle:seqno(), reference()},
           {From :: any(), Timer :: reference(), chronicle:revision()}).
 
--record(state, { name :: atom(),
-                 leader_info :: no_leader |
-                                {node(),
-                                 chronicle:history_id(),
-                                 chronicle:leader_term()},
+-record(follower, {}).
+-record(leader, { history_id :: chronicle:history_id(),
+                  term :: chronicle:leader_term(),
+                  term_seqno :: chronicle:seqno() }).
 
-                 applied_history_id :: chronicle:history_id(),
-                 applied_seqno :: chronicle:seqno(),
-                 available_seqno :: chronicle:seqno(),
+-record(data, { name :: atom(),
 
-                 pending_clients :: pending_clients(),
-                 sync_revision_requests :: sync_revision_requests(),
-                 reader :: undefined | pid(),
-                 reader_mref :: undefined | reference(),
+                applied_history_id :: chronicle:history_id(),
+                applied_seqno :: chronicle:seqno(),
+                available_seqno :: chronicle:seqno(),
 
-                 mod :: atom(),
-                 mod_state :: any(),
-                 mod_data :: any() }).
+                pending_clients :: pending_clients(),
+                sync_revision_requests :: sync_revision_requests(),
+                reader :: undefined | pid(),
+                reader_mref :: undefined | reference(),
+
+                mod :: atom(),
+                mod_state :: any(),
+                mod_data :: any() }).
 
 start_link(Name, Mod, ModArgs) ->
-    gen_server:start_link(?START_NAME(Name), ?MODULE, [Name, Mod, ModArgs], []).
+    gen_statem:start_link(?START_NAME(Name), ?MODULE, [Name, Mod, ModArgs], []).
 
 command(Name, Command) ->
     command(Name, Command, 5000).
@@ -62,22 +63,22 @@ command(Name, Command, Timeout) ->
     %% TODO: deal with errors
     {ok, {Leader, _, _}} = chronicle_leader:get_leader(),
     ?DEBUG("Sending Command to ~p: ~p", [Leader, Command]),
-    gen_server:call(?SERVER(Leader, Name), {command, Command}, Timeout).
+    gen_statem:call(?SERVER(Leader, Name), {command, Command}, Timeout).
 
 query(Name, Query) ->
     query(Name, Query, 5000).
 
 query(Name, Query, Timeout) ->
-    gen_server:call(?SERVER(Name), {query, Query}, Timeout).
+    gen_statem:call(?SERVER(Name), {query, Query}, Timeout).
 
 get_applied_revision(Name, Type, Timeout) ->
     %% TODO: deal with errors
     {ok, {Leader, _, _}} = chronicle_leader:get_leader(),
-    gen_server:call(?SERVER(Leader, Name),
+    gen_statem:call(?SERVER(Leader, Name),
                     {get_applied_revision, Type}, Timeout).
 
 sync_revision(Name, Revision, Timeout) ->
-    case gen_server:call(?SERVER(Name), {sync_revision, Revision, Timeout}) of
+    case gen_statem:call(?SERVER(Name), {sync_revision, Revision, Timeout}) of
         ok ->
             ok;
         {error, Timeout} ->
@@ -97,7 +98,10 @@ sync(Name, Type, Timeout) ->
               end
       end, Timeout).
 
-%% gen_server callbacks
+%% gen_statem callbacks
+callback_mode() ->
+    handle_event_function.
+
 init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
@@ -112,105 +116,105 @@ init([Name, Mod, ModArgs]) ->
                       end
               end),
 
-            chronicle_leader:announce_leader(),
+            chronicle_server:announce_term(),
 
             {ok, Metadata} = chronicle_agent:get_metadata(),
             #metadata{committed_seqno = CommittedSeqno} = Metadata,
 
-            State = #state{name = Name,
-                           leader_info = no_leader,
-                           applied_history_id = ?NO_HISTORY,
-                           applied_seqno = ?NO_SEQNO,
-                           available_seqno = CommittedSeqno,
-                           pending_clients = #{},
-                           sync_revision_requests = gb_trees:empty(),
-                           mod = Mod,
-                           mod_state = ModState,
-                           mod_data = ModData},
+            Data = #data{name = Name,
+                         applied_history_id = ?NO_HISTORY,
+                         applied_seqno = ?NO_SEQNO,
+                         available_seqno = CommittedSeqno,
+                         pending_clients = #{},
+                         sync_revision_requests = gb_trees:empty(),
+                         mod = Mod,
+                         mod_state = ModState,
+                         mod_data = ModData},
 
-            {ok, maybe_start_reader(State)};
-        Other ->
-            Other
-    end.
-
-handle_call({command, Command}, From, State) ->
-    handle_command(Command, From, State);
-handle_call({query, Query}, _From, State) ->
-    handle_query(Query, State);
-handle_call({sync_revision, Revision, Timeout}, From, State) ->
-    handle_sync_revision(Revision, Timeout, From, State);
-handle_call({get_applied_revision, Type}, From, State) ->
-    handle_get_applied_revision(Type, From, State);
-handle_call(Call, _From, State) ->
-    ?WARNING("Unexpected call ~p", [Call]),
-    {reply, nack, State}.
-
-handle_cast({entries, HighSeqno, Entries}, State) ->
-    handle_entries(HighSeqno, Entries, State);
-handle_cast(Cast, _State) ->
-    {stop, {unexpected_cast, Cast}}.
-
-handle_info({?RSM_TAG, chronicle_event, Event}, State) ->
-    handle_chronicle_event(Event, State);
-handle_info({{?RSM_TAG, sync_quorum, Ref}, Result}, State) ->
-    handle_sync_quorum_result(Ref, Result, State);
-handle_info({?RSM_TAG, sync_revision_timeout, Request}, State) ->
-    handle_sync_revision_timeout(Request, State);
-handle_info({'DOWN', _, process, Pid, Reason}, #state{reader = Reader})
-  when Reader =:= Pid ->
-    {stop, {reader_died, Pid, Reason}};
-handle_info(Msg, #state{mod = Mod,
-                        mod_state = ModState,
-                        mod_data = ModData} = State) ->
-    case Mod:handle_info(Msg, ModState, ModData) of
-        {noreply, NewModData} ->
-            {noreply, set_mod_data(NewModData, State)};
+            {ok, #follower{}, maybe_start_reader(Data)};
         {stop, _} = Stop ->
             Stop
     end.
 
-terminate(Reason, #state{mod = Mod,
-                         mod_state = ModState,
-                         mod_data = ModData}) ->
+handle_event({call, From}, {command, Command}, State, Data) ->
+    handle_command(Command, From, State, Data);
+handle_event({call, From}, {query, Query}, State, Data) ->
+    handle_query(Query, From, State, Data);
+handle_event({call, From}, {sync_revision, Revision, Timeout}, State, Data) ->
+    handle_sync_revision(Revision, Timeout, From, State, Data);
+handle_event({call, From}, {get_applied_revision, Type}, State, Data) ->
+    handle_get_applied_revision(Type, From, State, Data);
+handle_event(cast, {entries, HighSeqno, Entries}, State, Data) ->
+    handle_entries(HighSeqno, Entries, State, Data);
+handle_event(info, {?RSM_TAG, chronicle_event, Event}, State, Data) ->
+    handle_chronicle_event(Event, State, Data);
+handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, State, Data) ->
+    handle_sync_quorum_result(Ref, Result, State, Data);
+handle_event(info, {?RSM_TAG, sync_revision_timeout, Request}, State, Data) ->
+    handle_sync_revision_timeout(Request, State, Data);
+handle_event(info,
+            {'DOWN', _, process, Pid, Reason}, _State, #data{reader = Reader})
+  when Reader =:= Pid ->
+    {stop, {reader_died, Pid, Reason}};
+handle_event(info, Msg, _State, #data{mod = Mod,
+                                      mod_state = ModState,
+                                      mod_data = ModData} = Data) ->
+    case Mod:handle_info(Msg, ModState, ModData) of
+        {noreply, NewModData} ->
+            {keep_state, set_mod_data(NewModData, Data)};
+        {stop, _} = Stop ->
+            Stop
+    end;
+handle_event({call, From}, Call, _State, _Data) ->
+    ?WARNING("Unexpected call ~p", [Call]),
+    {keep_state_and_data, [{reply, From, nack}]};
+handle_event(Type, Event, _State, _Data) ->
+    ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
+    keep_state_and_data.
+
+terminate(Reason, _State, #data{mod = Mod,
+                                mod_state = ModState,
+                                mod_data = ModData}) ->
     Mod:terminate(Reason, ModState, ModData).
 
 %% internal
-handle_command(Command, From, State) ->
-    case is_leader(State) of
-        true ->
-            handle_command_leader(Command, From, State);
-        false ->
-            {reply, {error, not_leader}, State}
-    end.
+handle_command(_Command, From, #follower{}, _Data) ->
+    {keep_state_and_data,
+     {reply, From, {error, not_leader}}};
+handle_command(Command, From, #leader{} = State, Data) ->
+    handle_command_leader(Command, From, State, Data).
 
-handle_command_leader(Command, From, #state{mod = Mod,
-                                            mod_state = ModState,
-                                            mod_data = ModData} = State) ->
+handle_command_leader(Command, From, State, #data{mod = Mod,
+                                                  mod_state = ModState,
+                                                  mod_data = ModData} = Data) ->
     case Mod:handle_command(Command, ModState, ModData) of
         {apply, NewModData} ->
-            NewState = set_mod_data(NewModData, State),
-            {noreply, submit_command(Command, From, NewState)};
-        {reject, Reply, NewData} ->
-            {reply, Reply, set_mod_data(NewData, State)}
+            NewData = set_mod_data(NewModData, Data),
+            {keep_state, submit_command(Command, From, State, NewData)};
+        {reject, Reply, NewModData} ->
+            {keep_state,
+             set_mod_data(NewModData, Data),
+             {reply, From, Reply}}
     end.
 
-handle_query(Query, #state{mod = Mod,
-                           mod_state = ModState,
-                           mod_data = ModData} = State) ->
+handle_query(Query, From, _State, #data{mod = Mod,
+                                        mod_state = ModState,
+                                        mod_data = ModData} = Data) ->
     {reply, Reply, NewModData} = Mod:handle_query(Query, ModState, ModData),
-    {reply, Reply, set_mod_data(NewModData, State)}.
+    {keep_state, set_mod_data(NewModData, Data), {reply, From, Reply}}.
 
 handle_sync_revision({HistoryId, Seqno}, Timeout, From,
-                     #state{applied_history_id = AppliedHistoryId,
-                            applied_seqno = AppliedSeqno} = State) ->
+                     _State,
+                     #data{applied_history_id = AppliedHistoryId,
+                           applied_seqno = AppliedSeqno} = Data) ->
     case HistoryId =:= AppliedHistoryId of
         true ->
             case Seqno =< AppliedSeqno of
                 true ->
-                    {reply, ok, State};
+                    {keep_state_and_data, {reply, From, ok}};
                 false ->
-                    {noreply,
-                     sync_revision_add_request(Seqno, Timeout, From, State)}
+                    {keep_state,
+                     sync_revision_add_request(Seqno, Timeout, From, Data)}
             end;
         false ->
             %% We may hit this case even if we in fact do have the revision
@@ -220,22 +224,22 @@ handle_sync_revision({HistoryId, Seqno}, Timeout, From,
             %% sequence numbers where they apply. Since this case is pretty
             %% rare, for the sake of simplicity we'll just tolerate a
             %% possibility of sync_revision() call failing unnecessarily.
-            {reply, {error, history_mismatch}, State}
+            {keep_state_and_data,
+             {reply, From, {error, history_mismatch}}}
     end.
 
 sync_revision_add_request({HistoryId, Seqno}, Timeout, From,
-                          #state{sync_revision_requests = Requests} = State) ->
+                          #data{sync_revision_requests = Requests} = Data) ->
     Request = {Seqno, make_ref()},
     TRef = sync_revision_start_timer(Request, Timeout),
     RequestData = {From, TRef, HistoryId},
     NewRequests = gb_trees:insert(Request, RequestData, Requests),
-    State#state{sync_revision_requests = NewRequests}.
+    Data#data{sync_revision_requests = NewRequests}.
 
-sync_revision_requests_reply(#state{applied_seqno = Seqno,
-                                    sync_revision_requests = Requests} =
-                                 State) ->
+sync_revision_requests_reply(#data{applied_seqno = Seqno,
+                                   sync_revision_requests = Requests} = Data) ->
     NewRequests = sync_revision_requests_reply_loop(Seqno, Requests),
-    State#state{sync_revision_requests = NewRequests}.
+    Data#data{sync_revision_requests = NewRequests}.
 
 sync_revision_requests_reply_loop(Seqno, Requests) ->
     case gb_trees:is_empty(Requests) of
@@ -255,11 +259,11 @@ sync_revision_requests_reply_loop(Seqno, Requests) ->
 
 sync_revision_request_reply(Request, {From, TRef, _HistoryId}, Reply) ->
     sync_revision_cancel_timer(Request, TRef),
-    gen_server:reply(From, Reply).
+    gen_statem:reply(From, Reply).
 
-sync_revision_drop_diverged_requests(#state{applied_history_id = HistoryId,
-                                            sync_revision_requests = Requests} =
-                                         State) ->
+sync_revision_drop_diverged_requests(#data{applied_history_id = HistoryId,
+                                           sync_revision_requests = Requests} =
+                                         Data) ->
     NewRequests =
         chronicle_utils:gb_trees_filter(
           fun (Request, {_, _, ReqHistoryId} = RequestData) ->
@@ -274,7 +278,7 @@ sync_revision_drop_diverged_requests(#state{applied_history_id = HistoryId,
                   end
           end, Requests),
 
-    State#state{sync_revision_requests = NewRequests}.
+    Data#data{sync_revision_requests = NewRequests}.
 
 sync_revision_start_timer(Request, Timeout) ->
     erlang:send_after(Timeout, self(),
@@ -284,63 +288,62 @@ sync_revision_cancel_timer(Request, TRef) ->
     erlang:cancel_timer(TRef),
     ?FLUSH({?RSM_TAG, sync_revision_timeout, Request}).
 
-handle_sync_revision_timeout(Request,
-                             #state{sync_revision_requests = Requests} =
-                                 State) ->
+handle_sync_revision_timeout(Request, _State,
+                             #data{sync_revision_requests = Requests} = Data) ->
     {{From, _}, NewRequests} = gb_trees:take(Request, Requests),
-    gen_server:reply(From, {error, timeout}),
-    {noreply, State#state{sync_revision_requests = NewRequests}}.
+    gen_statem:reply(From, {error, timeout}),
+    {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
-handle_entries(HighSeqno, Entries, #state{reader = Reader,
-                                          reader_mref = MRef} = State) ->
+handle_entries(HighSeqno, Entries, State, #data{reader = Reader,
+                                                reader_mref = MRef} = Data) ->
     true = is_pid(Reader),
     true = is_reference(MRef),
 
     erlang:demonitor(MRef, [flush]),
 
-    NewState0 = State#state{reader = undefined, reader_mref = undefined},
-    NewState = apply_entries(HighSeqno, Entries, NewState0),
-    {noreply, maybe_start_reader(NewState)}.
+    NewData0 = Data#data{reader = undefined, reader_mref = undefined},
+    NewData = apply_entries(HighSeqno, Entries, State, NewData0),
+    {keep_state, maybe_start_reader(NewData)}.
 
-apply_entries(HighSeqno, Entries, #state{applied_history_id = HistoryId,
-                                         mod_state = ModState,
-                                         mod_data = ModData} = State) ->
+apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
+                                               mod_state = ModState,
+                                               mod_data = ModData} = Data) ->
     {NewHistoryId, NewModState, NewModData, Replies} =
         lists:foldl(
           fun (Entry, Acc) ->
-                  apply_entry(Entry, Acc, State)
+                  apply_entry(Entry, Acc, Data)
           end, {HistoryId, ModState, ModData, []}, Entries),
 
     ?DEBUG("Applied commands to rsm '~p'.~n"
            "New applied seqno: ~p~n"
            "Commands:~n~p~n"
            "Replies:~n~p",
-           [State#state.name, HighSeqno, Entries, Replies]),
+           [Data#data.name, HighSeqno, Entries, Replies]),
 
-    NewState0 = State#state{mod_state = NewModState,
-                            mod_data = NewModData,
-                            applied_history_id = NewHistoryId,
-                            applied_seqno = HighSeqno},
-    NewState1 =
+    NewData0 = Data#data{mod_state = NewModState,
+                         mod_data = NewModData,
+                         applied_history_id = NewHistoryId,
+                         applied_seqno = HighSeqno},
+    NewData1 =
         case HistoryId =:= NewHistoryId of
             true ->
-                NewState0;
+                NewData0;
             false ->
                 %% Drop requests that have the history id different from the
                 %% one we just adopted. See the comment in
                 %% handle_sync_revision/4 for more context.
-                sync_revision_drop_diverged_requests(NewState0)
+                sync_revision_drop_diverged_requests(NewData0)
         end,
 
-    NewState = sync_revision_requests_reply(NewState1),
-    pending_commands_reply(Replies, NewState).
+    NewData = sync_revision_requests_reply(NewData1),
+    pending_commands_reply(Replies, State, NewData).
 
 apply_entry(Entry, {HistoryId, ModState, ModData, Replies} = Acc,
-            #state{mod = Mod} = State) ->
+            #data{mod = Mod} = Data) ->
     #log_entry{value = Value} = Entry,
     case Value of
         #rsm_command{id = Id, rsm_name = Name, command = Command} ->
-            true = (Name =:= State#state.name),
+            true = (Name =:= Data#data.name),
             Revision = {Entry#log_entry.history_id, Entry#log_entry.seqno},
 
             {reply, Reply, NewModState, NewModData} =
@@ -363,21 +366,18 @@ apply_entry(Entry, {HistoryId, ModState, ModData, Replies} = Acc,
             end
     end.
 
-pending_commands_reply(Replies, #state{pending_clients = Clients} = State) ->
-    case is_leader(State) of
-        true ->
-            #state{leader_info = {_, _, OurTerm}} = State,
+pending_commands_reply(_Replies, #follower{}, Data) ->
+    Data;
+pending_commands_reply(Replies,
+                       #leader{term = OurTerm},
+                       #data{pending_clients = Clients} = Data) ->
+    NewClients =
+        lists:foldl(
+          fun ({Ref, Term, Reply}, Acc) ->
+                  pending_command_reply(Ref, Term, Reply, OurTerm, Acc)
+          end, Clients, Replies),
 
-            NewClients =
-                lists:foldl(
-                  fun ({Ref, Term, Reply}, Acc) ->
-                          pending_command_reply(Ref, Term, Reply, OurTerm, Acc)
-                  end, Clients, Replies),
-
-            State#state{pending_clients = NewClients};
-        false ->
-            State
-    end.
+    Data#data{pending_clients = NewClients}.
 
 pending_command_reply(Ref, Term, Reply, OurTerm, Clients) ->
     %% References are not guaranteed to be unique across restarts. So
@@ -388,7 +388,7 @@ pending_command_reply(Ref, Term, Reply, OurTerm, Clients) ->
         true ->
             case maps:take(Ref, Clients) of
                 {{From, command}, NewClients} ->
-                    gen_server:reply(From, Reply),
+                    gen_statem:reply(From, Reply),
                     NewClients;
                 error ->
                     Clients
@@ -397,34 +397,45 @@ pending_command_reply(Ref, Term, Reply, OurTerm, Clients) ->
             Clients
     end.
 
-handle_get_applied_revision(Type, From, State) ->
-    case is_leader(State) of
-        true ->
-            handle_get_applied_revision_leader(Type, From, State);
-        false ->
-            {reply, {error, not_leader}, State}
-    end.
+handle_get_applied_revision(_Type, From, #follower{}, _Data) ->
+    {keep_state_and_data, {reply, From, {error, not_leader}}};
+handle_get_applied_revision(Type, From, #leader{} = State, Data) ->
+    handle_get_applied_revision_leader(Type, From, State, Data).
 
-handle_get_applied_revision_leader(Type, From, State) ->
-    #state{applied_seqno = Seqno, applied_history_id = HistoryId} = State,
-    Revision = {HistoryId, Seqno},
+handle_get_applied_revision_leader(Type, From, State, Data) ->
+    #leader{history_id = HistoryId, term_seqno = TermSeqno} = State,
+    #data{applied_seqno = AppliedSeqno,
+          applied_history_id = AppliedHistoryId} = Data,
+    Revision =
+        case TermSeqno > AppliedSeqno of
+            true ->
+                %% When we've just become the leader, we are guaranteed to
+                %% have all mutations that might have been committed by the
+                %% old leader, but there's no way to know what was and what
+                %% wasn't committed. So we need to wait until all uncommitted
+                %% entries that we have get committed. That's what this
+                %% effectively achieves.
+                {HistoryId, TermSeqno};
+            false ->
+                {AppliedHistoryId, AppliedSeqno}
+        end,
 
     case Type of
         leader ->
-            {reply, {ok, Revision}, State};
+            {keep_state_and_data, {reply, From, {ok, Revision}}};
         quorum ->
-            {noreply, sync_quorum(Revision, From, State)}
+            {keep_state, sync_quorum(Revision, From, State, Data)}
     end.
 
 sync_quorum(Revision, From,
-            #state{leader_info = {_, HistoryId, Term}} = State) ->
+            #leader{history_id = HistoryId, term = Term}, Data) ->
     Ref = make_ref(),
     Tag = {?RSM_TAG, sync_quorum, Ref},
     chronicle_server:sync_quorum(Tag, HistoryId, Term),
-    add_pending_client(Ref, From, {sync, Revision}, State).
+    add_pending_client(Ref, From, {sync, Revision}, Data).
 
-handle_sync_quorum_result(Ref, Result,
-                          #state{pending_clients = Requests} = State) ->
+handle_sync_quorum_result(Ref, Result, _State,
+                          #data{pending_clients = Requests} = Data) ->
     case maps:take(Ref, Requests) of
         {{From, {sync, Revision}}, NewRequests} ->
             %% TODO: do I need to go anything else with the result?
@@ -435,63 +446,84 @@ handle_sync_quorum_result(Ref, Result,
                     {error, _} ->
                         Result
                 end,
-            gen_server:reply(From, Reply),
-            {noreply, State#state{pending_clients = NewRequests}};
+            gen_statem:reply(From, Reply),
+            {keep_state, Data#data{pending_clients = NewRequests}};
         error ->
             %% Possible if we got notified that the leader has changed before
             %% local proposer was terminated.
-            {noreply, State}
+            keep_state_and_data
     end.
 
-is_interesting_event({leader, _}) ->
+is_interesting_event({term, _, _, _}) ->
+    true;
+is_interesting_event({term_finished, _, _}) ->
     true;
 is_interesting_event({metadata, _}) ->
     true;
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({leader, LeaderInfo}, State) ->
-    handle_new_leader(LeaderInfo, State);
-handle_chronicle_event({metadata, Metadata}, State) ->
-    handle_new_metadata(Metadata, State).
+handle_chronicle_event({term, HistoryId, Term, HighSeqno}, State, Data) ->
+    handle_term_started(HistoryId, Term, HighSeqno, State, Data);
+handle_chronicle_event({term_finished, HistoryId, Term}, State, Data) ->
+    handle_term_finished(HistoryId, Term, State, Data);
+handle_chronicle_event({metadata, Metadata}, State, Data) ->
+    handle_new_metadata(Metadata, State, Data).
 
-handle_new_leader(NewLeaderInfo, #state{leader_info = OldLeaderInfo} = State) ->
-    case NewLeaderInfo =:= OldLeaderInfo of
+handle_term_started(HistoryId, Term, HighSeqno, State, Data) ->
+    %% For each started term, we should always see the corresponding
+    %% term_finished message before a new term can be started.
+    #follower{} = State,
+    {next_state,
+     #leader{history_id = HistoryId,
+             term = Term,
+             term_seqno = HighSeqno},
+     Data}.
+
+handle_term_finished(HistoryId, Term, State, Data) ->
+    case is_leader(HistoryId, Term, State) of
         true ->
-            {noreply, State};
+            {next_state,
+             #follower{},
+             flush_pending_clients({error, leader_gone}, Data)};
         false ->
-            NewState = State#state{leader_info = NewLeaderInfo},
-            {noreply, flush_pending_clients({error, leader_gone}, NewState)}
+            %% This is possible if chronicle_rsm is started around the time
+            %% when a term is about to conclude. But if chronicle_rsm believes
+            %% that it's a leader in some term, it should always receive the
+            %% corresponding term_finished notification.
+            #follower{} = State,
+            keep_state_and_data
     end.
 
-handle_new_metadata(#metadata{committed_seqno = CommittedSeqno}, State) ->
-    NewState = State#state{available_seqno = CommittedSeqno},
-    {noreply, maybe_start_reader(NewState)}.
+handle_new_metadata(#metadata{committed_seqno = CommittedSeqno},
+                    _State, Data) ->
+    NewData = Data#data{available_seqno = CommittedSeqno},
+    {keep_state, maybe_start_reader(NewData)}.
 
-maybe_start_reader(#state{reader = undefined,
-                          applied_seqno = AppliedSeqno,
-                          available_seqno = AvailableSeqno} = State) ->
+maybe_start_reader(#data{reader = undefined,
+                         applied_seqno = AppliedSeqno,
+                         available_seqno = AvailableSeqno} = Data) ->
     case AvailableSeqno > AppliedSeqno of
         true ->
-            start_reader(State);
+            start_reader(Data);
         false ->
-            State
+            Data
     end;
-maybe_start_reader(State) ->
-    State.
+maybe_start_reader(Data) ->
+    Data.
 
-start_reader(State) ->
+start_reader(Data) ->
     Self = self(),
-    {Pid, MRef} = spawn_monitor(fun () -> reader(Self, State) end),
-    State#state{reader = Pid, reader_mref = MRef}.
+    {Pid, MRef} = spawn_monitor(fun () -> reader(Self, Data) end),
+    Data#data{reader = Pid, reader_mref = MRef}.
 
-reader(Parent, State) ->
-    {HighSeqno, Commands} = get_log(State),
-    gen_server:cast(Parent, {entries, HighSeqno, Commands}).
+reader(Parent, Data) ->
+    {HighSeqno, Commands} = get_log(Data),
+    gen_statem:cast(Parent, {entries, HighSeqno, Commands}).
 
-get_log(#state{name = Name,
-               applied_seqno = AppliedSeqno,
-               available_seqno = AvailableSeqno}) ->
+get_log(#data{name = Name,
+              applied_seqno = AppliedSeqno,
+              available_seqno = AvailableSeqno}) ->
     %% TODO: replace this with a dedicated call
     {ok, Log} = chronicle_agent:get_log(?PEER()),
     Entries =
@@ -509,31 +541,29 @@ get_log(#state{name = Name,
 
     {AvailableSeqno, Entries}.
 
-is_leader(#state{leader_info = LeaderInfo}) ->
-    case LeaderInfo of
-        no_leader ->
-            false;
-        {Leader, _, _} ->
-            Leader =:= ?PEER()
-    end.
+is_leader(_HistoryId, _Term, #follower{}) ->
+    false;
+is_leader(HistoryId, Term,
+          #leader{history_id = OurHistoryId, term = OurTerm}) ->
+    HistoryId =:= OurHistoryId andalso Term =:= OurTerm.
 
 submit_command(Command, From,
-               #state{name = Name,
-                      leader_info = {_, HistoryId, Term}} = State) ->
+               #leader{history_id = HistoryId, term = Term},
+               #data{name = Name} = Data) ->
     Ref = make_ref(),
     chronicle_server:rsm_command(HistoryId, Term, Name, Ref, Command),
-    add_pending_client(Ref, From, command, State).
+    add_pending_client(Ref, From, command, Data).
 
-add_pending_client(Ref, From, Data,
-                   #state{pending_clients = Clients} = State) ->
-    State#state{pending_clients = maps:put(Ref, {From, Data}, Clients)}.
+add_pending_client(Ref, From, ClientData,
+                   #data{pending_clients = Clients} = Data) ->
+    Data#data{pending_clients = maps:put(Ref, {From, ClientData}, Clients)}.
 
-flush_pending_clients(Reply, #state{pending_clients = Clients} = State) ->
+flush_pending_clients(Reply, #data{pending_clients = Clients} = Data) ->
     maps:fold(
       fun (_, {From, _}, _) ->
-              gen_server:reply(From, Reply)
+              gen_statem:reply(From, Reply)
       end, unused, Clients),
-    State#state{pending_clients = #{}}.
+    Data#data{pending_clients = #{}}.
 
-set_mod_data(ModData, State) ->
-    State#state{mod_data = ModData}.
+set_mod_data(ModData, Data) ->
+    Data#data{mod_data = ModData}.
