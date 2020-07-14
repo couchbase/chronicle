@@ -36,7 +36,7 @@
 -record(follower, {}).
 -record(leader, { history_id :: chronicle:history_id(),
                   term :: chronicle:leader_term(),
-                  term_seqno :: chronicle:seqno() }).
+                  term_seqno :: undefined | chronicle:seqno() }).
 
 -record(data, { name :: atom(),
 
@@ -78,6 +78,7 @@ get_applied_revision(Name, Type, Timeout) ->
                     {get_applied_revision, Type}, Timeout).
 
 sync_revision(Name, Revision, Timeout) ->
+    %% TODO: add fast path
     case gen_statem:call(?SERVER(Name), {sync_revision, Revision, Timeout}) of
         ok ->
             ok;
@@ -214,7 +215,8 @@ handle_sync_revision({HistoryId, Seqno}, Timeout, From,
                     {keep_state_and_data, {reply, From, ok}};
                 false ->
                     {keep_state,
-                     sync_revision_add_request(Seqno, Timeout, From, Data)}
+                     sync_revision_add_request(HistoryId, Seqno,
+                                               Timeout, From, Data)}
             end;
         false ->
             %% We may hit this case even if we in fact do have the revision
@@ -228,7 +230,7 @@ handle_sync_revision({HistoryId, Seqno}, Timeout, From,
              {reply, From, {error, history_mismatch}}}
     end.
 
-sync_revision_add_request({HistoryId, Seqno}, Timeout, From,
+sync_revision_add_request(HistoryId, Seqno, Timeout, From,
                           #data{sync_revision_requests = Requests} = Data) ->
     Request = {Seqno, make_ref()},
     TRef = sync_revision_start_timer(Request, Timeout),
@@ -402,6 +404,12 @@ handle_get_applied_revision(_Type, From, #follower{}, _Data) ->
 handle_get_applied_revision(Type, From, #leader{} = State, Data) ->
     handle_get_applied_revision_leader(Type, From, State, Data).
 
+handle_get_applied_revision_leader(_Type, _From,
+                                   #leader{term_seqno = undefined},
+                                   _Data) ->
+    %% The term is not fully established yet, so we can't handle the
+    %% request. Postpone it till the high seqno is known.
+    {keep_state_and_data, postpone};
 handle_get_applied_revision_leader(Type, From, State, Data) ->
     #leader{history_id = HistoryId, term_seqno = TermSeqno} = State,
     #data{applied_seqno = AppliedSeqno,
@@ -463,17 +471,23 @@ is_interesting_event({metadata, _}) ->
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({term, HistoryId, Term, HighSeqno}, State, Data) ->
-    handle_term_started(HistoryId, Term, HighSeqno, State, Data);
+handle_chronicle_event({term, HistoryId, Term, Status}, State, Data) ->
+    handle_term_status(HistoryId, Term, Status, State, Data);
 handle_chronicle_event({term_finished, HistoryId, Term}, State, Data) ->
     handle_term_finished(HistoryId, Term, State, Data);
 handle_chronicle_event({metadata, Metadata}, State, Data) ->
     handle_new_metadata(Metadata, State, Data).
 
-handle_term_started(HistoryId, Term, HighSeqno, State, Data) ->
+handle_term_status(HistoryId, Term, tentative, State, Data) ->
     %% For each started term, we should always see the corresponding
     %% term_finished message before a new term can be started.
     #follower{} = State,
+    {next_state,
+     #leader{history_id = HistoryId,
+             term = Term,
+             term_seqno = undefined},
+     Data};
+handle_term_status(HistoryId, Term, {established, HighSeqno}, _State, Data) ->
     {next_state,
      #leader{history_id = HistoryId,
              term = Term,

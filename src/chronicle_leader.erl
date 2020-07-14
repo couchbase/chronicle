@@ -46,19 +46,21 @@
 
                 %% used to track timers that get auto-canceled when the state
                 %% changes
-                state_timers = #{} }).
+                state_timers = #{},
+
+                leader_waiters = #{} }).
 
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
 get_leader() ->
-    case ets:lookup(?TABLE, leader) of
-        [] ->
-            {error, no_leader};
-        [{leader, no_leader}] ->
-            {error, no_leader};
-        [{leader, LeaderInfo}] ->
-            {ok, LeaderInfo}
+    case get_published_leader() of
+        {ok, _} = Ok ->
+            Ok;
+        {error, no_leader} ->
+            %% TODO: timeout
+            R = gen_statem:call(?SERVER, {wait_for_leader, 5000}, infinity),
+            R
     end.
 
 announce_leader() ->
@@ -93,15 +95,17 @@ init([]) ->
     {ok, #observer{}, metadata2data(Metadata)}.
 
 handle_event(enter, OldState, State, Data) ->
-    maybe_publish_leader(OldState, State),
-    LeaveData = handle_state_leave(OldState, Data),
-    handle_state_enter(State, LeaveData);
+    NewData0 = maybe_publish_leader(OldState, State, Data),
+    NewData1 = handle_state_leave(OldState, NewData0),
+    handle_state_enter(State, NewData1);
 handle_event(info, {chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
 handle_event(info, {heartbeat, Leader, HistoryId, Term}, State, Data) ->
     handle_heartbeat(Leader, HistoryId, Term, State, Data);
 handle_event(info, {'EXIT', Pid, Reason}, State, Data) ->
     handle_process_exit(Pid, Reason, State, Data);
+handle_event(info, {timeout, TRef, leader_wait}, State, Data) ->
+    handle_leader_wait_timeout(TRef, State, Data);
 handle_event(info, {state_timer, Name}, _State, Data) ->
     {ok, _, NewData} = take_state_timer(Name, Data),
     {keep_state, NewData, {next_event, internal, {state_timer, Name}}};
@@ -114,6 +118,8 @@ handle_event(cast, announce_leader, State, Data) ->
 handle_event({call, From},
              {request_vote, Candidate, HistoryId, Position}, State, Data) ->
     handle_request_vote(Candidate, HistoryId, Position, From, State, Data);
+handle_event({call, From}, {wait_for_leader, Timeout}, State, Data) ->
+    handle_wait_for_leader(Timeout, From, State, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, [{reply, From, nack}]};
 handle_event(Type, Event, _State, _Data) ->
@@ -122,6 +128,8 @@ handle_event(Type, Event, _State, _Data) ->
 
 terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data),
+    %% Reply with {error, no_leader} to leader waiters, if any.
+    reply_to_leader_waiters(State, Data),
     publish_leader(no_leader).
 
 %% internal
@@ -339,6 +347,45 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
+handle_wait_for_leader(Timeout, From, State, Data) ->
+    case state_leader(State) of
+        no_leader ->
+            NewData = add_leader_waiter(Timeout, From, Data),
+            {keep_state, NewData};
+        LeaderInfo ->
+            {keep_state_and_data, {reply, From, {ok, LeaderInfo}}}
+    end.
+
+handle_leader_wait_timeout(TRef, State,
+                           #data{leader_waiters = Waiters} = Data) ->
+    no_leader = state_leader(State),
+    {From, NewWaiters} = maps:take(TRef, Waiters),
+    gen_statem:reply(From, {error, no_leader}),
+    {keep_state, Data#data{leader_waiters = NewWaiters}}.
+
+add_leader_waiter(Timeout, From, #data{leader_waiters = Waiters} = Data) ->
+    TRef = erlang:start_timer(Timeout, self(), leader_wait),
+    NewWaiters = Waiters#{TRef => From},
+    Data#data{leader_waiters = NewWaiters}.
+
+reply_to_leader_waiters(State, #data{leader_waiters = Waiters} = Data) ->
+    Reply =
+        case state_leader(State) of
+            no_leader ->
+                {error, no_leader};
+            LeaderInfo ->
+                {ok, LeaderInfo}
+        end,
+
+    maps:fold(
+      fun (TRef, From, _) ->
+              gen_statem:reply(From, Reply),
+              erlang:cancel_timer(TRef),
+              ?FLUSH({timeout, TRef, _})
+      end, unused, Waiters),
+
+    Data#data{leader_waiters = #{}}.
+
 start_election_worker(Data) ->
     Pid = proc_lib:spawn_link(
             fun () ->
@@ -424,15 +471,21 @@ handle_announce_leader(State, _Data) ->
     do_announce_leader(state_leader(State)),
     keep_state_and_data.
 
-maybe_publish_leader(OldState, State) ->
+maybe_publish_leader(OldState, State, Data) ->
     OldLeaderInfo = state_leader(OldState),
     NewLeaderInfo = state_leader(State),
 
     case OldLeaderInfo =:= NewLeaderInfo of
         true ->
-            ok;
+            Data;
         false ->
-            publish_leader(NewLeaderInfo)
+            publish_leader(NewLeaderInfo),
+            case NewLeaderInfo of
+                no_leader ->
+                    Data;
+                _ ->
+                    reply_to_leader_waiters(State, Data)
+            end
     end.
 
 check_history_id(HistoryId, Data) ->
@@ -570,4 +623,14 @@ get_last_known_leader_term(State, Data) ->
             LeaderTerm;
         no_leader ->
             get_established_term(Data)
+    end.
+
+get_published_leader() ->
+    case ets:lookup(?TABLE, leader) of
+        [] ->
+            {error, no_leader};
+        [{leader, no_leader}] ->
+            {error, no_leader};
+        [{leader, LeaderInfo}] ->
+            {ok, LeaderInfo}
     end.

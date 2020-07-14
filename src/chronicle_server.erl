@@ -146,7 +146,9 @@ handle_state_leave(#leader{} = State, Data) ->
 handle_state_leave(_OldState, Data) ->
     Data.
 
-handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
+handle_state_enter(#leader{history_id = HistoryId,
+                           term = Term} = State,
+                   Data) ->
     {ok, Proposer} = chronicle_proposer:start_link(HistoryId, Term),
 
     undefined = Data#data.commands_batch,
@@ -156,11 +158,13 @@ handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
         chronicle_utils:make_batch(#data.commands_batch, ?COMMANDS_BATCH_AGE),
     SyncsBatch =
         chronicle_utils:make_batch(#data.syncs_batch, ?SYNCS_BATCH_AGE),
-    Data#data{proposer = Proposer,
-              proposer_ready = false,
-              commands_batch = CommandsBatch,
-              syncs_batch = SyncsBatch,
-              requests_in_flight = #{}};
+    NewData = Data#data{proposer = Proposer,
+                        proposer_ready = false,
+                        commands_batch = CommandsBatch,
+                        syncs_batch = SyncsBatch,
+                        requests_in_flight = #{}},
+    announce_term(State, NewData),
+    NewData;
 handle_state_enter(_State, Data) ->
     Data.
 
@@ -177,7 +181,7 @@ handle_new_leader({Leader, HistoryId, Term}, _State, Data) ->
             {next_state, #follower{}, Data}
     end.
 
-handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
+handle_process_exit(Pid, Reason, _State, #data{proposer = Proposer} = Data) ->
     case Pid =:= Proposer of
         true ->
             ?INFO("Proposer terminated with reason ~p", [Reason]),
@@ -309,7 +313,7 @@ store_requests(Requests, #data{requests_in_flight = InFlight} = Data) ->
 
     Data#data{requests_in_flight = NewInFlight}.
 
-handle_announce_term(#leader{} = State, #data{proposer_ready = true} = Data) ->
+handle_announce_term(#leader{} = State, Data) ->
     announce_term(State, Data),
     keep_state_and_data;
 handle_announce_term(_State, _Data) ->
@@ -362,9 +366,18 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
               commands_batch = undefined}.
 
 announce_term(#leader{history_id = HistoryId, term = Term},
-              #data{term_high_seqno = HighSeqno}) ->
-    true = is_integer(HighSeqno),
-    chronicle_events:notify({term, HistoryId, Term, HighSeqno}).
+              #data{proposer_ready = ProposerReady,
+                    term_high_seqno = HighSeqno}) ->
+    Status =
+        case ProposerReady of
+            true ->
+                true = is_integer(HighSeqno),
+                {established, HighSeqno};
+            false ->
+                tentative
+        end,
+
+    chronicle_events:notify({term, HistoryId, Term, Status}).
 
 announce_term_finished(#leader{history_id = HistoryId, term = Term}) ->
     chronicle_events:notify({term_finished, HistoryId, Term}).
@@ -405,8 +418,6 @@ simple_test__() ->
 
     ok = chronicle_failover:failover(a, <<"failover">>, [a, b]),
 
-    timer:sleep(2000),
-
     ok = vnet:disconnect(a, c),
     ok = vnet:disconnect(a, d),
     ok = vnet:disconnect(b, c),
@@ -418,34 +429,38 @@ simple_test__() ->
     ok = rpc_node(b,
                   fun () ->
                           {ok, Rev} = chronicle_kv:add(kv, a, b),
-                          {error, already_exists} = chronicle_kv:add(kv, a, c),
-                          ok = chronicle_rsm:sync_revision(kv, Rev, 10000),
-                          {ok, b} = chronicle_kv:get(kv, a),
+                          {error, {conflict, _}} = chronicle_kv:add(kv, a, c),
+                          {ok, {b, _}} = chronicle_kv:get(kv, a),
                           {ok, Rev2} = chronicle_kv:set(kv, a, c, Rev),
                           {error, _} = chronicle_kv:set(kv, a, d, Rev),
                           {ok, _} = chronicle_kv:set(kv, b, d),
                           {error, _} = chronicle_kv:delete(kv, a, Rev),
                           ok = chronicle_kv:delete(kv, a, Rev2),
 
-                          ok = chronicle_rsm:sync(kv, leader, 10000),
-                          ok = chronicle_rsm:sync(kv, quorum, 10000),
-                          {error, not_found} = chronicle_kv:get(kv, a),
+                          {error, not_found} = chronicle_kv:get(kv, a,
+                                                                #{read_cosistency => quorum}),
 
-                          {ok, Rev3} = chronicle_kv:transaction(kv, [],
-                                                                [{set, a, 84},
-                                                                 {set, c, 42}]),
+                          {ok, _} = chronicle_kv:submit_transaction(
+                                         kv, [], [{set, a, 84},
+                                                  {set, c, 42}]),
                           {error, {conflict, _}} =
-                              chronicle_kv:transaction(kv,
-                                                       [{a, Rev2}],
-                                                       [{set, a, 1234}]),
+                              chronicle_kv:submit_transaction(kv,
+                                                              [{revision, a, Rev2}],
+                                                              [{set, a, 1234}]),
 
-                          {ok, Rev4} =
-                              chronicle_kv:transaction(kv,
-                                                       [{a, Rev3}],
-                                                       [{set, a, 1234},
-                                                        {delete, c}]),
+                          {ok, _} =
+                              chronicle_kv:transaction(
+                                kv, [a],
+                                fun (#{a := {A, _}}) ->
+                                        84 = A,
+                                        {commit, [{set, a, A+1},
+                                                  {delete, c}]}
+                                end,
+                                #{read_consistency => leader}),
 
-                          ok = chronicle_rsm:sync_revision(kv, Rev4, 10000),
+                          {ok, _} = chronicle_kv:update(kv, a, fun (V) -> V+1 end),
+                          {ok, {86, _}} = chronicle_kv:get(kv, a),
+
                           {error, not_found} = chronicle_kv:get(kv, c),
 
                           ok
