@@ -15,8 +15,18 @@
 %%
 -module(chronicle).
 
+-include("chronicle.hrl").
+
+-import(chronicle_utils, [with_leader/2]).
+
+-export([provision/1]).
+-export([get_voters/0, get_voters/1]).
+-export([add_voters/1, add_voters/2, remove_voters/1, remove_voters/2]).
+
 -export_type([uuid/0, peer/0, history_id/0,
               leader_term/0, seqno/0, peer_position/0, revision/0]).
+
+-define(DEFAULT_TIMEOUT, 15000).
 
 -type uuid() :: binary().
 -type peer() :: atom().
@@ -26,3 +36,84 @@
 -type seqno() :: pos_integer().
 -type peer_position() :: {TermVoted :: leader_term(), HighSeqno :: seqno()}.
 -type revision() :: {history_id(), seqno()}.
+
+-spec provision([Machine]) -> chronicle_agent:provision_result() when
+      Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
+provision(Machines0) ->
+    HistoryId = chronicle_utils:random_uuid(),
+    Term = ?NO_TERM,
+    Machines = maps:from_list(
+                 [{Name, #rsm_config{module = Module, args = Args}} ||
+                      {Name, Module, Args} <- Machines0]),
+    Config = #config{voters = [?PEER()], state_machines = Machines},
+    chronicle_agent:provision(HistoryId, Term, Config).
+
+add_voters(Voters) ->
+    add_voters(Voters, ?DEFAULT_TIMEOUT).
+
+add_voters(Voters, Timeout) ->
+    update_voters(
+      fun (OldVoters) ->
+              Voters ++ OldVoters
+      end, Timeout).
+
+remove_voters(Voters) ->
+    remove_voters(Voters, ?DEFAULT_TIMEOUT).
+
+remove_voters(Voters, Timeout) ->
+    update_voters(
+      fun (OldVoters) ->
+              OldVoters -- Voters
+      end, Timeout).
+
+get_voters() ->
+    get_voters(?DEFAULT_TIMEOUT).
+
+get_voters(Timeout) ->
+    case get_config(Timeout) of
+        {ok, Config, _} ->
+            {ok, Config#config.voters};
+        Error ->
+            Error
+    end.
+
+get_config(Timeout) ->
+    with_leader(Timeout,
+                fun (TRef, Leader) ->
+                        get_config(Leader, TRef)
+                end).
+
+get_config(Leader, TRef) ->
+    chronicle_server:get_config(Leader, TRef).
+
+update_voters(Fun, Timeout) ->
+    update_config(
+      fun (#config{voters = Voters} = Config) ->
+              NewVoters = Fun(Voters),
+              Config#config{voters = lists:usort(NewVoters)}
+      end, Timeout).
+
+update_config(Fun, Timeout) ->
+    with_leader(Timeout,
+                fun (TRef, Leader) ->
+                        update_config_loop(Fun, Leader, TRef)
+                end).
+
+update_config_loop(Fun, Leader, TRef) ->
+    case get_config(Leader, TRef) of
+        {ok, Config, ConfigRevision} ->
+            NewConfig = Fun(Config),
+            case cas_config(Leader, NewConfig, ConfigRevision, TRef) of
+                {ok, _} ->
+                    ok;
+                {error, {cas_failed, _}} ->
+                    update_config_loop(Fun, Leader, TRef);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+cas_config(Leader, NewConfig, CasRevision, TRef) ->
+    chronicle_server:cas_config(Leader, NewConfig, CasRevision, TRef).

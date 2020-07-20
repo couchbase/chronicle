@@ -13,8 +13,6 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
-%% TODO: notify about committed values
-%% TODO: timeout after some time when failing to get a quorum
 -module(chronicle_server).
 
 -compile(export_all).
@@ -22,13 +20,11 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call_async/2]).
+-import(chronicle_utils, [call/3, call_async/2]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
-
--import(chronicle_utils, [parallel_mapfold/4]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
@@ -50,11 +46,14 @@
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
+get_config(Leader, Timeout) ->
+    call(?SERVER(Leader), get_config, Timeout).
+
 %% TODO: think more about what CasRevision should be.
 %%
 %% Specifically, should it or should it not include a term number.
-cas_config(Peer, NewConfig, CasRevision) ->
-    gen_statem:call(?SERVER(Peer), {cas_config, NewConfig, CasRevision}).
+cas_config(Leader, NewConfig, CasRevision, Timeout) ->
+    call(?SERVER(Leader), {cas_config, NewConfig, CasRevision}, Timeout).
 
 sync_quorum(Tag, HistoryId, Term) ->
     gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
@@ -63,9 +62,6 @@ sync_quorum(Tag, HistoryId, Term) ->
 rsm_command(HistoryId, Term, RSMName, CommandId, Command) ->
     gen_statem:cast(?SERVER, {rsm_command,
                               HistoryId, Term, RSMName, CommandId, Command}).
-
-announce_term() ->
-    gen_statem:cast(?SERVER, announce_term).
 
 %% Meant to only be used by chronicle_proposer.
 proposer_ready(Pid, HistoryId, Term, HighSeqno) ->
@@ -109,8 +105,8 @@ handle_event(info, {proposer_msg, Msg}, #leader{} = State, Data) ->
     handle_proposer_msg(Msg, State, Data);
 handle_event(info, {batch_ready, BatchField}, State, Data) ->
     handle_batch_ready(BatchField, State, Data);
-handle_event(cast, announce_term, State, Data) ->
-    handle_announce_term(State, Data);
+handle_event({call, From}, get_config, State, Data) ->
+    handle_get_config(From, State, Data);
 handle_event({call, From}, {cas_config, NewConfig, Revision}, State, Data) ->
     handle_cas_config(NewConfig, Revision, From, State, Data);
 handle_event(cast,
@@ -163,7 +159,6 @@ handle_state_enter(#leader{history_id = HistoryId,
                         commands_batch = CommandsBatch,
                         syncs_batch = SyncsBatch,
                         requests_in_flight = #{}},
-    announce_term(State, NewData),
     NewData;
 handle_state_enter(_State, Data) ->
     Data.
@@ -173,7 +168,9 @@ handle_chronicle_event({leader, LeaderInfo}, State, Data) ->
 
 handle_new_leader(no_leader, _State, Data) ->
     {next_state, #follower{}, Data};
-handle_new_leader({Leader, HistoryId, Term}, _State, Data) ->
+handle_new_leader(LeaderInfo, _State, Data) ->
+    #{leader := Leader, history_id := HistoryId, term := Term} = LeaderInfo,
+
     case Leader =:= ?PEER() of
         true ->
             {next_state, #leader{history_id = HistoryId, term = Term}, Data};
@@ -203,7 +200,7 @@ handle_proposer_ready(HistoryId, Term, HighSeqno,
                       #data{proposer_ready = false} = Data) ->
     NewData = Data#data{proposer_ready = true,
                         term_high_seqno = HighSeqno},
-    announce_term(State, NewData),
+    announce_term_established(State, NewData),
     {keep_state, NewData}.
 
 handle_reply_requests(Replies, #leader{},
@@ -235,7 +232,7 @@ reply_request(ReplyTo, Reply) ->
 
 handle_leader_request(_, ReplyTo, #follower{}, _Fun) ->
     %% TODO
-    reply_request(ReplyTo, {error, not_leader}),
+    reply_request(ReplyTo, {error, {leader_error, not_leader}}),
     keep_state_and_data;
 handle_leader_request(HistoryAndTerm, ReplyTo,
                       #leader{history_id = OurHistoryId, term = OurTerm},
@@ -245,7 +242,7 @@ handle_leader_request(HistoryAndTerm, ReplyTo,
         true ->
             Fun();
         false ->
-            reply_request(ReplyTo, {error, not_leader}),
+            reply_request(ReplyTo, {error, {leader_error, not_leader}}),
             keep_state_and_data
     end.
 
@@ -313,11 +310,18 @@ store_requests(Requests, #data{requests_in_flight = InFlight} = Data) ->
 
     Data#data{requests_in_flight = NewInFlight}.
 
-handle_announce_term(#leader{} = State, Data) ->
-    announce_term(State, Data),
-    keep_state_and_data;
-handle_announce_term(_State, _Data) ->
-    keep_state_and_data.
+handle_get_config(From, State, Data) ->
+    ReplyTo = {from, From},
+    handle_leader_request(
+      any, ReplyTo, State,
+      fun () ->
+              {keep_state, deliver_get_config(ReplyTo, Data)}
+      end).
+
+deliver_get_config(ReplyTo, #data{proposer = Proposer} = Data) ->
+    Ref = make_ref(),
+    chronicle_proposer:get_config(Proposer, Ref),
+    store_request(Ref, ReplyTo, Data).
 
 handle_cas_config(NewConfig, Revision, From, State, Data) ->
     ReplyTo = {from, From},
@@ -349,7 +353,8 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
     ?FLUSH({proposer_msg, _}),
     {PendingCommands, _} = chronicle_utils:batch_flush(CommandsBatch),
     {PendingSyncs, _} = chronicle_utils:batch_flush(SyncsBatch),
-    Reply = {error, leader_gone},
+    %% TODO: more detailed error
+    Reply = {error, {leader_error, leader_lost}},
 
     lists:foreach(
       fun ({ReplyTo, _Command}) ->
@@ -365,22 +370,14 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
               syncs_batch = undefined,
               commands_batch = undefined}.
 
-announce_term(#leader{history_id = HistoryId, term = Term},
-              #data{proposer_ready = ProposerReady,
-                    term_high_seqno = HighSeqno}) ->
-    Status =
-        case ProposerReady of
-            true ->
-                true = is_integer(HighSeqno),
-                {established, HighSeqno};
-            false ->
-                tentative
-        end,
-
-    chronicle_events:notify({term, HistoryId, Term, Status}).
+announce_term_established(#leader{history_id = HistoryId, term = Term},
+                          #data{proposer_ready = true,
+                                term_high_seqno = HighSeqno}) ->
+    true = is_integer(HighSeqno),
+    chronicle_leader:note_term_established(HistoryId, Term, HighSeqno).
 
 announce_term_finished(#leader{history_id = HistoryId, term = Term}) ->
-    chronicle_events:notify({term_finished, HistoryId, Term}).
+    chronicle_leader:note_term_finished(HistoryId, Term).
 
 -ifdef(TEST).
 
@@ -398,23 +395,22 @@ simple_test__() ->
                           end)
       end, Nodes),
 
-    Machines = #{kv => #rsm_config{module = chronicle_kv}},
-    rpc_node(a,
-             fun () ->
-                     ok = chronicle_agent:provision(
-                            <<"history">>, {1, ''},
-                            #config{voters = [a],
-                                    state_machines = Machines})
-             end),
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines)
+                  end),
 
     timer:sleep(1000),
 
-    {ok, _} = chronicle_server:cas_config(a,
-                                          #config{voters = Nodes,
-                                                  state_machines = Machines},
-                                          {<<"history">>, {1, ''}, 1}),
-
-    timer:sleep(1000),
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:add_voters(Nodes),
+                          ok = chronicle:remove_voters([d]),
+                          {ok, Voters} = chronicle:get_voters(),
+                          ?DEBUG("Voters: ~p", [Voters]),
+                          ok
+                  end),
 
     ok = chronicle_failover:failover(a, <<"failover">>, [a, b]),
 

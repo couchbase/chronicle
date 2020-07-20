@@ -18,6 +18,8 @@
 
 -include("chronicle.hrl").
 
+-import(chronicle_utils, [read_timeout/1]).
+
 -behavior(gen_statem).
 -compile(export_all).
 
@@ -30,8 +32,8 @@
 
 -define(TABLE, ?ETS_TABLE(?MODULE)).
 
--record(leader, { history_id, term }).
--record(follower, { leader, history_id, term }).
+-record(leader, { history_id, term, status }).
+-record(follower, { leader, history_id, term, status }).
 -record(observer, {}).
 -record(candidate, {}).
 
@@ -54,13 +56,35 @@ start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
 get_leader() ->
-    case get_published_leader() of
-        {ok, _} = Ok ->
-            Ok;
+    leader_info_to_leader(get_leader_info()).
+
+get_leader_info() ->
+    case ets:lookup(?TABLE, leader_info) of
+        [] ->
+            no_leader;
+        [{leader_info, no_leader}] ->
+            no_leader;
+        [{leader_info, LeaderInfo}] ->
+            LeaderInfo
+    end.
+
+wait_for_leader() ->
+    wait_for_leader(5000).
+
+wait_for_leader(Timeout) ->
+    case get_leader() of
+        {ok, Leader} ->
+            Leader;
         {error, no_leader} ->
-            %% TODO: timeout
-            R = gen_statem:call(?SERVER, {wait_for_leader, 5000}, infinity),
-            R
+            Result = gen_statem:call(?SERVER,
+                                     {wait_for_leader, read_timeout(Timeout)},
+                                     infinity),
+            case Result of
+                {ok, Leader} ->
+                    Leader;
+                {error, no_leader} ->
+                    exit(no_leader)
+            end
     end.
 
 announce_leader() ->
@@ -69,6 +93,13 @@ announce_leader() ->
 request_vote(Peer, Candidate, HistoryId, Position) ->
     gen_statem:call(?SERVER(Peer),
                     {request_vote, Candidate, HistoryId, Position}, infinity).
+
+note_term_finished(HistoryId, Term) ->
+    gen_statem:cast(?SERVER, {note_term_status, HistoryId, Term, finished}).
+
+note_term_established(HistoryId, Term, HighSeqno) ->
+    gen_statem:cast(?SERVER, {note_term_status,
+                              HistoryId, Term, {established, HighSeqno}}).
 
 %% gen_statem callbacks
 callback_mode() ->
@@ -100,8 +131,8 @@ handle_event(enter, OldState, State, Data) ->
     handle_state_enter(State, NewData1);
 handle_event(info, {chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
-handle_event(info, {heartbeat, Leader, HistoryId, Term}, State, Data) ->
-    handle_heartbeat(Leader, HistoryId, Term, State, Data);
+handle_event(info, {heartbeat, LeaderInfo}, State, Data) ->
+    handle_heartbeat(LeaderInfo, State, Data);
 handle_event(info, {'EXIT', Pid, Reason}, State, Data) ->
     handle_process_exit(Pid, Reason, State, Data);
 handle_event(info, {timeout, TRef, leader_wait}, State, Data) ->
@@ -115,6 +146,8 @@ handle_event(internal, {state_timer, send_heartbeat}, State, Data) ->
     handle_send_heartbeat(State, Data);
 handle_event(cast, announce_leader, State, Data) ->
     handle_announce_leader(State, Data);
+handle_event(cast, {note_term_status, HistoryId, Term, Status}, State, Data) ->
+    handle_note_term_status(HistoryId, Term, Status, State, Data);
 handle_event({call, From},
              {request_vote, Candidate, HistoryId, Position}, State, Data) ->
     handle_request_vote(Candidate, HistoryId, Position, From, State, Data);
@@ -128,8 +161,7 @@ handle_event(Type, Event, _State, _Data) ->
 
 terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data),
-    %% Reply with {error, no_leader} to leader waiters, if any.
-    reply_to_leader_waiters(State, Data),
+    reply_to_leader_waiters({error, no_leader}, Data),
     publish_leader(no_leader).
 
 %% internal
@@ -191,15 +223,11 @@ get_heartbeat_interval() ->
 
 is_interesting_event({metadata, _Metadata}) ->
     true;
-is_interesting_event({term_finished, _HistoryId, _Term}) ->
-    true;
 is_interesting_event(_) ->
     false.
 
 handle_chronicle_event({metadata, Metadata}, State, Data) ->
-    handle_new_metadata(Metadata, State, Data);
-handle_chronicle_event({term_finished, HistoryId, Term}, State, Data) ->
-    handle_term_finished(HistoryId, Term, State, Data).
+    handle_new_metadata(Metadata, State, Data).
 
 handle_new_metadata(Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),
@@ -261,13 +289,23 @@ metadata2data(Metadata, Data) ->
     Data#data{metadata = Metadata,
               peers = Peers -- [?PEER()]}.
 
-handle_term_finished(HistoryId, Term, State, Data) ->
+handle_note_term_status(HistoryId, Term, Status, State, Data) ->
     case check_is_leader(HistoryId, Term, State) of
         ok ->
-            ?INFO("Term ~p has finished. Stepping down.", [Term]),
-            {next_state, #observer{}, Data};
+            case Status of
+                finished ->
+                    ?INFO("Term ~p has finished. Stepping down.", [Term]),
+                    {next_state, #observer{}, Data};
+                {established, HighSeqno} ->
+                    ?INFO("Term ~p established with high seqno ~p.",
+                          [Term, HighSeqno]),
+                    tentative = State#leader.status,
+                    NewState = State#leader{status = Status},
+                    {next_state, NewState, Data}
+            end;
         {error, _} = Error ->
-            ?DEBUG("Received stale term_finished message: ~p", [Error]),
+            ?DEBUG("Ignoring stale term status ~p: ~p",
+                   [{HistoryId, Term, Status}, Error]),
             keep_state_and_data
     end.
 
@@ -284,13 +322,19 @@ handle_election_timeout(State, Data) ->
 
     {next_state, NewState, Data}.
 
-handle_heartbeat(Peer, HistoryId, Term, State, Data) ->
+handle_heartbeat(LeaderInfo, State, Data) ->
+    #{leader := Peer,
+      history_id := HistoryId,
+      term := Term,
+      status := Status} = LeaderInfo,
+
     case ?CHECK(check_history_id(HistoryId, Data),
                 check_accept_heartbeat(Term, State, Data)) of
         ok ->
             NewState = #follower{leader = Peer,
                                  history_id = HistoryId,
-                                 term = Term},
+                                 term = Term,
+                                 status = Status},
 
             %% TODO: it's somwhat ugly that I have to start election timer in
             %% two different places.
@@ -326,7 +370,9 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
             NewTerm = chronicle_utils:next_term(Term),
             ?INFO("Going to become a leader in term ~p (history id ~p)",
                   [NewTerm, HistoryId]),
-            NewState = #leader{history_id = HistoryId, term = NewTerm},
+            NewState = #leader{history_id = HistoryId,
+                               term = NewTerm,
+                               status = tentative},
             {next_state, NewState, NewData};
         {error, _} = Error ->
             ?INFO("Election failed: ~p", [Error]),
@@ -340,7 +386,7 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
             LatestTerm = get_established_term(Data),
             NewState = #follower{leader = Candidate,
                                  history_id = HistoryId,
-                                 term = tentative},
+                                 status = voted_for},
 
             {next_state, NewState, Data, {reply, From, {ok, LatestTerm}}};
         Error ->
@@ -349,11 +395,11 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
 
 handle_wait_for_leader(Timeout, From, State, Data) ->
     case state_leader(State) of
-        no_leader ->
+        {ok, _} = Reply ->
+            {keep_state_and_data, {reply, From, Reply}};
+        {error, no_leader} ->
             NewData = add_leader_waiter(Timeout, From, Data),
-            {keep_state, NewData};
-        LeaderInfo ->
-            {keep_state_and_data, {reply, From, {ok, LeaderInfo}}}
+            {keep_state, NewData}
     end.
 
 handle_leader_wait_timeout(TRef, State,
@@ -368,15 +414,7 @@ add_leader_waiter(Timeout, From, #data{leader_waiters = Waiters} = Data) ->
     NewWaiters = Waiters#{TRef => From},
     Data#data{leader_waiters = NewWaiters}.
 
-reply_to_leader_waiters(State, #data{leader_waiters = Waiters} = Data) ->
-    Reply =
-        case state_leader(State) of
-            no_leader ->
-                {error, no_leader};
-            LeaderInfo ->
-                {ok, LeaderInfo}
-        end,
-
+reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
     maps:fold(
       fun (TRef, From, _) ->
               gen_statem:reply(From, Reply),
@@ -455,10 +493,10 @@ handle_send_heartbeat(State, Data) ->
     send_heartbeat(State, Data),
     {keep_state, schedule_send_heartbeat(Data)}.
 
-send_heartbeat(#leader{history_id = HistoryId,
-                       term = Term},
+send_heartbeat(#leader{} = State,
                #data{peers = Peers}) ->
-    Heartbeat = {heartbeat, ?PEER(), HistoryId, Term},
+    LeaderInfo = state_leader_info(State),
+    Heartbeat = {heartbeat, LeaderInfo},
     lists:foreach(
       fun (Peer) ->
               send_msg(Peer, Heartbeat)
@@ -468,23 +506,23 @@ send_msg(Peer, Msg) ->
     ?SEND(?SERVER(Peer), Msg, [nosuspend, noconnect]).
 
 handle_announce_leader(State, _Data) ->
-    do_announce_leader(state_leader(State)),
+    do_announce_leader(state_leader_info(State)),
     keep_state_and_data.
 
 maybe_publish_leader(OldState, State, Data) ->
-    OldLeaderInfo = state_leader(OldState),
-    NewLeaderInfo = state_leader(State),
+    OldLeaderInfo = state_leader_info(OldState),
+    NewLeaderInfo = state_leader_info(State),
 
     case OldLeaderInfo =:= NewLeaderInfo of
         true ->
             Data;
         false ->
             publish_leader(NewLeaderInfo),
-            case NewLeaderInfo of
-                no_leader ->
+            case leader_info_to_leader(NewLeaderInfo) of
+                {error, no_leader} ->
                     Data;
-                _ ->
-                    reply_to_leader_waiters(State, Data)
+                {ok, _} = Reply ->
+                    reply_to_leader_waiters(Reply, Data)
             end
     end.
 
@@ -530,7 +568,7 @@ check_grant_vote(PeerPosition, State, #data{metadata = Metadata}) ->
         #candidate{} ->
             {error, in_election};
         _ ->
-            {error, {have_leader, state_leader(State)}}
+            {error, {have_leader, state_leader_info(State)}}
     end.
 
 state_name(State) ->
@@ -577,26 +615,45 @@ cancel_all_state_timers(#data{state_timers = StateTimers} = Data) ->
     Data#data{state_timers = #{}}.
 
 state_leader(State) ->
+    leader_info_to_leader(state_leader_info(State)).
+
+state_leader_info(State) ->
     case State of
-        #leader{history_id = HistoryId, term = Term} ->
-            {?PEER(), HistoryId, Term};
-        #follower{leader = Leader, history_id = HistoryId, term = Term} ->
-            case Term of
-                tentative ->
-                    no_leader;
-                _ ->
-                    {Leader, HistoryId, Term}
-            end;
+        #leader{history_id = HistoryId, term = Term, status = Status} ->
+            make_leader_info(?PEER(), HistoryId, Term, Status);
+        #follower{leader = Leader,
+                  history_id = HistoryId,
+                  term = Term,
+                  status = Status} ->
+            make_leader_info(Leader, HistoryId, Term, Status);
         _ ->
             no_leader
     end.
 
+leader_info_to_leader(no_leader) ->
+    {error, no_leader};
+leader_info_to_leader(#{leader := Leader,
+                        status := Status}) ->
+    case Status of
+        {established, _} ->
+            %% Expose only established leaders to clients
+            {ok, Leader};
+        _ ->
+            {error, no_leader}
+    end.
+
+make_leader_info(Leader, HistoryId, Term, Status) ->
+    #{leader => Leader,
+      history_id => HistoryId,
+      term => Term,
+      status => Status}.
+
 publish_leader(LeaderInfo) ->
-    ets:insert(?TABLE, {leader, LeaderInfo}),
+    ets:insert(?TABLE, {leader_info, LeaderInfo}),
     do_announce_leader(LeaderInfo).
 
 do_announce_leader(LeaderInfo) ->
-    chronicle_events:notify({leader, LeaderInfo}).
+    chronicle_events:sync_notify({leader, LeaderInfo}).
 
 get_history_id(#data{metadata = Metadata}) ->
     chronicle_agent:get_history_id(Metadata).
@@ -608,10 +665,16 @@ get_established_term(#data{metadata = Metadata}) ->
     Metadata#metadata.term.
 
 get_active_leader_term(State) ->
-    case state_leader(State) of
-        {_Leader, _HistoryId, LeaderTerm} ->
-            {ok, LeaderTerm};
-        no_leader ->
+    case state_leader_info(State) of
+        #{status := Status, term := LeaderTerm} ->
+            case Status of
+                voted_for ->
+                    no_leader;
+                _ ->
+                    true = (LeaderTerm =/= undefined),
+                    {ok, LeaderTerm}
+            end;
+        _ ->
             no_leader
     end.
 
@@ -623,14 +686,4 @@ get_last_known_leader_term(State, Data) ->
             LeaderTerm;
         no_leader ->
             get_established_term(Data)
-    end.
-
-get_published_leader() ->
-    case ets:lookup(?TABLE, leader) of
-        [] ->
-            {error, no_leader};
-        [{leader, no_leader}] ->
-            {error, no_leader};
-        [{leader, LeaderInfo}] ->
-            {ok, LeaderInfo}
     end.

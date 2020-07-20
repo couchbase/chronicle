@@ -18,6 +18,12 @@
 
 -include("chronicle.hrl").
 
+-import(chronicle_utils, [with_timeout/2]).
+
+%% TODO: make configurable
+-define(COMMAND_TIMEOUT, 15000).
+-define(QUERY_TIMEOUT, 15000).
+
 -record(state, {table}).
 -record(data, {event_mgr}).
 -record(kv, {key, value, revision}).
@@ -88,7 +94,8 @@ get(Name, Key) ->
     get(Name, Key, #{}).
 
 get(Name, Key, Opts) ->
-    case handle_read_consistency(Name, Opts) of
+    Timeout = maps:get(timeout, Opts, ?QUERY_TIMEOUT),
+    case handle_read_consistency(Name, Timeout, Opts) of
         ok ->
             handle_get(?ETS_TABLE(Name), Key);
         {error, _} = Error ->
@@ -148,35 +155,40 @@ terminate(_Reason, _State, _Data) ->
 
 %% internal
 submit_query(Name, Query, Opts) ->
-    case handle_read_consistency(Name, Opts) of
-        ok ->
-            chronicle_rsm:query(Name, Query);
-        {error, _} = Error ->
-            Error
-    end.
+    Timeout = maps:get(timeout, Opts, ?QUERY_TIMEOUT),
+    with_timeout(Timeout,
+                 fun (TRef) ->
+                         case handle_read_consistency(Name, TRef, Opts) of
+                             ok ->
+                                 chronicle_rsm:query(Name, Query, TRef);
+                             {error, _} = Error ->
+                                 Error
+                         end
+                 end).
 
-handle_read_consistency(Name, Opts) ->
+handle_read_consistency(Name, Timeout, Opts) ->
     case maps:get(read_consistency, Opts, local) of
         local ->
             ok;
         Consistency
           when Consistency =:= leader;
                Consistency =:= quorum ->
-            %% TODO: timeouts
-            %% TODO: errors
-            chronicle_rsm:sync(Name, Consistency, 10000)
+            chronicle_rsm:sync(Name, Consistency, Timeout)
     end.
 
 submit_command(Name, Command, Opts) ->
-    Result = chronicle_rsm:command(Name, Command),
-    handle_read_own_writes(Name, Result, Opts),
-    Result.
+    Timeout = maps:get(timeout, Opts, ?COMMAND_TIMEOUT),
+    with_timeout(Timeout,
+                 fun (TRef) ->
+                         Result = chronicle_rsm:command(Name, Command),
+                         handle_read_own_writes(Name, Result, TRef, Opts),
+                         Result
+                 end).
 
-handle_read_own_writes(Name, Result, Opts) ->
+handle_read_own_writes(Name, Result, TRef, Opts) ->
     case get_read_own_writes_revision(Result, Opts) of
         {ok, Revision} ->
-            %% TODO: timeout
-            chronicle_rsm:sync_revision(Name, Revision, 10000);
+            chronicle_rsm:sync_revision(Name, Revision, TRef);
         no_revision ->
             ok
     end.

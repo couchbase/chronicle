@@ -155,6 +155,52 @@ call_async(ServerRef, Tag, Request) ->
     ?SEND(ServerRef, {'$gen_call', {self(), Tag}, Request}),
     Tag.
 
+call(ServerRef, Call) ->
+    call(ServerRef, Call, 5000).
+
+%% A version of gen_{server,statem}:call/3 function that can take a timeout
+%% reference in place of a literal timeout value.
+call(ServerRef, Call, Timeout) ->
+    do_call(ServerRef, Call, read_timeout(Timeout)).
+
+do_call(ServerRef, Call, Timeout) ->
+    try gen:call(ServerRef, '$gen_call', Call, Timeout) of
+        {ok, Reply} ->
+            Reply
+    catch
+        Class:Reason ->
+            erlang:raise(
+              Class,
+              {Reason, {gen, call, [ServerRef, Call, Timeout]}},
+              erlang:get_stacktrace())
+    end.
+
+with_timeout(TRef, Fun)
+  when is_reference(TRef) ->
+    Fun(TRef);
+with_timeout(infinity, Fun) ->
+    Fun(infinity);
+with_timeout(Timeout, Fun) ->
+    TRef = erlang:start_timer(Timeout, self(), timeout),
+    try
+        Fun(TRef)
+    after
+        erlang:cancel_timer(TRef),
+        ?FLUSH({timeout, TRef, _})
+    end.
+
+read_timeout(infinity) ->
+    infinity;
+read_timeout(Timeout) when is_integer(Timeout) ->
+    Timeout;
+read_timeout(TRef) when is_reference(TRef) ->
+    case erlang:read_timer(TRef) of
+        false ->
+            0;
+        T when is_integer(T) ->
+            T
+    end.
+
 term_number({TermNumber, _TermLeader}) ->
     TermNumber.
 
@@ -340,3 +386,51 @@ gb_trees_filter_test() ->
                  gb_trees:to_list(gb_trees_filter(IsEven, gb_trees:empty()))).
 
 -endif.
+
+random_uuid() ->
+    hexify(crypto:strong_rand_bytes(16)).
+
+hexify(Binary) ->
+    << <<(hexify_digit(High)), (hexify_digit(Low))>>
+       || <<High:4, Low:4>> <= Binary >>.
+
+hexify_digit(0) -> $0;
+hexify_digit(1) -> $1;
+hexify_digit(2) -> $2;
+hexify_digit(3) -> $3;
+hexify_digit(4) -> $4;
+hexify_digit(5) -> $5;
+hexify_digit(6) -> $6;
+hexify_digit(7) -> $7;
+hexify_digit(8) -> $8;
+hexify_digit(9) -> $9;
+hexify_digit(10) -> $a;
+hexify_digit(11) -> $b;
+hexify_digit(12) -> $c;
+hexify_digit(13) -> $d;
+hexify_digit(14) -> $e;
+hexify_digit(15) -> $f.
+
+%% TODO: Make this configurable
+-define(LEADER_RETRIES, 1).
+
+with_leader(Timeout, Fun) ->
+    with_leader(Timeout, ?LEADER_RETRIES, Fun).
+
+with_leader(Timeout, Retries, Fun) ->
+    with_timeout(Timeout,
+                 fun (TRef) ->
+                         with_leader_loop(TRef, Retries, Fun)
+                 end).
+
+with_leader_loop(TRef, Retries, Fun) ->
+    Leader = chronicle_leader:wait_for_leader(TRef),
+    Result = Fun(TRef, Leader),
+    case Result of
+        {error, {leader_error, not_leader}} when Retries > 0 ->
+            with_leader_loop(TRef, Retries - 1, Fun);
+        {error, {leader_error, _} = Error} ->
+            exit({Leader, Error});
+        _ ->
+            Result
+    end.

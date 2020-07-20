@@ -20,6 +20,8 @@
 
 -compile(export_all).
 
+-export_type([provision_result/0]).
+
 -behavior(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("chronicle.hrl").
@@ -94,12 +96,11 @@ get_history_id(#metadata{pending_branch =
                              #branch{history_id = PendingHistoryId}}) ->
     PendingHistoryId.
 
-%% TODO: should only take the config. The rest should be figured out by the
-%% acceptor?
+-type provision_result() :: ok | {error, already_provisioned}.
 -spec provision(chronicle:history_id(),
                 chronicle:leader_term(),
                 #config{}) ->
-          ok | {error, already_provisioned}.
+          provision_result().
 provision(HistoryId, Term, Config) ->
     case gen_server:call(?SERVER, {provision, HistoryId, Term, Config}) of
         ok ->

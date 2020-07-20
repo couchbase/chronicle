@@ -18,6 +18,9 @@
 
 -include("chronicle.hrl").
 
+-import(chronicle_utils, [call/3, read_timeout/1,
+                          with_leader/2, with_timeout/2]).
+
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
 -define(SERVER(Peer, Name), ?SERVER_NAME(Peer, Name)).
@@ -31,12 +34,14 @@
 -type sync_revision_requests() ::
         gb_trees:tree(
           {chronicle:seqno(), reference()},
-          {From :: any(), Timer :: reference(), chronicle:revision()}).
+          {From :: any(), Timer :: reference(), chronicle:history_id()}).
+
+-type leader_status() :: {wait_for_seqno, chronicle:seqno()} | established.
 
 -record(follower, {}).
 -record(leader, { history_id :: chronicle:history_id(),
                   term :: chronicle:leader_term(),
-                  term_seqno :: undefined | chronicle:seqno() }).
+                  status :: leader_status() }).
 
 -record(data, { name :: atom(),
 
@@ -60,44 +65,52 @@ command(Name, Command) ->
     command(Name, Command, 5000).
 
 command(Name, Command, Timeout) ->
-    %% TODO: deal with errors
-    {ok, {Leader, _, _}} = chronicle_leader:get_leader(),
+    unwrap_command_reply(
+      with_leader(Timeout,
+                  fun (TRef, Leader) ->
+                          command(Leader, Name, Command, TRef)
+                  end)).
+
+command(Leader, Name, Command, Timeout) ->
     ?DEBUG("Sending Command to ~p: ~p", [Leader, Command]),
-    gen_statem:call(?SERVER(Leader, Name), {command, Command}, Timeout).
+    call(?SERVER(Leader, Name), {command, Command}, Timeout).
 
 query(Name, Query) ->
     query(Name, Query, 5000).
 
 query(Name, Query, Timeout) ->
-    gen_statem:call(?SERVER(Name), {query, Query}, Timeout).
+    call(?SERVER(Name), {query, Query}, Timeout).
 
 get_applied_revision(Name, Type, Timeout) ->
-    %% TODO: deal with errors
-    {ok, {Leader, _, _}} = chronicle_leader:get_leader(),
-    gen_statem:call(?SERVER(Leader, Name),
-                    {get_applied_revision, Type}, Timeout).
+    with_leader(Timeout,
+                fun (TRef, Leader) ->
+                        get_applied_revision(Leader, Name, Type, TRef)
+                end).
 
-sync_revision(Name, Revision, Timeout) ->
+get_applied_revision(Leader, Name, Type, Timeout) ->
+    call(?SERVER(Leader, Name), {get_applied_revision, Type}, Timeout).
+
+sync_revision(Name, Revision, Timeout0) ->
     %% TODO: add fast path
-    case gen_statem:call(?SERVER(Name), {sync_revision, Revision, Timeout}) of
+    Timeout = read_timeout(Timeout0),
+    Request = {sync_revision, Revision, Timeout},
+    case call(?SERVER(Name), Request, infinity) of
         ok ->
             ok;
-        {error, Timeout} ->
+        {error, timeout} ->
             exit({timeout, {sync_revision, Name, Revision, Timeout}})
     end.
 
 sync(Name, Type, Timeout) ->
-    chronicle_utils:run_on_process(
-      fun () ->
-              case get_applied_revision(Name, Type, infinity) of
-                  {ok, Revision} ->
-                      %% TODO: this use of timeout is ugly
-                      sync_revision(Name, Revision, Timeout + 1000);
-                  {error, _} = Error ->
-                      %% TODO: deal with not_leader errors
-                      Error
-              end
-      end, Timeout).
+    with_timeout(Timeout,
+                 fun (TRef) ->
+                         case get_applied_revision(Name, Type, TRef) of
+                             {ok, Revision} ->
+                                 sync_revision(Name, Revision, TRef);
+                             {error, _} = Error ->
+                                 Error
+                         end
+                 end).
 
 %% gen_statem callbacks
 callback_mode() ->
@@ -117,7 +130,7 @@ init([Name, Mod, ModArgs]) ->
                       end
               end),
 
-            chronicle_server:announce_term(),
+            chronicle_leader:announce_leader(),
 
             {ok, Metadata} = chronicle_agent:get_metadata(),
             #metadata{committed_seqno = CommittedSeqno} = Metadata,
@@ -181,7 +194,7 @@ terminate(Reason, _State, #data{mod = Mod,
 %% internal
 handle_command(_Command, From, #follower{}, _Data) ->
     {keep_state_and_data,
-     {reply, From, {error, not_leader}}};
+     {reply, From, {error, {leader_error, not_leader}}}};
 handle_command(Command, From, #leader{} = State, Data) ->
     handle_command_leader(Command, From, State, Data).
 
@@ -248,7 +261,7 @@ sync_revision_requests_reply_loop(Seqno, Requests) ->
         true ->
             Requests;
         false ->
-            {{{ReqSeqno, _} = Request, RequestData}, NewRequests} =
+            {{ReqSeqno, _} = Request, RequestData, NewRequests} =
                 gb_trees:take_smallest(Requests),
             case ReqSeqno =< Seqno of
                 true ->
@@ -292,7 +305,7 @@ sync_revision_cancel_timer(Request, TRef) ->
 
 handle_sync_revision_timeout(Request, _State,
                              #data{sync_revision_requests = Requests} = Data) ->
-    {{From, _}, NewRequests} = gb_trees:take(Request, Requests),
+    {{From, _, _}, NewRequests} = gb_trees:take(Request, Requests),
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
@@ -304,8 +317,29 @@ handle_entries(HighSeqno, Entries, State, #data{reader = Reader,
     erlang:demonitor(MRef, [flush]),
 
     NewData0 = Data#data{reader = undefined, reader_mref = undefined},
-    NewData = apply_entries(HighSeqno, Entries, State, NewData0),
-    {keep_state, maybe_start_reader(NewData)}.
+    NewData1 = apply_entries(HighSeqno, Entries, State, NewData0),
+    NewData = maybe_start_reader(NewData1),
+
+    {next_state,
+     maybe_mark_leader_established(State, NewData),
+     NewData}.
+
+%% Mark the leader established when applied seqno catches up with the high
+%% seqno as of when the term was established.
+maybe_mark_leader_established(State, Data) ->
+    case State of
+        #follower{} ->
+            State;
+        #leader{status = established} ->
+            State;
+        #leader{status = {wait_for_seqno, Seqno}} ->
+            case Data#data.applied_seqno >= Seqno of
+                true ->
+                    State#leader{status = established};
+                false ->
+                    State
+            end
+    end.
 
 apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
                                                mod_state = ModState,
@@ -390,7 +424,7 @@ pending_command_reply(Ref, Term, Reply, OurTerm, Clients) ->
         true ->
             case maps:take(Ref, Clients) of
                 {{From, command}, NewClients} ->
-                    gen_statem:reply(From, Reply),
+                    gen_statem:reply(From, {command_reply, Reply}),
                     NewClients;
                 error ->
                     Clients
@@ -400,34 +434,33 @@ pending_command_reply(Ref, Term, Reply, OurTerm, Clients) ->
     end.
 
 handle_get_applied_revision(_Type, From, #follower{}, _Data) ->
-    {keep_state_and_data, {reply, From, {error, not_leader}}};
-handle_get_applied_revision(Type, From, #leader{} = State, Data) ->
-    handle_get_applied_revision_leader(Type, From, State, Data).
+    {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}};
+handle_get_applied_revision(Type, From,
+                            #leader{status = Status} = State, Data) ->
+    case Status of
+        established ->
+            handle_get_applied_revision_leader(Type, From, State, Data);
+        {wait_for_seqno, _} ->
+            %% When we've just become the leader, we are guaranteed to have
+            %% all mutations that might have been committed by the old leader,
+            %% but there's no way to know what was and what wasn't
+            %% committed. So we need to wait until all uncommitted entries
+            %% that we have get committed.
+            %%
+            %% Note, that we can't simply return TermSeqno to the caller. That
+            %% is because the log entry at TermSeqno might not have been
+            %% committed. And if another leader immediately takes over, it may
+            %% not have that entry and may never commit it. So the caller will
+            %% essentially get stuck. So we need to postpone handling the call
+            %% until we know that TermSeqno is committed.
+            {keep_state_and_data, postpone}
+    end.
 
-handle_get_applied_revision_leader(_Type, _From,
-                                   #leader{term_seqno = undefined},
-                                   _Data) ->
-    %% The term is not fully established yet, so we can't handle the
-    %% request. Postpone it till the high seqno is known.
-    {keep_state_and_data, postpone};
 handle_get_applied_revision_leader(Type, From, State, Data) ->
-    #leader{history_id = HistoryId, term_seqno = TermSeqno} = State,
+    established = State#leader.status,
     #data{applied_seqno = AppliedSeqno,
           applied_history_id = AppliedHistoryId} = Data,
-    Revision =
-        case TermSeqno > AppliedSeqno of
-            true ->
-                %% When we've just become the leader, we are guaranteed to
-                %% have all mutations that might have been committed by the
-                %% old leader, but there's no way to know what was and what
-                %% wasn't committed. So we need to wait until all uncommitted
-                %% entries that we have get committed. That's what this
-                %% effectively achieves.
-                {HistoryId, TermSeqno};
-            false ->
-                {AppliedHistoryId, AppliedSeqno}
-        end,
-
+    Revision = {AppliedHistoryId, AppliedSeqno},
     case Type of
         leader ->
             {keep_state_and_data, {reply, From, {ok, Revision}}};
@@ -462,52 +495,63 @@ handle_sync_quorum_result(Ref, Result, _State,
             keep_state_and_data
     end.
 
-is_interesting_event({term, _, _, _}) ->
-    true;
-is_interesting_event({term_finished, _, _}) ->
+is_interesting_event({leader, _}) ->
     true;
 is_interesting_event({metadata, _}) ->
     true;
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({term, HistoryId, Term, Status}, State, Data) ->
-    handle_term_status(HistoryId, Term, Status, State, Data);
-handle_chronicle_event({term_finished, HistoryId, Term}, State, Data) ->
-    handle_term_finished(HistoryId, Term, State, Data);
+handle_chronicle_event({leader, LeaderInfo}, State, Data) ->
+    handle_leader_info(LeaderInfo, State, Data);
 handle_chronicle_event({metadata, Metadata}, State, Data) ->
     handle_new_metadata(Metadata, State, Data).
 
-handle_term_status(HistoryId, Term, tentative, State, Data) ->
-    %% For each started term, we should always see the corresponding
-    %% term_finished message before a new term can be started.
-    #follower{} = State,
-    {next_state,
-     #leader{history_id = HistoryId,
-             term = Term,
-             term_seqno = undefined},
-     Data};
-handle_term_status(HistoryId, Term, {established, HighSeqno}, _State, Data) ->
-    {next_state,
-     #leader{history_id = HistoryId,
-             term = Term,
-             term_seqno = HighSeqno},
-     Data}.
-
-handle_term_finished(HistoryId, Term, State, Data) ->
-    case is_leader(HistoryId, Term, State) of
+handle_leader_info(LeaderInfo, State, Data) ->
+    case should_become_leader(LeaderInfo) of
         true ->
+            #{history_id := HistoryId,
+              term := Term,
+              status := {established, HighSeqno}} = LeaderInfo,
+            Status =
+                case Data#data.applied_seqno >= HighSeqno of
+                    true ->
+                        established;
+                    false ->
+                        %% Some of the entries before and including HighSeqno
+                        %% may or may not be committed. So we need to wait
+                        %% till their status resolves (that is, till they get
+                        %% committed), before we can respond to certain
+                        %% operations (get_applied_revision specifically).
+                        {wait_for_seqno, HighSeqno}
+                end,
+
             {next_state,
-             #follower{},
-             flush_pending_clients({error, leader_gone}, Data)};
+             #leader{history_id = HistoryId,
+                     term = Term,
+                     status = Status},
+             Data};
         false ->
-            %% This is possible if chronicle_rsm is started around the time
-            %% when a term is about to conclude. But if chronicle_rsm believes
-            %% that it's a leader in some term, it should always receive the
-            %% corresponding term_finished notification.
-            #follower{} = State,
-            keep_state_and_data
+            maybe_step_down(State, Data)
     end.
+
+should_become_leader(no_leader) ->
+    false;
+should_become_leader(#{leader := Leader, status := Status}) ->
+    case Status of
+        {established, _} ->
+            Leader =:= ?PEER();
+        _ ->
+            false
+    end.
+
+maybe_step_down(#follower{}, _Data) ->
+    keep_state_and_data;
+maybe_step_down(#leader{}, Data) ->
+    {next_state,
+     #follower{},
+     %% TODO: More detailed reason for why leader is gone
+     flush_pending_clients({error, {leader_error, leader_lost}}, Data)}.
 
 handle_new_metadata(#metadata{committed_seqno = CommittedSeqno},
                     _State, Data) ->
@@ -555,12 +599,6 @@ get_log(#data{name = Name,
 
     {AvailableSeqno, Entries}.
 
-is_leader(_HistoryId, _Term, #follower{}) ->
-    false;
-is_leader(HistoryId, Term,
-          #leader{history_id = OurHistoryId, term = OurTerm}) ->
-    HistoryId =:= OurHistoryId andalso Term =:= OurTerm.
-
 submit_command(Command, From,
                #leader{history_id = HistoryId, term = Term},
                #data{name = Name} = Data) ->
@@ -581,3 +619,11 @@ flush_pending_clients(Reply, #data{pending_clients = Clients} = Data) ->
 
 set_mod_data(ModData, Data) ->
     Data#data{mod_data = ModData}.
+
+unwrap_command_reply(Reply) ->
+    case Reply of
+        {command_reply, R} ->
+            R;
+        _ ->
+            Reply
+    end.

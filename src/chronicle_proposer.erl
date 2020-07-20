@@ -58,7 +58,7 @@
                 sync_requests,
 
                 config_change_from,
-                postponed_config_changes}).
+                postponed_config_requests}).
 
 -record(peer_status, { peer,
                        needs_sync,
@@ -78,6 +78,9 @@ start_link(HistoryId, Term) ->
 
 sync_quorum(Pid, Ref) ->
     gen_statem:cast(Pid, {sync_quorum, Ref}).
+
+get_config(Pid, Ref) ->
+    gen_statem:cast(Pid, {get_config, Ref}).
 
 cas_config(Pid, Ref, NewConfig, Revision) ->
     gen_statem:cast(Pid, {cas_config, Ref, NewConfig, Revision}).
@@ -107,7 +110,7 @@ init([Parent, HistoryId, Term]) ->
                   failed_votes = [],
                   pending_entries = queue:new(),
                   sync_requests = SyncRequests,
-                  postponed_config_changes = []},
+                  postponed_config_requests = []},
 
     {ok, establish_term, Data}.
 
@@ -149,15 +152,20 @@ handle_event(cast, _Request, establish_term, _Data) ->
     {keep_state_and_data, postpone};
 handle_event(cast, {sync_quorum, Ref}, proposing, Data) ->
     handle_sync_quorum(Ref, Data);
-handle_event(cast, {cas_config, Ref, NewConfig, Revision} = Request, proposing,
-             #data{postponed_config_changes = Postponed} = Data) ->
-    case is_config_committed(Data) of
-        true ->
-            handle_cas_config(Ref, NewConfig, Revision, Data);
-        false ->
-            NewPostponed = [{cast, Request} | Postponed],
-            {keep_state, Data#data{postponed_config_changes = NewPostponed}}
-    end;
+handle_event(cast, {get_config, Ref} = Request, proposing, Data) ->
+    maybe_postpone_config_request(
+      Request, Data,
+      fun () ->
+              handle_get_config(Ref, Data)
+      end);
+handle_event(cast,
+             {cas_config, Ref, NewConfig, Revision} = Request,
+             proposing, Data) ->
+    maybe_postpone_config_request(
+      Request, Data,
+      fun () ->
+              handle_cas_config(Ref, NewConfig, Revision, Data)
+      end);
 handle_event(cast, {append_commands, Commands}, proposing, Data) ->
     handle_append_commands(Commands, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
@@ -489,10 +497,16 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                                  high_seqno = NewCommittedSeqno,
                                  pending_entries = NewPendingEntries},
 
-            {NewData, Effects} = handle_pending_config_changes(NewData0),
+            {NewData, Effects} = handle_pending_config_requests(NewData0),
             {keep_state, replicate(NewData), Effects};
-        {ok, NewCommittedSeqno} ->
-            true = (NewCommittedSeqno =:= CommittedSeqno),
+        {ok, _NewCommittedSeqno} ->
+            %% Note, that it's possible for the deduced committed seqno to go
+            %% backwards with respect to our own committed seqno here. This
+            %% may happen for multiple reasons. The simplest scenario is where
+            %% some nodes go down at which point their peer statuses are
+            %% erased. If the previous committed seqno was acknowledged only
+            %% by a minimal majority of nodes, any of them going down will
+            %% result in the deduced seqno going backwards.
             keep_state_and_data;
         no_quorum ->
             %% This case is possible because deduce_committed_seqno/1 always
@@ -639,11 +653,21 @@ maybe_reply_config_change(#data{config_change_from = From} = Data) ->
             Data
     end.
 
-handle_pending_config_changes(Data) ->
+maybe_postpone_config_request(Request, Data, Fun) ->
+    case is_config_committed(Data) of
+        true ->
+            Fun();
+        false ->
+            #data{postponed_config_requests = Postponed} = Data,
+            NewPostponed = [{cast, Request} | Postponed],
+            {keep_state, Data#data{postponed_config_requests = NewPostponed}}
+    end.
+
+handle_pending_config_requests(Data) ->
     NewData0 = maybe_complete_config_transition(Data),
     NewData1 = maybe_reply_config_change(NewData0),
 
-    #data{postponed_config_changes = Postponed} = NewData1,
+    #data{postponed_config_requests = Postponed} = NewData1,
     case is_config_committed(NewData1) andalso Postponed =/= [] of
         true ->
             %% Deliver postponed config changes again. We've postponed them
@@ -651,7 +675,7 @@ handle_pending_config_changes(Data) ->
             %% includes the revision of the conflicting config. That way the
             %% caller can wait to receive the conflicting config before
             %% retrying.
-            NewData2 = NewData1#data{postponed_config_changes = []},
+            NewData2 = NewData1#data{postponed_config_requests = []},
             Effects = [{next_event, Type, Request} ||
                           {Type, Request} <- lists:reverse(Postponed)],
             {NewData2, Effects};
@@ -862,6 +886,14 @@ handle_sync_quorum(Ref, #data{peers = Peers,
         done ->
             keep_state_and_data
     end.
+
+%% TODO: make the value returned fully linearizable?
+handle_get_config(Ref, #data{config = Config,
+                             config_revision = Revision} = Data) ->
+    true = is_config_committed(Data),
+    #config{} = Config,
+    reply_request(Ref, {ok, Config, Revision}, Data),
+    keep_state_and_data.
 
 handle_cas_config(Ref, NewConfig, CasRevision,
                   #data{config = Config,

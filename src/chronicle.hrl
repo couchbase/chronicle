@@ -51,8 +51,6 @@
 -define(NO_TERM, {0, <<"no-term">>}).
 -define(NO_SEQNO, 0).
 
-%% TODO: using simple nodes as id-s for now, but should there be a unique id
-%% includeded?
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
 -record(config, { voters :: [chronicle:peer()],
