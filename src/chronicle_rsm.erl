@@ -47,6 +47,7 @@
 
                 applied_history_id :: chronicle:history_id(),
                 applied_seqno :: chronicle:seqno(),
+                read_seqno :: chronicle:seqno(),
                 available_seqno :: chronicle:seqno(),
 
                 pending_clients :: pending_clients(),
@@ -138,6 +139,7 @@ init([Name, Mod, ModArgs]) ->
             Data = #data{name = Name,
                          applied_history_id = ?NO_HISTORY,
                          applied_seqno = ?NO_SEQNO,
+                         read_seqno = ?NO_SEQNO,
                          available_seqno = CommittedSeqno,
                          pending_clients = #{},
                          sync_revision_requests = gb_trees:empty(),
@@ -170,10 +172,8 @@ handle_event(info,
             {'DOWN', _, process, Pid, Reason}, _State, #data{reader = Reader})
   when Reader =:= Pid ->
     {stop, {reader_died, Pid, Reason}};
-handle_event(info, Msg, _State, #data{mod = Mod,
-                                      mod_state = ModState,
-                                      mod_data = ModData} = Data) ->
-    case Mod:handle_info(Msg, ModState, ModData) of
+handle_event(info, Msg, _State, Data) ->
+    case call_callback(handle_info, [Msg], Data) of
         {noreply, NewModData} ->
             {keep_state, set_mod_data(NewModData, Data)};
         {stop, _} = Stop ->
@@ -186,10 +186,8 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
-terminate(Reason, _State, #data{mod = Mod,
-                                mod_state = ModState,
-                                mod_data = ModData}) ->
-    Mod:terminate(Reason, ModState, ModData).
+terminate(Reason, _State, Data) ->
+    call_callback(terminate, Reason, Data).
 
 %% internal
 handle_command(_Command, From, #follower{}, _Data) ->
@@ -198,10 +196,8 @@ handle_command(_Command, From, #follower{}, _Data) ->
 handle_command(Command, From, #leader{} = State, Data) ->
     handle_command_leader(Command, From, State, Data).
 
-handle_command_leader(Command, From, State, #data{mod = Mod,
-                                                  mod_state = ModState,
-                                                  mod_data = ModData} = Data) ->
-    case Mod:handle_command(Command, ModState, ModData) of
+handle_command_leader(Command, From, State, Data) ->
+    case call_callback(handle_command, [Command], Data) of
         {apply, NewModData} ->
             NewData = set_mod_data(NewModData, Data),
             {keep_state, submit_command(Command, From, State, NewData)};
@@ -211,10 +207,8 @@ handle_command_leader(Command, From, State, #data{mod = Mod,
              {reply, From, Reply}}
     end.
 
-handle_query(Query, From, _State, #data{mod = Mod,
-                                        mod_state = ModState,
-                                        mod_data = ModData} = Data) ->
-    {reply, Reply, NewModData} = Mod:handle_query(Query, ModState, ModData),
+handle_query(Query, From, _State, Data) ->
+    {reply, Reply, NewModData} = call_callback(handle_query, [Query], Data),
     {keep_state, set_mod_data(NewModData, Data), {reply, From, Reply}}.
 
 handle_sync_revision({HistoryId, Seqno}, Timeout, From,
@@ -342,24 +336,27 @@ maybe_mark_leader_established(State, Data) ->
     end.
 
 apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
+                                               applied_seqno = AppliedSeqno,
                                                mod_state = ModState,
                                                mod_data = ModData} = Data) ->
-    {NewHistoryId, NewModState, NewModData, Replies} =
+    {NewHistoryId, NewAppliedSeqno, NewModState, NewModData, Replies} =
         lists:foldl(
           fun (Entry, Acc) ->
                   apply_entry(Entry, Acc, Data)
-          end, {HistoryId, ModState, ModData, []}, Entries),
+          end, {HistoryId, AppliedSeqno, ModState, ModData, []}, Entries),
 
     ?DEBUG("Applied commands to rsm '~p'.~n"
            "New applied seqno: ~p~n"
+           "New read seqno: ~p~n"
            "Commands:~n~p~n"
            "Replies:~n~p",
-           [Data#data.name, HighSeqno, Entries, Replies]),
+           [Data#data.name, NewAppliedSeqno, HighSeqno, Entries, Replies]),
 
     NewData0 = Data#data{mod_state = NewModState,
                          mod_data = NewModData,
                          applied_history_id = NewHistoryId,
-                         applied_seqno = HighSeqno},
+                         applied_seqno = NewAppliedSeqno,
+                         read_seqno = HighSeqno},
     NewData1 =
         case HistoryId =:= NewHistoryId of
             true ->
@@ -374,31 +371,35 @@ apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
     NewData = sync_revision_requests_reply(NewData1),
     pending_commands_reply(Replies, State, NewData).
 
-apply_entry(Entry, {HistoryId, ModState, ModData, Replies} = Acc,
+apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies} = Acc,
             #data{mod = Mod} = Data) ->
-    #log_entry{value = Value} = Entry,
+    #log_entry{value = Value,
+               history_id = EntryHistoryId,
+               seqno = EntrySeqno} = Entry,
     case Value of
         #rsm_command{id = Id, rsm_name = Name, command = Command} ->
             true = (Name =:= Data#data.name),
-            Revision = {Entry#log_entry.history_id, Entry#log_entry.seqno},
+            true = (HistoryId =:= EntryHistoryId),
+            AppliedRevision = {HistoryId, Seqno},
+            Revision = {HistoryId, EntrySeqno},
 
             {reply, Reply, NewModState, NewModData} =
-                Mod:apply_command(Command, Revision, ModState, ModData),
+                Mod:apply_command(Command,
+                                  Revision, AppliedRevision, ModState, ModData),
 
             EntryTerm = Entry#log_entry.term,
             NewReplies = [{Id, EntryTerm, Reply} | Replies],
-            {HistoryId, NewModState, NewModData, NewReplies};
+            {HistoryId, EntrySeqno, NewModState, NewModData, NewReplies};
         #config{} ->
             %% TODO: have an explicit indication in the log that an entry
             %% starts a new history
             %%
             %% The current workaround: only configs may start a new history.
-            EntryHistoryId = Entry#log_entry.history_id,
             case EntryHistoryId =:= HistoryId of
                 true ->
                     Acc;
                 false ->
-                    {EntryHistoryId, ModState, ModData, Replies}
+                    {EntryHistoryId, EntrySeqno, ModState, ModData, Replies}
             end
     end.
 
@@ -559,9 +560,9 @@ handle_new_metadata(#metadata{committed_seqno = CommittedSeqno},
     {keep_state, maybe_start_reader(NewData)}.
 
 maybe_start_reader(#data{reader = undefined,
-                         applied_seqno = AppliedSeqno,
+                         read_seqno = ReadSeqno,
                          available_seqno = AvailableSeqno} = Data) ->
-    case AvailableSeqno > AppliedSeqno of
+    case AvailableSeqno > ReadSeqno of
         true ->
             start_reader(Data);
         false ->
@@ -580,19 +581,24 @@ reader(Parent, Data) ->
     gen_statem:cast(Parent, {entries, HighSeqno, Commands}).
 
 get_log(#data{name = Name,
-              applied_seqno = AppliedSeqno,
+              read_seqno = ReadSeqno,
               available_seqno = AvailableSeqno}) ->
     %% TODO: replace this with a dedicated call
     {ok, Log} = chronicle_agent:get_log(?PEER()),
     Entries =
         lists:filter(
           fun (#log_entry{seqno = Seqno, value = Value}) ->
-                  case Value of
-                      #rsm_command{rsm_name = Name} ->
-                          Seqno > AppliedSeqno andalso Seqno =< AvailableSeqno;
-                      #config{} ->
-                          true;
-                      _ ->
+                  case Seqno > ReadSeqno andalso Seqno =< AvailableSeqno of
+                      true ->
+                          case Value of
+                              #rsm_command{rsm_name = Name} ->
+                                  true;
+                              #config{} ->
+                                  true;
+                              _ ->
+                                  false
+                          end;
+                      false ->
                           false
                   end
           end, Log),
@@ -627,3 +633,11 @@ unwrap_command_reply(Reply) ->
         _ ->
             Reply
     end.
+
+call_callback(Callback, Args, #data{mod = Mod,
+                                    mod_state = ModState,
+                                    mod_data = ModData,
+                                    applied_history_id = AppliedHistoryId,
+                                    applied_seqno = AppliedSeqno}) ->
+    AppliedRevision = {AppliedHistoryId, AppliedSeqno},
+    erlang:apply(Mod, Callback, Args ++ [AppliedRevision, ModState, ModData]).

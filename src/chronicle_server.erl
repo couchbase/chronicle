@@ -38,7 +38,6 @@
 %% TOOD: this record contains fields only used when the state is leader
 -record(data, { proposer,
                 proposer_ready,
-                term_high_seqno,
                 commands_batch,
                 syncs_batch,
                 requests_in_flight }).
@@ -183,8 +182,7 @@ handle_process_exit(Pid, Reason, _State, #data{proposer = Proposer} = Data) ->
         true ->
             ?INFO("Proposer terminated with reason ~p", [Reason]),
             {next_state, #follower{}, Data#data{proposer = undefined,
-                                                proposer_ready = false,
-                                                term_high_seqno = undefined}};
+                                                proposer_ready = false}};
         false ->
             {stop, {linked_process_died, Pid, Reason}}
     end.
@@ -198,9 +196,8 @@ handle_proposer_msg({reply_requests, Replies}, State, Data) ->
 handle_proposer_ready(HistoryId, Term, HighSeqno,
                       #leader{history_id = HistoryId, term = Term} = State,
                       #data{proposer_ready = false} = Data) ->
-    NewData = Data#data{proposer_ready = true,
-                        term_high_seqno = HighSeqno},
-    announce_term_established(State, NewData),
+    NewData = Data#data{proposer_ready = true},
+    announce_term_established(HighSeqno, State, NewData),
     {keep_state, NewData}.
 
 handle_reply_requests(Replies, #leader{},
@@ -370,10 +367,9 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
               syncs_batch = undefined,
               commands_batch = undefined}.
 
-announce_term_established(#leader{history_id = HistoryId, term = Term},
-                          #data{proposer_ready = true,
-                                term_high_seqno = HighSeqno}) ->
-    true = is_integer(HighSeqno),
+announce_term_established(HighSeqno,
+                          #leader{history_id = HistoryId, term = Term},
+                          #data{proposer_ready = true}) ->
     chronicle_leader:note_term_established(HistoryId, Term, HighSeqno).
 
 announce_term_finished(#leader{history_id = HistoryId, term = Term}) ->
@@ -456,6 +452,22 @@ simple_test__() ->
 
                           {ok, _} = chronicle_kv:update(kv, a, fun (V) -> V+1 end),
                           {ok, {86, _}} = chronicle_kv:get(kv, a),
+
+                          {ok, _} = chronicle_kv:set(kv, c, 1234),
+                          {ok, _} = chronicle_kv:set(kv, d, 4321),
+                          {ok, _} =
+                              chronicle_kv:rewrite(
+                                kv,
+                                fun (Key, Value) ->
+                                        case Key of
+                                            a ->
+                                                {update, 87};
+                                            c ->
+                                                delete;
+                                            _ ->
+                                                keep
+                                        end
+                                end),
 
                           {error, not_found} = chronicle_kv:get(kv, c),
 
