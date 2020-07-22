@@ -24,7 +24,7 @@ start_link() ->
     ignore.
 
 get_live_peers() ->
-    lists:sort(nodes(this)).
+    lists:sort(nodes([this, visible])).
 
 monitor() ->
     net_kernel:monitor_nodes(true, [nodedown_reason]).

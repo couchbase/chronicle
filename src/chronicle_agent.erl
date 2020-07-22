@@ -317,6 +317,7 @@ handle_wipe(State) ->
                            term = ?NO_TERM,
                            term_voted = ?NO_TERM,
                            high_seqno = ?NO_SEQNO,
+                           committed_seqno = ?NO_SEQNO,
                            config_entry = undefined,
                            committed_config_entry = undefined,
                            pending_branch = undefined},
@@ -741,19 +742,85 @@ check_log_range(StartSeqno, EndSeqno, #state{high_seqno = HighSeqno}) ->
             ok
     end.
 
-persist_state(State) ->
-    ok.
+persist_state(#state{log_tab = Tab} = State) ->
+    case get_state_path() of
+        undefined ->
+            ok;
+        {ok, StatePath} ->
+            ok = filelib:ensure_dir(StatePath),
+            ok = write_file(StatePath,
+                            fun (File) ->
+                                    %% Get rid of references in the state and
+                                    %% log entries, because those can't be
+                                    %% read using file:consult(). But we don't
+                                    %% need them.
+                                    CleanState = State#state{log_tab = undefined},
+                                    CleanEntries =
+                                        [case Entry#log_entry.value of
+                                             #rsm_command{} = Command ->
+                                                 Entry#log_entry{value = Command#rsm_command{id = undefined}};
+                                             _ ->
+                                                 Entry
+                                         end || Entry <- ets:tab2list(Tab)],
+
+                                    io:format(File,
+                                              "~w.~n"
+                                              "~w.~n",
+                                              [CleanState, CleanEntries])
+                            end)
+    end.
+
+write_file(Path, Body) ->
+    TmpPath = Path ++ ".tmp",
+    case file:open(TmpPath, [write]) of
+        {ok, F} ->
+            try Body(F) of
+                ok ->
+                    file:close(F),
+                    file:rename(TmpPath, Path);
+                Other ->
+                    Other
+            after
+                (catch file:close(F))
+            end;
+        Error ->
+            Error
+    end.
 
 restore_state() ->
-    #state{history_id = ?NO_HISTORY,
-           term = ?NO_TERM,
-           term_voted = ?NO_TERM,
-           high_seqno = ?NO_SEQNO,
-           committed_seqno = ?NO_SEQNO,
-           config_entry = undefined,
-           committed_config_entry = undefined,
-           pending_branch = undefined,
-           log_tab = log_create()}.
+    Log = log_create(),
+    State = #state{history_id = ?NO_HISTORY,
+                   term = ?NO_TERM,
+                   term_voted = ?NO_TERM,
+                   high_seqno = ?NO_SEQNO,
+                   committed_seqno = ?NO_SEQNO,
+                   config_entry = undefined,
+                   committed_config_entry = undefined,
+                   pending_branch = undefined,
+                   log_tab = Log},
+
+    case get_state_path() of
+        undefined ->
+            State;
+        {ok, StatePath} ->
+            case file:consult(StatePath) of
+                {ok, [RestoredState0, Entries]} ->
+                    RestoredState = RestoredState0#state{log_tab = Log},
+                    true = is_list(Entries),
+                    log_append(Entries, RestoredState),
+                    RestoredState;
+                _ ->
+                    State
+            end
+    end.
+
+get_state_path() ->
+    case application:get_env(chronicle, data_dir) of
+        {ok, Dir} ->
+            {ok, filename:join(Dir, "agent_state")};
+        undefined ->
+            undefined
+    end.
 
 assert_valid_history_id(HistoryId) ->
     true = is_binary(HistoryId).
