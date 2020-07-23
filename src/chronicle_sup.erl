@@ -22,38 +22,10 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -export([start_link/0]).
--export([on_system_state_change/1]).
 -export([init/1]).
 
 start_link() ->
     supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
-
-on_system_state_change(State) ->
-    case State of
-        provisioned ->
-            on_system_provisioned();
-        unprovisioned ->
-            on_system_unprovisioned()
-    end.
-
-on_system_provisioned() ->
-    case supervisor:restart_child(?SERVER, chronicle_provisioned_sup) of
-        {ok, _} ->
-            ok;
-        {error, running} ->
-            %% shouldn't normally happen, but is possible if the system state
-            %% changes in between when chronicle_sup_worker and
-            %% chronicle_provisioned_sup start.
-            ok;
-        {error, restarting} ->
-            %% may happen under similar circumstances as described above
-            ok;
-        {error, _} = Error ->
-            exit(Error)
-    end.
-
-on_system_unprovisioned() ->
-    ok = supervisor:terminate_child(?SERVER, chronicle_provisioned_sup).
 
 %% callbacks
 init([]) ->
@@ -89,9 +61,9 @@ child_specs() ->
               shutdown => 5000,
               type => worker},
 
-    Provisioner = #{id => chronicle_provisioner,
-                    start => {chronicle_provisioner, start_link, []},
-                    restart => permanent,
-                    type => supervisor},
+    SecondarySup = #{id => chronicle_secondary_sup,
+                     start => {chronicle_secondary_sup, start_link, []},
+                     restart => permanent,
+                     type => supervisor},
 
-    [Peers, Events, Storage, Agent, Provisioner].
+    [Peers, Events, Storage, Agent, SecondarySup].

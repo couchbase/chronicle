@@ -427,7 +427,7 @@ simple_test__() ->
                           {error, _} = chronicle_kv:set(kv, a, d, Rev),
                           {ok, _} = chronicle_kv:set(kv, b, d),
                           {error, _} = chronicle_kv:delete(kv, a, Rev),
-                          ok = chronicle_kv:delete(kv, a, Rev2),
+                          {ok, _} = chronicle_kv:delete(kv, a, Rev2),
 
                           {error, not_found} = chronicle_kv:get(kv, a,
                                                                 #{read_cosistency => quorum}),
@@ -458,7 +458,7 @@ simple_test__() ->
                           {ok, _} =
                               chronicle_kv:rewrite(
                                 kv,
-                                fun (Key, Value) ->
+                                fun (Key, _Value) ->
                                         case Key of
                                             a ->
                                                 {update, 87};

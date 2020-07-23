@@ -36,6 +36,7 @@
 -record(follower, { leader, history_id, term, status }).
 -record(observer, {}).
 -record(candidate, {}).
+-record(unprovisioned, {}).
 
 -record(data, { metadata,
 
@@ -120,10 +121,13 @@ init([]) ->
       end),
 
     ets:new(?TABLE, [named_table, protected, {read_concurrency, true}]),
-    {ok, Metadata} = chronicle_agent:get_metadata(),
 
-    %% TODO
-    {ok, #observer{}, metadata2data(Metadata)}.
+    case chronicle_agent:get_metadata() of
+        {ok, Metadata} ->
+            {ok, #observer{}, metadata2data(Metadata)};
+        {error, not_provisioned} ->
+            {ok, #unprovisioned{}, #data{}}
+    end.
 
 handle_event(enter, OldState, State, Data) ->
     NewData0 = maybe_publish_leader(OldState, State, Data),
@@ -199,6 +203,8 @@ start_state_timers(State, Data) ->
               end
       end, Data, state_timers(State)).
 
+state_timers(#unprovisioned{}) ->
+    [];
 state_timers(#leader{}) ->
     [send_heartbeat];
 state_timers(_) ->
@@ -221,13 +227,28 @@ get_heartbeat_interval() ->
     %% TODO
     100.
 
+is_interesting_event({system_state, _, _}) ->
+    true;
 is_interesting_event({metadata, _Metadata}) ->
     true;
 is_interesting_event(_) ->
     false.
 
+handle_chronicle_event({system_state, unprovisioned, _}, State, Data) ->
+    handle_unprovisioned(State, Data);
+handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
+    handle_provisioned(Metadata, State, Data);
 handle_chronicle_event({metadata, Metadata}, State, Data) ->
     handle_new_metadata(Metadata, State, Data).
+
+handle_unprovisioned(_State, Data) ->
+    ?INFO("System became unprovisoined."),
+    {next_state, #unprovisioned{}, Data#data{metadata = undefined,
+                                             peers = undefined}}.
+
+handle_provisioned(Metadata, #unprovisioned{}, Data) ->
+    ?INFO("System became provisioned."),
+    {next_state, #observer{}, metadata2data(Metadata, Data)}.
 
 handle_new_metadata(Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),
@@ -289,6 +310,13 @@ metadata2data(Metadata, Data) ->
     Data#data{metadata = Metadata,
               peers = Peers -- [?PEER()]}.
 
+handle_note_term_status(HistoryId, Term, Status, #unprovisioned{}, _Data) ->
+    ?DEBUG("Ignoring term status when system is unprovisioned.~n"
+           "History id: ~p~n"
+           "Term: ~p~n"
+           "Status: ~p~n",
+           [HistoryId, Term, Status]),
+    keep_state_and_data;
 handle_note_term_status(HistoryId, Term, Status, State, Data) ->
     case check_is_leader(HistoryId, Term, State) of
         ok ->
@@ -322,6 +350,11 @@ handle_election_timeout(State, Data) ->
 
     {next_state, NewState, Data}.
 
+handle_heartbeat(LeaderInfo, #unprovisioned{}, _Data) ->
+    ?DEBUG("Ignoring leader heartbeat when system is unprovisioned.~n"
+           "Leader info:~n~p",
+           [LeaderInfo]),
+    keep_state_and_data;
 handle_heartbeat(LeaderInfo, State, Data) ->
     #{leader := Peer,
       history_id := HistoryId,
@@ -379,6 +412,26 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
             {next_state, #observer{}, NewData}
     end.
 
+handle_request_vote(_Candidate, _HistoryId, _Position,
+                    From, #unprovisioned{}, _Data) ->
+    %% When the node is unprovisioned, it'll vote for any leader. This is
+    %% important when the node is in the process of being added to the
+    %% cluster. If no votes are granted while the node is unprovisioned, it's
+    %% possible to wound up in the state where no leader can be elected.
+    %%
+    %% Consider the following case.
+    %%
+    %% 1. Node A is the only node in a cluster. So node A is a leader.
+    %% 2. Node B is being added to the cluster. Node B is unprovisioned.
+    %% 3. Node A writes a transitional configuration locally. From this point
+    %% on, in order for a new leader to be elected, it needs to get votes from
+    %% both A and B.
+    %% 4. So if node A restarts and needs to reelect itself a leader, it'll
+    %% fail to do so, because B won't grant it a vote.
+    %%
+    %% But to simplify the state diagram, an unprovisioned node will only
+    %% grant votes, it won't remember the leader it's voted for.
+    {keep_state_and_data, {reply, From, {ok, ?NO_TERM}}};
 handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case ?CHECK(check_history_id(HistoryId, Data),
                 check_grant_vote(Position, State, Data)) of

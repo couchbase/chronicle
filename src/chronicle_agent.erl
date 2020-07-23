@@ -104,7 +104,7 @@ get_history_id(#metadata{pending_branch =
 provision(HistoryId, Term, Config) ->
     case gen_server:call(?SERVER, {provision, HistoryId, Term, Config}) of
         ok ->
-            ok = chronicle_provisioner:sync();
+            ok = chronicle_secondary_sup:sync();
         Other ->
             Other
     end.
@@ -113,7 +113,7 @@ provision(HistoryId, Term, Config) ->
 wipe() ->
     case gen_server:call(?SERVER, wipe) of
         ok ->
-            ok = chronicle_provisioner:sync();
+            ok = chronicle_secondary_sup:sync();
         Other ->
             Other
     end.
@@ -472,7 +472,7 @@ complete_append(HistoryId, Term, Info,
         true ->
             ok;
         false ->
-            announce_system_state(provisioned)
+            announce_system_state(provisioned, state2metadata(NewState))
     end,
 
     announce_metadata(NewState),
@@ -842,7 +842,10 @@ announce_metadata(State) ->
     chronicle_events:sync_notify({metadata, state2metadata(State)}).
 
 announce_system_state(SystemState) ->
-    chronicle_events:sync_notify({system_state, SystemState}).
+    announce_system_state(SystemState, no_extra).
+
+announce_system_state(SystemState, Extra) ->
+    chronicle_events:sync_notify({system_state, SystemState, Extra}).
 
 log_create() ->
     ets:new(log, [protected, ordered_set, {keypos, #log_entry.seqno}]).

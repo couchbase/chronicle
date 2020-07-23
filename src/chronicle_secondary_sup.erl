@@ -15,33 +15,56 @@
 %%
 %% A supervisor for processes that require the system to be provisioned to
 %% run.
--module(chronicle_provisioned_sup).
+-module(chronicle_secondary_sup).
 
 -behavior(supervisor).
 
 -include("chronicle.hrl").
 
 -export([start_link/0]).
--export([init/1]).
+-export([sync/0]).
+-export([init/1, handle_event/2, child_specs/1]).
 
 start_link() ->
-    supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
+    dynamic_supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
 
+sync() ->
+    dynamic_supervisor:sync(?SERVER_NAME(?MODULE), 10000).
+
+%% callbacks
 init([]) ->
+    Self = self(),
+    chronicle_events:subscribe(
+      fun (Event) ->
+              case Event of
+                  {system_state, NewState, _} ->
+                      dynamic_supervisor:send_event(Self, {state, NewState});
+                  _ ->
+                      ok
+              end
+      end),
+
+    State = chronicle_agent:get_system_state(),
+
     %% TODO: reconsider the strategy
     Flags = #{strategy => one_for_all,
               intensity => 3,
               period => 10},
-    {ok, {Flags, child_specs()}}.
+    {ok, Flags, State}.
+
+handle_event({state, NewState}, _) ->
+    {noreply, NewState}.
 
 %% TODO: revise shutdown specifications
-child_specs() ->
+child_specs(unprovisioned) ->
     Leader = #{id => chronicle_leader,
                start => {chronicle_leader, start_link, []},
                restart => permanent,
                shutdown => 5000,
                type => worker},
 
+    [Leader];
+child_specs(provisioned) ->
     Coordinator = #{id => chronicle_server,
                     start => {chronicle_server, start_link, []},
                     restart => permanent,
@@ -54,17 +77,10 @@ child_specs() ->
                  shutdown => 5000,
                  type => worker},
 
-    RSMSupWorker =
-        #{id => chronicle_rsm_sup_worker,
-          start => {chronicle_rsm_sup_worker, start_link, []},
-          restart => permanent,
-          shutdown => 1000,
-          type => worker},
-
     RSMSup = #{id => chronicle_rsm_sup,
                start => {chronicle_rsm_sup, start_link, []},
                restart => permanent,
                shutdown => infinity,
                type => supervisor},
 
-    [Leader, Coordinator, Failover, RSMSup, RSMSupWorker].
+    child_specs(unprovisioned) ++ [Coordinator, Failover, RSMSup].

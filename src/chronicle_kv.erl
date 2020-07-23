@@ -314,7 +314,7 @@ apply_delete(Key, ExpectedRevision, Revision,
                StateRevision, Table) of
             ok ->
                 handle_delete(Key, Revision, State, Data),
-                ok;
+                {ok, Revision};
             {error, _} = Error ->
                 Error
         end,

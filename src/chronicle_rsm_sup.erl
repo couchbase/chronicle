@@ -24,38 +24,54 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -export([start_link/0]).
--export([start_rsm/3, stop_rsm/1]).
--export([init/1]).
+-export([init/1, handle_event/2, child_specs/1]).
 
 start_link() ->
-    supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
+    dynamic_supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
 
-start_rsm(Name, Module, Args) ->
-    Spec = #{id => Name,
-             start => {chronicle_single_rsm_sup,
-                       start_link,
-                       [Name, Module, Args]},
-             restart => permanent,
-             type => supervisor},
-    case supervisor:start_child(?SERVER, Spec) of
-        {ok, _} ->
-            ok;
-        {error, _} = Error ->
-            Error
-    end.
-
-stop_rsm(Name) ->
-    case supervisor:terminate_child(?SERVER, Name) of
-        ok ->
-            ok = supervisor:delete_child(?SERVER, Name);
-        {error, _} = Error ->
-            Error
-    end.
-
-%% supervisor callback
+%% callbacks
 init([]) ->
+    Self = self(),
+    chronicle_events:subscribe(
+      fun (Event) ->
+              case Event of
+                  {metadata, _} ->
+                      %% TODO: this is going to wake up the process needlessly
+                      %% all the time; having more granular events
+                      dynamic_supervisor:send_event(Self, Event);
+                  _ ->
+                      ok
+              end
+      end),
+
+    {ok, Metadata} = chronicle_agent:get_metadata(),
+
     %% TODO: reconsider the strategy
     Flags = #{strategy => one_for_one,
               intensity => 3,
               period => 10},
-    {ok, {Flags, []}}.
+
+    {ok, Flags, get_rsms(Metadata)}.
+
+handle_event({metadata, Metadata}, _) ->
+    {noreply, get_rsms(Metadata)}.
+
+child_specs(RSMs) ->
+    lists:map(
+      fun ({Name, #rsm_config{module = Module, args = Args}}) ->
+              #{id => Name,
+                start => {chronicle_single_rsm_sup,
+                          start_link,
+                          [Name, Module, Args]},
+                restart => permanent,
+                type => supervisor}
+      end, maps:to_list(RSMs)).
+
+%% internal
+get_rsms(#metadata{config = Config}) ->
+    get_rsms_from_config(Config).
+
+get_rsms_from_config(#config{state_machines = RSMs}) ->
+    RSMs;
+get_rsms_from_config(#transition{current_config = Config}) ->
+    get_rsms_from_config(Config).
