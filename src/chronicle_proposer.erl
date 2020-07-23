@@ -745,6 +745,17 @@ do_get_quorum(#config{voters = Voters}) ->
 do_get_quorum(#transition{current_config = Current, future_config = Future}) ->
     {joint, do_get_quorum(Current), do_get_quorum(Future)}.
 
+get_quorum_peers(Quorum) ->
+    sets:to_list(do_get_quorum_peers(Quorum)).
+
+do_get_quorum_peers({majority, Peers}) ->
+    Peers;
+do_get_quorum_peers({all, Peers}) ->
+    Peers;
+do_get_quorum_peers({joint, Quorum1, Quorum2}) ->
+    sets:union(do_get_quorum_peers(Quorum1),
+               do_get_quorum_peers(Quorum2)).
+
 have_quorum(AllVotes, Quorum)
   when is_list(AllVotes) ->
     do_have_quorum(sets:from_list(AllVotes), Quorum);
@@ -774,12 +785,7 @@ get_establish_quorum(Metadata) ->
     end.
 
 get_establish_peers(Metadata) ->
-    case Metadata#metadata.pending_branch of
-        undefined ->
-            config_peers(Metadata#metadata.config);
-        #branch{peers = BranchPeers} ->
-            BranchPeers
-    end.
+    get_quorum_peers(get_establish_quorum(Metadata)).
 
 handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
     ?INFO("Peer ~p came up", [Peer]),
@@ -922,14 +928,15 @@ make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
                value = Value}.
 
 update_config(Config, Revision, Data) ->
-    NewPeers = config_peers(Config),
+    Quorum = get_quorum(Config),
+    NewPeers = get_quorum_peers(Quorum),
     NewData = Data#data{config = Config,
                         config_revision = Revision,
                         peers = NewPeers,
-                        quorum = get_quorum(Config),
+                        quorum = Quorum,
                         machines = config_machines(Config)},
 
-    OldPeers = config_peers(Data#data.config),
+    OldPeers = Data#data.peers,
 
     RemovedPeers = OldPeers -- NewPeers,
     AddedPeers = NewPeers -- OldPeers,
