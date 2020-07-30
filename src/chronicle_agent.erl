@@ -755,18 +755,12 @@ persist_state(#state{log_tab = Tab} = State) ->
                                     %% read using file:consult(). But we don't
                                     %% need them.
                                     CleanState = State#state{log_tab = undefined},
-                                    CleanEntries =
-                                        [case Entry#log_entry.value of
-                                             #rsm_command{} = Command ->
-                                                 Entry#log_entry{value = Command#rsm_command{id = undefined}};
-                                             _ ->
-                                                 Entry
-                                         end || Entry <- ets:tab2list(Tab)],
+                                    Entries = [term_to_binary(Entry) || Entry <- ets:tab2list(Tab)],
 
                                     io:format(File,
                                               "~w.~n"
                                               "~w.~n",
-                                              [CleanState, CleanEntries])
+                                              [CleanState, Entries])
                             end)
     end.
 
@@ -804,7 +798,8 @@ restore_state() ->
             State;
         {ok, StatePath} ->
             case file:consult(StatePath) of
-                {ok, [RestoredState0, Entries]} ->
+                {ok, [RestoredState0, EntriesBinaries]} ->
+                    Entries = [binary_to_term(Entry) || Entry <- EntriesBinaries],
                     RestoredState = RestoredState0#state{log_tab = Log},
                     true = is_list(Entries),
                     log_append(Entries, RestoredState),
