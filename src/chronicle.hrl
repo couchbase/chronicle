@@ -59,8 +59,7 @@
         { current_config :: #config{},
           future_config :: #config{} }).
 -record(rsm_command,
-        { id :: reference(),
-          rsm_name :: atom(),
+        { rsm_name :: atom(),
           command :: term() }).
 
 -record(log_entry,

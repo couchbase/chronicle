@@ -35,10 +35,10 @@ init([]) ->
     chronicle_events:subscribe(
       fun (Event) ->
               case Event of
-                  {metadata, _} ->
+                  {new_config, Config, _} ->
                       %% TODO: this is going to wake up the process needlessly
                       %% all the time; having more granular events
-                      dynamic_supervisor:send_event(Self, Event);
+                      dynamic_supervisor:send_event(Self, {new_config, Config});
                   _ ->
                       ok
               end
@@ -51,10 +51,10 @@ init([]) ->
               intensity => 3,
               period => 10},
 
-    {ok, Flags, get_rsms(Metadata)}.
+    {ok, Flags, get_rsms(Metadata#metadata.config)}.
 
-handle_event({metadata, Metadata}, _) ->
-    {noreply, get_rsms(Metadata)}.
+handle_event({new_config, Config}, _) ->
+    {noreply, get_rsms(Config)}.
 
 child_specs(RSMs) ->
     lists:map(
@@ -68,10 +68,7 @@ child_specs(RSMs) ->
       end, maps:to_list(RSMs)).
 
 %% internal
-get_rsms(#metadata{config = Config}) ->
-    get_rsms_from_config(Config).
-
-get_rsms_from_config(#config{state_machines = RSMs}) ->
+get_rsms(#config{state_machines = RSMs}) ->
     RSMs;
-get_rsms_from_config(#transition{current_config = Config}) ->
-    get_rsms_from_config(Config).
+get_rsms(#transition{current_config = Config}) ->
+    get_rsms(Config).

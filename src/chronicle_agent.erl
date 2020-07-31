@@ -34,6 +34,7 @@
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
 -define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
+-define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is
@@ -178,6 +179,15 @@ ensure_term(Peer, Opaque, HistoryId, Term) ->
 append(Peer, Opaque, HistoryId, Term, CommittedSeqno, Entries) ->
     call_async(?SERVER(Peer), Opaque,
                {append, HistoryId, Term, CommittedSeqno, Entries}).
+
+-spec local_mark_committed(chronicle:history_id(),
+                           chronicle:leader_term(),
+                           chronicle:seqno()) ->
+          append_result().
+local_mark_committed(HistoryId, Term, CommittedSeqno) ->
+    gen_server:call(?SERVER,
+                    {append, HistoryId, Term, CommittedSeqno, []},
+                    ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
 -spec store_branch(chronicle:peer(), #branch{}) ->
           {ok, #metadata{}} |
@@ -335,6 +345,7 @@ handle_establish_term(HistoryId, Term, Position, State) ->
         ok ->
             NewState = State#state{term = Term},
             persist_state(NewState),
+            announce_term_established(Term),
             announce_metadata(NewState),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
             {reply, {ok, state2metadata(State)}, NewState};
@@ -475,6 +486,8 @@ complete_append(HistoryId, Term, Info,
             announce_system_state(provisioned, state2metadata(NewState))
     end,
 
+    maybe_announce_term_established(Term, State),
+    maybe_announce_new_config(State, NewState),
     announce_metadata(NewState),
 
     ?DEBUG("Appended entries.~n"
@@ -648,6 +661,14 @@ handle_store_branch(Branch, State) ->
             %% branching that involves unprovisioned nodes
             NewState = State#state{pending_branch = Branch},
             persist_state(NewState),
+
+            case State#state.pending_branch of
+                undefined ->
+                    %% New branch, announce history change.
+                    announce_new_history(NewState);
+                _ ->
+                    ok
+            end,
             announce_metadata(NewState),
 
             ?DEBUG("Stored a branch record:~n~p", [Branch]),
@@ -681,6 +702,7 @@ handle_undo_branch(BranchId, State) ->
         ok ->
             NewState = State#state{pending_branch = undefined},
             persist_state(NewState),
+            announce_new_history(NewState),
             announce_metadata(NewState),
 
             ?DEBUG("Undid branch ~p", [BranchId]),
@@ -832,6 +854,33 @@ assert_valid_branch(#branch{history_id = HistoryId,
 assert_valid_peer(_Coordinator) ->
     %% TODO
     ok.
+
+announce_new_history(State) ->
+    HistoryId = get_history_id_int(State),
+    Metadata = state2metadata(State),
+    chronicle_events:sync_notify({new_history, HistoryId, Metadata}).
+
+maybe_announce_term_established(Term, #state{term = OldTerm}) ->
+    case Term =:= OldTerm of
+        true ->
+            ok;
+        false ->
+            announce_term_established(Term)
+    end.
+
+announce_term_established(Term) ->
+    chronicle_events:sync_notify({term_established, Term}).
+
+maybe_announce_new_config(#state{config_entry = OldConfigEntry},
+                          #state{config_entry = NewConfigEntry} = NewState) ->
+    case OldConfigEntry =:= NewConfigEntry of
+        true ->
+            ok;
+        false ->
+            Metadata = state2metadata(NewState),
+            Config = NewConfigEntry#log_entry.value,
+            chronicle_events:sync_notify({new_config, Config, Metadata})
+    end.
 
 announce_metadata(State) ->
     chronicle_events:sync_notify({metadata, state2metadata(State)}).
