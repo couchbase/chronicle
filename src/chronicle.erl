@@ -39,14 +39,8 @@
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
-provision(Machines0) ->
-    HistoryId = chronicle_utils:random_uuid(),
-    Term = ?NO_TERM,
-    Machines = maps:from_list(
-                 [{Name, #rsm_config{module = Module, args = Args}} ||
-                      {Name, Module, Args} <- Machines0]),
-    Config = #config{voters = [?PEER()], state_machines = Machines},
-    chronicle_agent:provision(HistoryId, Term, Config).
+provision(Machines) ->
+    chronicle_agent:provision(Machines).
 
 add_voters(Voters) ->
     add_voters(Voters, ?DEFAULT_TIMEOUT).

@@ -398,6 +398,8 @@ terminate_proposer(#data{proposer = Proposer} = Data) ->
             ok = chronicle_proposer:stop(Proposer),
             unlink(Proposer),
             ?FLUSH({'EXIT', Proposer, _}),
+
+            ?INFO("Proposer ~p stopped", [Proposer]),
             Data#data{proposer = undefined}
     end.
 
@@ -448,26 +450,33 @@ foreach_rsm(Fun, #data{rsms = RSMs}) ->
 -ifdef(TEST).
 
 simple_test_() ->
-    {timeout, 10, fun simple_test__/0}.
-
-simple_test__() ->
     Nodes = [a, b, c, d],
+
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     fun () -> simple_test__(Nodes) end}.
+
+setup_vnet(Nodes) ->
     {ok, _} = vnet:start_link(Nodes),
     lists:foreach(
       fun (N) ->
-              rpc_node(N, fun () ->
-                                  {ok, P} = chronicle_sup:start_link(),
-                                  unlink(P)
-                          end)
-      end, Nodes),
+              ok = rpc_node(N, fun () ->
+                                       {ok, P} = chronicle_sup:start_link(),
+                                       unlink(P),
+                                       ok
+                               end)
+      end, Nodes).
 
+teardown_vnet(_) ->
+    vnet:stop().
+
+simple_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
     ok = rpc_node(a,
                   fun () ->
                           ok = chronicle:provision(Machines)
                   end),
-
-    timer:sleep(1000),
 
     ok = rpc_node(a,
                   fun () ->
@@ -560,5 +569,53 @@ simple_test__() ->
 
 rpc_node(Node, Fun) ->
     vnet:rpc(Node, erlang, apply, [Fun, []]).
+
+leader_transfer_test_() ->
+    Nodes = [a, b],
+
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 10, fun () -> leader_transfer_test__(Nodes) end}}.
+
+leader_transfer_test__(Nodes) ->
+    Machines = [{kv, chronicle_kv, []}],
+    {ok, Leader} =
+        rpc_node(a,
+                 fun () ->
+                         ok = chronicle:provision(Machines),
+                         ok = chronicle:add_voters(Nodes),
+                         {L, _} = chronicle_leader:wait_for_leader(),
+                         {ok, L}
+                 end),
+
+    [OtherNode] = Nodes -- [Leader],
+
+    ok = rpc_node(
+           OtherNode,
+           fun () ->
+                   RPid =
+                       spawn_link(fun () ->
+                                          ok = chronicle:remove_voters([Leader])
+                                  end),
+
+                   Pids =
+                       [spawn_link(
+                          fun () ->
+                                  random:seed(erlang:phash2([self()]),
+                                              erlang:monotonic_time(),
+                                              erlang:unique_integer()),
+
+                                  timer:sleep(random:uniform(500)),
+                                  {ok, _} = chronicle_kv:set(kv, I, 2*I)
+                          end) || I <- lists:seq(1, 20000)],
+
+                   lists:foreach(
+                     fun (Pid) ->
+                             ok = chronicle_utils:wait_for_process(Pid, 100000)
+                     end, [RPid | Pids])
+           end),
+
+    ok.
 
 -endif.

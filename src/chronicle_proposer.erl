@@ -746,11 +746,11 @@ handle_config_post_append(OldData,
             NewData1 = maybe_reply_config_change(NewData0),
             NewData2 = maybe_complete_config_transition(NewData1),
 
-            case check_leader_got_removed(NewData1) of
+            case check_leader_got_removed(NewData2) of
                 true ->
                     ?INFO("Shutting down because leader ~p "
                           "got removed from peers.~n"
-                          "Peers:~n~p",
+                          "Peers: ~p",
                           [?PEER(), NewData2#data.quorum_peers]),
                     {stop, leader_removed, NewData2};
                 false ->

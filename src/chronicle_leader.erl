@@ -185,7 +185,7 @@ handle_event(Type, Event, _State, _Data) ->
 terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data),
     maybe_send_stepping_down(State, Data),
-    reply_to_leader_waiters({error, no_leader}, Data),
+    reply_to_leader_waiters(no_leader, Data),
     publish_leader(no_leader).
 
 %% internal
@@ -556,7 +556,7 @@ handle_leader_wait_timeout(TRef, State,
                            #data{leader_waiters = Waiters} = Data) ->
     no_leader = state_leader(State),
     {From, NewWaiters} = maps:take(TRef, Waiters),
-    gen_statem:reply(From, {error, no_leader}),
+    gen_statem:reply(From, no_leader),
     {keep_state, Data#data{leader_waiters = NewWaiters}}.
 
 add_leader_waiter(Timeout, From, #data{leader_waiters = Waiters} = Data) ->

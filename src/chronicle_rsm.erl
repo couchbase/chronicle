@@ -28,6 +28,7 @@
 -type pending_client() ::
         {From :: any(),
          Type :: command
+               | command_accepted
                | {sync, chronicle:revision()}}.
 -type pending_clients() :: #{reference() => pending_client()}.
 
@@ -500,13 +501,14 @@ sync_quorum(Revision, From,
     chronicle_server:sync_quorum(Tag, HistoryId, Term),
     add_pending_client(Ref, From, {sync, Revision}, Data).
 
-handle_sync_quorum_result(Ref, Result, #leader{},
+handle_sync_quorum_result(Ref, Result, State,
                           #data{pending_clients = Requests} = Data) ->
     {{From, {sync, Revision}}, NewRequests} = maps:take(Ref, Requests),
 
     Reply =
         case Result of
             ok ->
+                #leader{} = State,
                 {ok, Revision};
             {error, _} ->
                 Result
@@ -514,12 +516,13 @@ handle_sync_quorum_result(Ref, Result, #leader{},
     gen_statem:reply(From, Reply),
     {keep_state, Data#data{pending_clients = NewRequests}}.
 
-handle_command_result(Ref, Result, #leader{},
+handle_command_result(Ref, Result, State,
                       #data{pending_clients = Requests} = Data) ->
     {{From, command}, NewRequests0}  = maps:take(Ref, Requests),
     NewRequests =
         case Result of
             {accepted, Seqno} ->
+                #leader{} = State,
                 false = maps:is_key(Seqno, Requests),
                 maps:put(Seqno, {From, command_accepted}, NewRequests0);
             {error, _} = Error ->
@@ -569,9 +572,11 @@ handle_term_finished(HistoryId, Term, State, Data) ->
 
             {next_state,
              #follower{},
-             %% TODO: More detailed reason for why leader is gone
-             flush_pending_clients({error, {leader_error, leader_lost}},
-                                   NewData)};
+
+             %% We only respond to accepted commands here. Other in flight
+             %% requests will get a propoer response from chronicle_server.
+             flush_accepted_commands({error, {leader_error, leader_lost2}},
+                                     NewData)};
         #follower{} ->
             keep_state_and_data
     end.
@@ -594,13 +599,21 @@ sync_log(State, #data{reader = undefined} = Data) ->
                 {?RSM_TAG, entries, HighSeqno, Entries} ->
                     {next_state, _NewState, NewData2} =
                         handle_entries(HighSeqno, Entries, State, NewData1),
-                    NewData2
+                    NewData2;
+                {'DOWN', _, process, Pid, Reason} ->
+                    exit({reader_died, Pid, Reason})
             end
     end;
 sync_log(State, #data{reader = Pid, reader_mref = MRef} = Data)
   when is_pid(Pid) ->
     chronicle_utils:terminate_and_wait(Pid, shutdown),
     erlang:demonitor(MRef, [flush]),
+    receive
+        {?RSM_TAG, entries, _, _} ->
+            ok
+    after
+        0 -> ok
+    end,
     sync_log(State, Data#data{reader = undefined, reader_mref = undefined}).
 
 maybe_start_reader(#data{reader = undefined,
@@ -661,12 +674,19 @@ add_pending_client(Ref, From, ClientData,
                    #data{pending_clients = Clients} = Data) ->
     Data#data{pending_clients = maps:put(Ref, {From, ClientData}, Clients)}.
 
-flush_pending_clients(Reply, #data{pending_clients = Clients} = Data) ->
-    maps:fold(
-      fun (_, {From, _}, _) ->
-              gen_statem:reply(From, Reply)
-      end, unused, Clients),
-    Data#data{pending_clients = #{}}.
+flush_accepted_commands(Reply, #data{pending_clients = Clients} = Data) ->
+    NewClients =
+        maps:filter(
+          fun (_, {From, Type}) ->
+                  case Type of
+                      command_accepted ->
+                          gen_statem:reply(From, Reply),
+                          false;
+                      _ ->
+                          true
+                  end
+          end, Clients),
+    Data#data{pending_clients = NewClients}.
 
 set_mod_data(ModData, Data) ->
     Data#data{mod_data = ModData}.

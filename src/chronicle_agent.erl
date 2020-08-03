@@ -98,12 +98,10 @@ get_history_id(#metadata{pending_branch =
     PendingHistoryId.
 
 -type provision_result() :: ok | {error, already_provisioned}.
--spec provision(chronicle:history_id(),
-                chronicle:leader_term(),
-                #config{}) ->
-          provision_result().
-provision(HistoryId, Term, Config) ->
-    case gen_server:call(?SERVER, {provision, HistoryId, Term, Config}) of
+-spec provision([Machine]) -> provision_result() when
+      Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
+provision(Machines) ->
+    case gen_server:call(?SERVER, {provision, Machines}) of
         ok ->
             ok = chronicle_secondary_sup:sync();
         Other ->
@@ -213,8 +211,8 @@ handle_call(get_log, _From, #state{log_tab = Tab} = State) ->
     {reply, {ok, ets:tab2list(Tab)}, State};
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno}, _From, State) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State);
-handle_call({provision, HistoryId, Term, Config}, _From, State) ->
-    handle_provision(HistoryId, Term, Config, State);
+handle_call({provision, Machines}, _From, State) ->
+    handle_provision(Machines, State);
 handle_call(wipe, _From, State) ->
     handle_wipe(State);
 handle_call({establish_term, HistoryId, Term}, _From,
@@ -290,14 +288,20 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) ->
            check_same_term(Term, State),
            check_log_range(StartSeqno, EndSeqno, State)).
 
-handle_provision(HistoryId, Term, Config, State) ->
-    assert_valid_history_id(HistoryId),
-    assert_valid_term(Term),
-    #config{} = Config,
 
+handle_provision(Machines0, State) ->
     case check_not_provisioned(State) of
         ok ->
+            HistoryId = chronicle_utils:random_uuid(),
+            Term = ?NO_TERM,
             Seqno = 1,
+
+            Machines = maps:from_list(
+                         [{Name, #rsm_config{module = Module, args = Args}} ||
+                             {Name, Module, Args} <- Machines0]),
+
+            Config = #config{voters = [?PEER()], state_machines = Machines},
+
             LogEntry = #log_entry{history_id = HistoryId,
                                   term = Term,
                                   seqno = Seqno,
@@ -418,7 +422,7 @@ maybe_demote_config(#state{committed_seqno = CommittedSeqno,
             State#state{config_entry = CommittedConfigEntry}
     end.
 
-extract_latest_config(Entries, Default) ->
+extract_latest_config(Entries) ->
     lists:foldl(
       fun (Entry, Acc) ->
               case Entry#log_entry.value of
@@ -429,26 +433,33 @@ extract_latest_config(Entries, Default) ->
                   #rsm_command{} ->
                       Acc
               end
-      end, Default, Entries).
+      end, false, Entries).
 
 maybe_update_config(Entries,
                     #state{committed_seqno = CommittedSeqno} = State) ->
     %% Promote current pending config to committed state if necessary.
     NewState0 = maybe_promote_config(State),
+
     {CommittedEntries, PendingEntries} =
         lists:splitwith(fun (#log_entry{seqno = Seqno}) ->
                                 Seqno =< CommittedSeqno
                         end, Entries),
 
-    #state{committed_config_entry = CommittedConfig} = NewState0,
-    NewCommittedConfig =
-        extract_latest_config(CommittedEntries, CommittedConfig),
-    NewEffectiveConfig =
-        extract_latest_config(PendingEntries, NewCommittedConfig),
+    NewState1 =
+        case extract_latest_config(CommittedEntries) of
+            false ->
+                NewState0;
+            CommittedConfig ->
+                NewState0#state{config_entry = CommittedConfig,
+                                committed_config_entry = CommittedConfig}
+        end,
 
-
-    State#state{config_entry = NewEffectiveConfig,
-                committed_config_entry = NewCommittedConfig}.
+    case extract_latest_config(PendingEntries) of
+        false ->
+            NewState1;
+        PendingConfig ->
+            NewState1#state{config_entry = PendingConfig}
+    end.
 
 complete_append(HistoryId, Term, Info,
                 #state{committed_seqno = OurCommittedSeqno} = State) ->
@@ -493,9 +504,12 @@ complete_append(HistoryId, Term, Info,
     ?DEBUG("Appended entries.~n"
            "History id: ~p~n"
            "Term: ~p~n"
+           "High Seqno: ~p~n"
+           "Committed Seqno: ~p~n"
            "Entries: ~p~n"
            "Config: ~p",
-           [HistoryId, Term, Entries, NewState#state.config_entry]),
+           [HistoryId, Term, NewHighSeqno,
+            NewCommittedSeqno, Entries, NewState#state.config_entry]),
 
     {reply, ok, NewState}.
 
