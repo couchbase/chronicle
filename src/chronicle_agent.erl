@@ -77,14 +77,10 @@ get_system_state() ->
 
 -spec get_metadata() -> get_metadata_result().
 get_metadata() ->
-    get_metadata(?PEER()).
+    gen_server:call(?SERVER, get_metadata).
 
--spec get_metadata(chronicle:peer()) -> get_metadata_result().
-get_metadata(Peer) ->
-    gen_server:call(?SERVER(Peer), get_metadata).
-
-get_log(Peer) ->
-    gen_server:call(?SERVER(Peer), get_log).
+get_log() ->
+    gen_server:call(?SERVER, get_log).
 
 get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
     gen_server:call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).

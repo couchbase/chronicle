@@ -70,7 +70,7 @@ refresh(#state{clients = Clients,
               lists:foreach(
                 fun (VNode) ->
                         Reason =
-                            case VNode =:= ?PEER() of
+                            case VNode =:= vnet:vnode() of
                                 true ->
                                     net_kernel_terminated;
                                 false ->

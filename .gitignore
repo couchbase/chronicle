@@ -1,5 +1,6 @@
 *~
 *.beam
-_build/
+/_build/
 /TAGS
 /TAGS.root
+/cluster/

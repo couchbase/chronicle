@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+import argparse
+import atexit
+import os
+from os import path
+import subprocess
+import time
+
+DEFAULT_DATA_DIR=path.join(path.dirname(__file__), 'cluster')
+
+def mkdir(path):
+    os.makedirs(path, exist_ok=True)
+
+def get_ebin_path():
+    return subprocess.run(['rebar3', 'path'],
+                          check=True, capture_output=True).stdout.decode()
+
+def start_node(i, ebin_path, data_dir):
+    name='chronicle_{}@localhost.localdomain'.format(i)
+    node_dir = path.join(data_dir, name)
+    mkdir(node_dir)
+
+    node_data_dir = path.join(node_dir, 'data')
+    mkdir(node_data_dir)
+
+    log_path = path.join(node_dir, 'log')
+    log_file = open(log_path, 'a')
+
+    args = ['erl',
+            '+Bd',
+            '-name', name,
+            '-pa', ebin_path,
+            '-noinput',
+            '-chronicle', 'data_dir', '"{}"'.format(node_data_dir),
+            '-eval', 'ok = application:start(chronicle).']
+    process = subprocess.Popen(args, stdin=None,
+                               stdout=log_file, stderr=log_file)
+    atexit.register(lambda: kill_node(process))
+
+    return process
+
+def kill_node(process):
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+def start_cluster(args):
+    ebin_path = get_ebin_path()
+    data_dir = args.data_dir
+    mkdir(data_dir)
+
+    nodes = []
+    for i in range(args.num_nodes):
+        nodes.append(start_node(i, ebin_path, data_dir))
+
+    return nodes
+
+def poll_processes(processes):
+    while True:
+        for p in processes:
+            if p.poll() is not None:
+                return
+
+        time.sleep(0.1)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--num-nodes', type=int,
+                        dest='num_nodes', required=True)
+    parser.add_argument('--data-dir', dest='data_dir', default=DEFAULT_DATA_DIR)
+    args = parser.parse_args()
+
+    nodes = start_cluster(args)
+    poll_processes(nodes)
+
+if __name__ == '__main__':
+    main()

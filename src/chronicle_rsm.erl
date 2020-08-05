@@ -641,7 +641,7 @@ get_log(#data{name = Name,
               read_seqno = ReadSeqno,
               available_seqno = AvailableSeqno}) ->
     %% TODO: replace this with a dedicated call
-    {ok, Log} = chronicle_agent:get_log(?PEER()),
+    {ok, Log} = chronicle_agent:get_log(),
     Entries =
         lists:filter(
           fun (#log_entry{seqno = Seqno, value = Value}) ->

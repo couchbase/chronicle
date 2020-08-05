@@ -906,7 +906,17 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
         proposing ->
             case lists:member(Peer, Peers) of
                 true ->
-                    {keep_state, send_request_peer_position(Peer, Data)};
+                    case get_peer_monitor(Peer, Data) of
+                        {ok, _} ->
+                            %% We are already in contact with the peer
+                            %% (likely, check_peers initiated the connection
+                            %% and that's why we got this message). Nothing
+                            %% needs to be done.
+                            keep_state_and_data;
+                        not_found ->
+                            {keep_state,
+                             send_request_peer_position(Peer, Data)}
+                    end;
                 false ->
                     ?INFO("Peer ~p is not in peers:~n~p", [Peer, Peers]),
                     keep_state_and_data
@@ -1559,7 +1569,15 @@ stop(Reason, ExtraEffects, State,
 
     %% Make an attempt to notify local agent about the latest committed seqno,
     %% so chronicle_rsm-s can reply to clients whose commands got committed.
-    sync_local_agent(Data),
+    %%
+    %% But this can be and needs to be done only if we've established the term
+    %% on a quorum of nodes (that is, our state is 'proposing').
+    case State =:= proposing of
+        true ->
+            sync_local_agent(Data);
+        false ->
+            ok
+    end,
 
     {next_state, {stopped, Reason}, NewData1, Effects ++ ExtraEffects};
 stop(_Reason, ExtraEffects, {stopped, _}, Data) ->

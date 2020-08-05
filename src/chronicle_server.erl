@@ -557,13 +557,19 @@ simple_test__(Nodes) ->
 
 
     ?debugFmt("~nStates:~n~p~n",
-              [[{N, chronicle_agent:get_metadata(N)} || N <- Nodes]]),
+              [[{N, rpc_node(N, fun () ->
+                                        chronicle_agent:get_metadata()
+                                end)} || N <- Nodes]]),
 
     ?debugFmt("~nLogs:~n~p~n",
-              [[{N, chronicle_agent:get_log(N)} || N <- Nodes]]),
+              [[{N, rpc_node(N, fun () ->
+                                        chronicle_agent:get_log()
+                                end)} || N <- Nodes]]),
 
     ?debugFmt("~nKV snapshots:~n~p~n",
-              [[{N, rpc_node(N, fun () -> chronicle_kv:get_snapshot(kv) end)} || N <- [a, b]]]),
+              [[{N, rpc_node(N, fun () ->
+                                        chronicle_kv:get_snapshot(kv)
+                                end)} || N <- [a, b]]]),
 
     ok.
 

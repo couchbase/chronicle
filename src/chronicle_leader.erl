@@ -31,10 +31,12 @@
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
 -define(TABLE, ?ETS_TABLE(?MODULE)).
+-define(MAX_BACKOFF, 16).
 
 -record(leader, { history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
 -record(observer, { electable }).
+-record(voted_for, { stamp }).
 -record(candidate, {}).
 
 -record(data, { %% Since heartbeats are sent frequently, keep a precomputed
@@ -53,7 +55,9 @@
                 %% changes
                 state_timers = #{},
 
-                leader_waiters = #{} }).
+                leader_waiters = #{},
+
+                backoff_factor = 1}).
 
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -225,13 +229,14 @@ send_stepping_down(#leader{} = OldState, Data) ->
     send_msg_to_peers({stepping_down, LeaderInfo}, Data).
 
 handle_state_enter(State, Data) ->
-    NewData = start_state_timers(State, Data),
+    NewData0 = start_state_timers(State, Data),
+    NewData1 = maybe_reset_backoff(State, NewData0),
 
     case State of
         #candidate{} ->
-            {keep_state, start_election_worker(NewData)};
+            {keep_state, start_election_worker(NewData1)};
         _ ->
-            {keep_state, NewData}
+            {keep_state, NewData1}
     end.
 
 start_state_timers(State, Data) ->
@@ -256,9 +261,29 @@ state_timers(_) ->
 start_election_timer(State, Data) ->
     start_state_timer(election, get_election_timeout(State, Data), Data).
 
-get_election_timeout(_State, _Data) ->
-    %% TODO
-    500.
+get_election_timeout(State, Data) ->
+    HeartbeatInterval = get_heartbeat_interval(),
+
+    case State of
+        #observer{} ->
+            %% This is the timeout that needs to expire before an observer
+            %% will decide to attempt to elect itself a leader. The timeout is
+            %% randomized to avoid clashes with other nodes.
+            BackoffFactor = Data#data.backoff_factor,
+            HeartbeatInterval +
+                rand:uniform(5 * BackoffFactor * HeartbeatInterval);
+        #candidate{} ->
+            %% This is used by the candidate when it starts election. This
+            %% value is larger than 'long' timeout, which means that
+            %% eventually other nodes will start trying to elect
+            %% themselves. But this is probably ok.
+            50 * HeartbeatInterval;
+        _ ->
+            %% This is the amount of time that it will take followers or nodes
+            %% that graned their vote to decide that the leader is missing and
+            %% move to the observer state.
+            20 * HeartbeatInterval
+    end.
 
 schedule_send_heartbeat(Data) ->
     schedule_send_heartbeat(get_heartbeat_interval(), Data).
@@ -327,8 +352,6 @@ handle_new_term(Term, State, Data) ->
     LeaderAndTerm = get_active_leader_and_term(State),
     Invalidate =
         case LeaderAndTerm of
-            {Leader, undefined} ->
-                Leader =/= term_leader(Term);
             {_Leader, LeaderTerm} ->
                 LeaderTerm =/= Term;
             no_leader ->
@@ -471,17 +494,15 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
             {next_state, NewState, NewData};
         {error, _} = Error ->
             ?INFO("Election failed: ~p", [Error]),
-            {next_state, make_observer(NewData), NewData}
+            {next_state, make_observer(NewData), backoff(NewData)}
     end.
 
-handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
+handle_request_vote(_Candidate, HistoryId, Position, From, State, Data) ->
     case check_grant_vote(HistoryId, Position, State) of
         {ok, LatestTerm} ->
-            NewState = #follower{leader = Candidate,
-                                 history_id = HistoryId,
-                                 status = voted_for},
-
-            {next_state, NewState, Data, {reply, From, {ok, LatestTerm}}};
+            {next_state,
+             #voted_for{stamp = erlang:unique_integer()}, Data,
+             {reply, From, {ok, LatestTerm}}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
@@ -489,6 +510,8 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
 check_consider_granting_vote(State) ->
     case State of
         #observer{} ->
+            ok;
+        #voted_for{} ->
             ok;
         #candidate{} ->
             {error, in_election};
@@ -819,14 +842,9 @@ do_announce_leader(LeaderInfo) ->
 
 get_active_leader_and_term(State) ->
     case state_leader_info(State) of
-        #{status := Status, leader := Leader, term := LeaderTerm} ->
-            case Status of
-                voted_for ->
-                    {Leader, undefined};
-                _ ->
-                    true = (LeaderTerm =/= undefined),
-                    {Leader, LeaderTerm}
-            end;
+        #{leader := Leader, term := LeaderTerm} ->
+            true = (LeaderTerm =/= undefined),
+            {Leader, LeaderTerm};
         _ ->
             no_leader
     end.
@@ -848,3 +866,34 @@ get_last_known_leader_term(State, Data) ->
 
 make_observer(#data{electable = Electable}) ->
     #observer{electable = Electable}.
+
+backoff(#data{backoff_factor = Factor} = Data) ->
+    case Factor >= ?MAX_BACKOFF of
+        true ->
+            Data;
+        false ->
+            Data#data{backoff_factor = Factor * 2}
+    end.
+
+reset_backoff(Data) ->
+    Data#data{backoff_factor = 1}.
+
+maybe_reset_backoff(State, Data) ->
+    Reset =
+        case State of
+            #voted_for{} ->
+                true;
+            #follower{} ->
+                true;
+            #leader{} ->
+                true;
+            _ ->
+                false
+        end,
+
+    case Reset of
+        true ->
+            reset_backoff(Data);
+        false ->
+            Data
+    end.
