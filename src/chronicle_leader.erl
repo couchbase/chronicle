@@ -36,7 +36,7 @@
 -record(leader, { history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
 -record(observer, { electable }).
--record(voted_for, { stamp }).
+-record(voted_for, { peer, ts }).
 -record(candidate, {}).
 
 -record(data, { %% Since heartbeats are sent frequently, keep a precomputed
@@ -425,7 +425,7 @@ handle_heartbeat(LeaderInfo, State, Data) ->
       status := Status} = LeaderInfo,
 
     case ?CHECK(check_history_id(HistoryId, Data),
-                check_accept_heartbeat(Term, State, Data)) of
+                check_accept_heartbeat(Term, Status, State, Data)) of
         ok ->
             NewState = #follower{leader = Peer,
                                  history_id = HistoryId,
@@ -497,11 +497,12 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
             {next_state, make_observer(NewData), backoff(NewData)}
     end.
 
-handle_request_vote(_Candidate, HistoryId, Position, From, State, Data) ->
+handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case check_grant_vote(HistoryId, Position, State) of
         {ok, LatestTerm} ->
             {next_state,
-             #voted_for{stamp = erlang:unique_integer()}, Data,
+             #voted_for{peer = Candidate,
+                        ts = erlang:system_time()}, Data,
              {reply, From, {ok, LatestTerm}}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
@@ -733,13 +734,54 @@ check_is_leader(HistoryId, Term,
 check_is_leader(_HistoryId, _Term, State) ->
     {error, {not_a_leader, state_name(State)}}.
 
-check_accept_heartbeat(NewTerm, State, Data) ->
-    Term = get_last_known_leader_term(State, Data),
-    case Term =:= NewTerm orelse term_number(NewTerm) > term_number(Term) of
+check_accept_heartbeat(NewTerm, NewStatus, State, Data) ->
+    {OurTerm, OurStatus} = get_last_known_leader_term(State, Data),
+
+    case NewTerm =:= OurTerm of
         true ->
+            %% This should be the most common case, so accept the hearbeat
+            %% quickly.
             ok;
         false ->
-            {error, {stale_term, NewTerm, Term}}
+            NewTermNumber = term_number(NewTerm),
+            OurTermNumber = term_number(OurTerm),
+
+            if
+                NewTermNumber > OurTermNumber ->
+                    ok;
+                NewTermNumber =:= OurTermNumber ->
+                    %% Two nodes are competing to become a leader in the same
+                    %% term.
+                    case {NewStatus, OurStatus} of
+                        {established, _} ->
+                            %% The node we got the heartbeat from successfully
+                            %% established the term on a quorum of nodes. So
+                            %% we accept it. Our term status then must not be
+                            %% established.
+                            true = (OurStatus =/= established),
+                            ok;
+                        {tentative, inactive} ->
+                            %% Accept a tentative heartbeat only if we haven't
+                            %% heard from any other leader before.
+                            ok;
+                        _ ->
+                            {error, {have_leader,
+                                     NewTerm, NewStatus,
+                                     OurTerm, OurStatus}}
+                    end;
+                true ->
+                    {error, {stale_term, NewTerm, OurTerm}}
+            end
+    end.
+
+get_last_known_leader_term(State, Data) ->
+    %% For a short period of time, the leader term that we've received via a
+    %% heartbeat may be ahead of the established term.
+    case state_leader_info(State) of
+        #{term := Term, status := Status} ->
+            {Term, Status};
+        no_leader ->
+            {Data#data.established_term, inactive}
     end.
 
 state_name(State) ->
@@ -849,20 +891,6 @@ get_active_leader_and_term(State) ->
             no_leader
     end.
 
-get_last_known_leader_term(State, Data) ->
-    %% For a short period of time, the leader term that we've received via a
-    %% heartbeat may be ahead of the established term.
-    case get_active_leader_and_term(State) of
-        {_Leader, LeaderTerm} ->
-            case LeaderTerm of
-                undefined ->
-                    Data#data.established_term;
-                _ ->
-                    LeaderTerm
-            end;
-        no_leader ->
-            Data#data.established_term
-    end.
 
 make_observer(#data{electable = Electable}) ->
     #observer{electable = Electable}.

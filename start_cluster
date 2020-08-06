@@ -28,6 +28,7 @@ def start_node(i, ebin_path, data_dir):
 
     args = ['erl',
             '+Bd',
+            '+sbwt', 'none',
             '-name', name,
             '-pa', ebin_path,
             '-noinput',

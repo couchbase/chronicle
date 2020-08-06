@@ -20,7 +20,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [get_position/1]).
+-import(chronicle_utils, [get_position/1, term_number/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -345,9 +345,15 @@ handle_establish_term_result(Peer,
 
                     case Error of
                         {behind, _} ->
-                            %% We keep going desbite the fact we're behind
+                            %% We keep going despite the fact we're behind
                             %% this peer because we still might be able to get
                             %% a majority of votes.
+                            establish_term_handle_vote(Peer,
+                                                       failed, State, Data);
+                        {conflicting_term, _} ->
+                            %% Some conflicting_term errors are ignored by
+                            %% handle_common_error. If we hit one, we record a
+                            %% failed vote, but keep going.
                             establish_term_handle_vote(Peer,
                                                        failed, State, Data);
                         _ ->
@@ -360,12 +366,33 @@ handle_common_error(Peer, Error,
                     #data{history_id = HistoryId, term = Term}) ->
     case Error of
         {conflicting_term, OtherTerm} ->
-            ?INFO("Saw term conflict when trying on peer ~p.~n"
-                  "History id: ~p~n"
-                  "Our term: ~p~n"
-                  "Conflicting term: ~p",
-                  [Peer, HistoryId, Term, OtherTerm]),
-            {stop, {conflicting_term, Term, OtherTerm}};
+            OurTermNumber = term_number(Term),
+            OtherTermNumber = term_number(OtherTerm),
+
+            case OtherTermNumber > OurTermNumber of
+                true ->
+                    ?INFO("Conflicting term on peer ~p. Stopping.~n"
+                          "History id: ~p~n"
+                          "Our term: ~p~n"
+                          "Conflicting term: ~p",
+                          [Peer, HistoryId, Term, OtherTerm]),
+                    {stop, {conflicting_term, Term, OtherTerm}};
+                false ->
+                    %% This is most likely to happen when two different nodes
+                    %% try to start a term of the same number at around the
+                    %% same time. If one of the nodes manages to establish the
+                    %% term on a quorum of nodes, despite conflicts, it'll be
+                    %% able propose and replicate just fine. So we ignore such
+                    %% conflicts.
+                    true = (OurTermNumber =:= OtherTermNumber),
+                    ?INFO("Conflicting term on peer ~p. Ignoring.~n"
+                          "History id: ~p~n"
+                          "Our term: ~p~n"
+                          "Conflicting term: ~p~n",
+                          [Peer, HistoryId, Term, OtherTerm]),
+
+                    ignored
+            end;
         {history_mismatch, OtherHistoryId} ->
             ?INFO("Saw history mismatch when trying on peer ~p.~n"
                   "Our history id: ~p~n"
@@ -383,9 +410,17 @@ handle_common_error(Peer, Error,
             ignored
     end.
 
-establish_term_handle_vote(_Peer, _Status, proposing, Data) ->
-    %% We'are already proposing. So nothing needs to be done.
-    {keep_state, Data};
+establish_term_handle_vote(Peer, Status, proposing, Data) ->
+    case Status of
+        {ok, _} ->
+            {keep_state, Data};
+        failed ->
+            %% This is not exactly clean. But the intention is the
+            %% following. We got some error that we chose to ignore. But since
+            %% we are already proposing, we need to know this peer's
+            %% position. And that's what it does.
+            {keep_state, check_peers(demonitor_agents([Peer], Data))}
+    end;
 establish_term_handle_vote(Peer, Status, establish_term = State,
                            #data{high_seqno = HighSeqno,
                                  committed_seqno = OurCommittedSeqno,
@@ -409,7 +444,12 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                 Data#data{votes = [Peer | Votes],
                           committed_seqno = NewCommittedSeqno};
             failed ->
-                Data#data{failed_votes = [Peer | FailedVotes]}
+                %% Demonitor the peer so we recheck on it once and if we
+                %% successfully establish the term.
+                %%
+                %% TODO: consider replacing it with something cleaner
+                demonitor_agents([Peer],
+                                 Data#data{failed_votes = [Peer | FailedVotes]})
         end,
 
     establish_term_maybe_transition(State, NewData).
