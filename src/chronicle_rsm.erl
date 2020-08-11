@@ -25,6 +25,8 @@
 -define(SERVER(Name), ?SERVER_NAME(Name)).
 -define(SERVER(Peer, Name), ?SERVER_NAME(Peer, Name)).
 
+-define(LOCAL_REVISION_KEY(Name), {Name, local_revision}).
+
 -type pending_client() ::
         {From :: any(),
          Type :: command
@@ -91,6 +93,14 @@ get_applied_revision(Name, Type, Timeout) ->
 
 get_applied_revision(Leader, Name, Type, Timeout) ->
     call(?SERVER(Leader, Name), {get_applied_revision, Type}, Timeout).
+
+get_local_revision(Name) ->
+    case chronicle_ets:get(?LOCAL_REVISION_KEY(Name)) of
+        {ok, Revision} ->
+            Revision;
+        not_found ->
+            exit(not_running)
+    end.
 
 sync_revision(Name, Revision, Timeout0) ->
     %% TODO: add fast path
@@ -160,6 +170,9 @@ init([Name, Mod, ModArgs]) ->
                     no_term ->
                         []
                 end,
+
+            ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
+            publish_local_revision(Data),
 
             {ok, #follower{}, maybe_start_reader(Data), Effects};
         {stop, _} = Stop ->
@@ -333,6 +346,8 @@ handle_entries(HighSeqno, Entries, State, #data{reader = Reader,
     NewData0 = Data#data{reader = undefined, reader_mref = undefined},
     NewData1 = apply_entries(HighSeqno, Entries, State, NewData0),
     NewData = maybe_start_reader(NewData1),
+
+    publish_local_revision(NewData),
 
     {next_state,
      maybe_mark_leader_established(State, NewData),
@@ -706,3 +721,9 @@ call_callback(Callback, Args, #data{mod = Mod,
                                     applied_seqno = AppliedSeqno}) ->
     AppliedRevision = {AppliedHistoryId, AppliedSeqno},
     erlang:apply(Mod, Callback, Args ++ [AppliedRevision, ModState, ModData]).
+
+publish_local_revision(#data{name = Name,
+                             applied_history_id = AppliedHistoryId,
+                             applied_seqno = AppliedSeqno}) ->
+    Revision = {AppliedHistoryId, AppliedSeqno},
+    chronicle_ets:put(?LOCAL_REVISION_KEY(Name), Revision).

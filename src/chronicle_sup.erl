@@ -49,6 +49,12 @@ child_specs() ->
                shutdown => 1000,
                type => worker},
 
+    Ets = #{id => chronicle_ets,
+            start => {chronicle_ets, start_link, []},
+            restart => permanent,
+            shutdown => brutal_kill,
+            type => worker},
+
     Storage = #{id => chronicle_storage,
                 start => {chronicle_storage, start_link, []},
                 restart => permanent,
@@ -66,4 +72,4 @@ child_specs() ->
                      restart => permanent,
                      type => supervisor},
 
-    [Peers, Events, Storage, Agent, SecondarySup].
+    [Peers, Events, Ets, Storage, Agent, SecondarySup].

@@ -142,6 +142,9 @@ get_snapshot(Name, Keys, Timeout, Opts) ->
     %% TODO: consider implementing optimistic snapshots
     submit_query(Name, {get_snapshot, Keys}, Timeout, Opts).
 
+get_revision(Name) ->
+    chronicle_rsm:get_local_revision(Name).
+
 %% callbacks
 specs(Name, _Args) ->
     EventName = event_manager_name(Name),
