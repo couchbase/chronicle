@@ -18,14 +18,18 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [read_timeout/1]).
-
 -behavior(gen_statem).
 -compile(export_all).
 
--import(chronicle_utils, [parallel_mapfold/4,
-                          term_number/1, term_leader/1,
-                          get_position/1, compare_positions/2]).
+-import(chronicle_utils, [compare_positions/2,
+                          get_establish_peers/1,
+                          get_establish_quorum/1,
+                          get_position/1,
+                          get_quorum_peers/1,
+                          have_quorum/2,
+                          parallel_mapfold/4,
+                          read_timeout/1,
+                          term_number/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
@@ -33,7 +37,7 @@
 -define(TABLE, ?ETS_TABLE(?MODULE)).
 -define(MAX_BACKOFF, 16).
 
--record(leader, { history_id, term, status }).
+-record(leader, { peer, history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
 -record(observer, { electable }).
 -record(voted_for, { peer, ts }).
@@ -105,8 +109,8 @@ wait_for_leader_slow_path(Incarnation, Timeout) ->
             exit(no_leader)
     end.
 
-announce_leader() ->
-    gen_statem:cast(?SERVER, announce_leader).
+announce_leader_status() ->
+    gen_statem:cast(?SERVER, announce_leader_status).
 
 request_vote(Peer, Candidate, HistoryId, Position) ->
     gen_statem:call(?SERVER(Peer),
@@ -149,7 +153,7 @@ init([]) ->
     {ok, make_observer(Data), Data}.
 
 handle_event(enter, OldState, State, Data) ->
-    maybe_send_stepping_down(OldState, State, Data),
+    handle_leader_transition(OldState, State, Data),
     NewData0 = maybe_publish_leader(OldState, State, Data),
     NewData1 = handle_state_leave(OldState, NewData0),
     handle_state_enter(State, NewData1);
@@ -170,8 +174,8 @@ handle_event(internal, {state_timer, election}, State, Data) ->
     handle_election_timeout(State, Data);
 handle_event(internal, {state_timer, send_heartbeat}, State, Data) ->
     handle_send_heartbeat(State, Data);
-handle_event(cast, announce_leader, State, Data) ->
-    handle_announce_leader(State, Data);
+handle_event(cast, announce_leader_status, State, Data) ->
+    handle_announce_leader_status(State, Data);
 handle_event(cast, {note_term_status, HistoryId, Term, Status}, State, Data) ->
     handle_note_term_status(HistoryId, Term, Status, State, Data);
 handle_event({call, From},
@@ -188,9 +192,17 @@ handle_event(Type, Event, _State, _Data) ->
 
 terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data),
-    maybe_send_stepping_down(State, Data),
+
+    case State of
+        #leader{} ->
+            on_leader_stepping_down(State, Data);
+        _ ->
+            ok
+    end,
+
     reply_to_leader_waiters(no_leader, Data),
-    publish_leader(no_leader).
+    publish_leader(no_leader),
+    announce_leader_status(not_leader).
 
 %% internal
 handle_state_leave(OldState, #data{election_worker = Worker} = Data) ->
@@ -205,24 +217,25 @@ handle_state_leave(OldState, #data{election_worker = Worker} = Data) ->
             NewData#data{election_worker = undefined}
     end.
 
-maybe_send_stepping_down(OldState, NewState, Data) ->
+handle_leader_transition(OldState, NewState, Data) ->
     WasLeader = is_record(OldState, leader),
     IsLeader = is_record(NewState, leader),
 
     case {WasLeader, IsLeader} of
         {true, false} ->
-            send_stepping_down(OldState, Data);
+            on_leader_stepping_down(OldState, Data);
+        {false, true} ->
+            on_leader_starting(NewState, Data);
         _ ->
             ok
     end.
 
-maybe_send_stepping_down(OldState, Data) ->
-    case OldState of
-        #leader{} ->
-            send_stepping_down(OldState, Data);
-        _ ->
-            ok
-    end.
+on_leader_starting(State, _Data) ->
+    announce_leader_status(state_leader_info(State)).
+
+on_leader_stepping_down(OldState, Data) ->
+    announce_leader_status(not_leader),
+    send_stepping_down(OldState, Data).
 
 send_stepping_down(#leader{} = OldState, Data) ->
     LeaderInfo = state_leader_info(OldState),
@@ -378,12 +391,13 @@ metadata2data(Metadata) ->
     metadata2data(Metadata, #data{}).
 
 metadata2data(Metadata, Data) ->
-    Peers = chronicle_proposer:get_establish_peers(Metadata),
-    Electable = lists:member(?PEER(), Peers),
+    Self = Metadata#metadata.peer,
+    Peers = get_establish_peers(Metadata),
+    Electable = lists:member(Self, Peers),
 
     Data#data{history_id = chronicle_agent:get_history_id(Metadata),
               established_term = Metadata#metadata.term,
-              peers = Peers -- [?PEER()],
+              peers = Peers -- [Self],
               electable = Electable}.
 
 handle_note_term_status(HistoryId, Term, Status, State, Data) ->
@@ -484,11 +498,12 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
 
     NewData = Data#data{election_worker = undefined},
     case Result of
-        {ok, HistoryId, Term} ->
-            NewTerm = chronicle_utils:next_term(Term),
+        {ok, Peer, HistoryId, Term} ->
+            NewTerm = chronicle_utils:next_term(Term, Peer),
             ?INFO("Going to become a leader in term ~p (history id ~p)",
                   [NewTerm, HistoryId]),
-            NewState = #leader{history_id = HistoryId,
+            NewState = #leader{peer = Peer,
+                               history_id = HistoryId,
                                term = NewTerm,
                                status = tentative},
             {next_state, NewState, NewData};
@@ -620,8 +635,8 @@ election_worker() ->
     LatestTerm = Metadata#metadata.term,
     HistoryId = chronicle_agent:get_history_id(Metadata),
     Position = get_position(Metadata),
-    Quorum = chronicle_proposer:get_establish_quorum(Metadata),
-    Peers = chronicle_proposer:get_quorum_peers(Quorum),
+    Quorum = get_establish_quorum(Metadata),
+    Peers = get_quorum_peers(Quorum),
 
     ?INFO("Starting election.~n"
           "History ID: ~p~n"
@@ -630,7 +645,7 @@ election_worker() ->
           "Required quorum: ~p",
           [HistoryId, Position, Peers, Quorum]),
 
-    Leader = ?PEER(),
+    Leader = Metadata#metadata.peer,
     OtherPeers = Peers -- [Leader],
 
     CallFun =
@@ -645,7 +660,7 @@ election_worker() ->
                         NewVotes = [Peer | Votes],
                         NewTerm = max(Term, PeerTerm),
 
-                        case chronicle_proposer:have_quorum(NewVotes, Quorum) of
+                        case have_quorum(NewVotes, Quorum) of
                             true ->
                                 %% TODO: wait a little more to receive more
                                 %% responses
@@ -664,7 +679,7 @@ election_worker() ->
     case OtherPeers =:= [] of
         true ->
             ?INFO("I'm the only peer, so I'm the leader."),
-            {ok, HistoryId, LatestTerm};
+            {ok, Leader, HistoryId, LatestTerm};
         false ->
             case parallel_mapfold(CallFun, HandleResponse,
                                   {no_quorum, [Leader], LatestTerm},
@@ -672,7 +687,7 @@ election_worker() ->
                 {no_quorum, FinalVotes, _} ->
                     {error, {no_quorum, FinalVotes, Quorum}};
                 {ok, FinalTerm} ->
-                    {ok, HistoryId, FinalTerm}
+                    {ok, Leader, HistoryId, FinalTerm}
             end
     end.
 
@@ -694,8 +709,15 @@ send_msg_to_peers(Msg, #data{peers = Peers}) ->
 send_msg(Peer, Msg) ->
     ?SEND(?SERVER(Peer), Msg, [nosuspend, noconnect]).
 
-handle_announce_leader(State, _Data) ->
-    do_announce_leader(state_leader_info(State)),
+handle_announce_leader_status(State, _Data) ->
+    Status =
+        case State of
+            #leader{} ->
+                state_leader_info(State);
+            _ ->
+                not_leader
+        end,
+    announce_leader_status(Status),
     keep_state_and_data.
 
 maybe_publish_leader(OldState, State, Data) ->
@@ -832,8 +854,9 @@ state_leader(State) ->
 
 state_leader_info(State) ->
     case State of
-        #leader{history_id = HistoryId, term = Term, status = Status} ->
-            make_leader_info(?PEER(), HistoryId, Term, Status);
+        #leader{peer = Peer,
+                history_id = HistoryId, term = Term, status = Status} ->
+            make_leader_info(Peer, HistoryId, Term, Status);
         #follower{leader = Leader,
                   history_id = HistoryId,
                   term = Term,
@@ -876,11 +899,10 @@ make_leader_info(Leader, HistoryId, Term, Status) ->
       status => Status}.
 
 publish_leader(LeaderInfo) ->
-    ets:insert(?TABLE, {leader_info, LeaderInfo}),
-    do_announce_leader(LeaderInfo).
+    ets:insert(?TABLE, {leader_info, LeaderInfo}).
 
-do_announce_leader(LeaderInfo) ->
-    chronicle_events:sync_notify({leader, LeaderInfo}).
+announce_leader_status(Status) ->
+    chronicle_events:sync_notify({leader_status, Status}).
 
 get_active_leader_and_term(State) ->
     case state_leader_info(State) of
@@ -890,7 +912,6 @@ get_active_leader_and_term(State) ->
         _ ->
             no_leader
     end.
-
 
 make_observer(#data{electable = Electable}) ->
     #observer{electable = Electable}.

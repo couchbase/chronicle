@@ -19,7 +19,7 @@
 
 -import(chronicle_utils, [with_leader/2]).
 
--export([provision/1]).
+-export([provision/1, reprovision/0]).
 -export([get_voters/0, get_voters/1]).
 -export([add_voters/1, add_voters/2, remove_voters/1, remove_voters/2]).
 
@@ -41,6 +41,10 @@
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 provision(Machines) ->
     chronicle_agent:provision(Machines).
+
+-spec reprovision() -> chronicle_agent:provision_result().
+reprovision() ->
+    chronicle_agent:reprovision().
 
 add_voters(Voters) ->
     add_voters(Voters, ?DEFAULT_TIMEOUT).

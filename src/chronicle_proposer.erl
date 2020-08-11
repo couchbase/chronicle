@@ -20,7 +20,11 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [get_position/1, term_number/1]).
+-import(chronicle_utils, [get_position/1,
+                          get_quorum_peers/1,
+                          have_quorum/2,
+                          is_quorum_feasible/3,
+                          term_number/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -30,6 +34,8 @@
 -define(CHECK_PEERS_INTERVAL, 5000).
 
 -record(data, { parent,
+
+                peer,
 
                 %% TODO: reconsider what's needed and what's not needed here
                 history_id,
@@ -199,9 +205,9 @@ handle_state_enter(establish_term,
     %% term) between when we get it here and when we get a majority of votes.
     case chronicle_agent:establish_local_term(HistoryId, Term) of
         {ok, Metadata} ->
-            Peers = get_establish_peers(Metadata),
-
-            case lists:member(?PEER(), Peers) of
+            Quorum = get_establish_quorum(Metadata),
+            Peers = get_quorum_peers(Quorum),
+            case lists:member(?SELF_PEER, get_quorum_peers(Quorum)) of
                 true ->
                     establish_term_init(Metadata, Data);
                 false ->
@@ -233,9 +239,10 @@ handle_state_enter({stopped, _}, _Data) ->
 
 establish_term_init(Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
-    Quorum = get_establish_quorum(Metadata),
-    Peers = get_establish_peers(Metadata),
-    LivePeers = chronicle_peers:get_live_peers(Peers),
+    Self = Metadata#metadata.peer,
+    Quorum = require_self_quorum(get_establish_quorum(Metadata)),
+    Peers = get_quorum_peers(Quorum),
+    LivePeers = get_live_peers(Peers),
     DeadPeers = Peers -- LivePeers,
 
     ?DEBUG("Going to establish term ~p (history id ~p).~n"
@@ -251,7 +258,7 @@ establish_term_init(Metadata,
 
     case is_quorum_feasible(Peers, DeadPeers, Quorum) of
         true ->
-            OtherPeers = LivePeers -- [?PEER()],
+            OtherPeers = LivePeers -- [?SELF_PEER],
 
             %% Send a fake response to update our state with the
             %% knowledge that we've established the term
@@ -265,7 +272,8 @@ establish_term_init(Metadata,
             NewData0 = send_local_establish_term(Metadata, Data),
             NewData1 =
                 send_establish_term(OtherPeers, Metadata, NewData0),
-            NewData = NewData1#data{peers = Peers,
+            NewData = NewData1#data{peer = Self,
+                                    peers = Peers,
                                     quorum_peers = Peers,
                                     quorum = Quorum,
                                     machines = config_machines(Config),
@@ -301,7 +309,7 @@ handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
     {stop, establish_term_timeout}.
 
 check_peers(#data{peers = Peers} = Data) ->
-    LivePeers = chronicle_peers:get_live_peers(Peers),
+    LivePeers = get_live_peers(Peers),
     MonitoredPeers = get_monitored_peers(Data),
     PeersToCheck = LivePeers -- MonitoredPeers,
 
@@ -773,7 +781,8 @@ check_leader_got_removed(#data{being_removed = BeingRemoved} = Data) ->
     BeingRemoved andalso is_config_committed(Data).
 
 handle_config_post_append(OldData,
-                          #data{config_revision = ConfigRevision} = NewData) ->
+                          #data{peer = Peer,
+                                config_revision = ConfigRevision} = NewData) ->
     GotCommitted =
         not is_revision_committed(ConfigRevision, OldData)
         andalso is_revision_committed(ConfigRevision, NewData),
@@ -791,7 +800,7 @@ handle_config_post_append(OldData,
                     ?INFO("Shutting down because leader ~p "
                           "got removed from peers.~n"
                           "Peers: ~p",
-                          [?PEER(), NewData2#data.quorum_peers]),
+                          [Peer, NewData2#data.quorum_peers]),
                     {stop, leader_removed, NewData2};
                 false ->
                     %% Deliver postponed config changes again. We've postponed
@@ -825,7 +834,7 @@ replicate(Data) ->
     end.
 
 get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
-    LivePeers = chronicle_peers:get_live_peers(Peers),
+    LivePeers = get_live_peers(Peers),
 
     lists:filtermap(
       fun (Peer) ->
@@ -849,78 +858,10 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
               end
       end, LivePeers).
 
-config_peers(#config{voters = Voters}) ->
-    Voters;
-config_peers(#transition{current_config = Current,
-                         future_config = Future}) ->
-    lists:usort(config_peers(Current) ++ config_peers(Future)).
-
 config_machines(#config{state_machines = Machines}) ->
     maps:keys(Machines);
 config_machines(#transition{future_config = FutureConfig}) ->
     config_machines(FutureConfig).
-
-get_quorum(Config) ->
-    Self = ?PEER(),
-    Quorum = do_get_quorum(Config),
-    QuorumPeers = do_get_quorum_peers(Quorum),
-
-    case sets:is_element(Self, QuorumPeers) of
-        true ->
-            %% Include local agent in all quorums.
-            {joint,
-             {all, sets:from_list([Self])},
-             Quorum};
-        false ->
-            Quorum
-    end.
-
-do_get_quorum(#config{voters = Voters}) ->
-    {majority, sets:from_list(Voters)};
-do_get_quorum(#transition{current_config = Current, future_config = Future}) ->
-    {joint, do_get_quorum(Current), do_get_quorum(Future)}.
-
-get_quorum_peers(Quorum) ->
-    sets:to_list(do_get_quorum_peers(Quorum)).
-
-do_get_quorum_peers({majority, Peers}) ->
-    Peers;
-do_get_quorum_peers({all, Peers}) ->
-    Peers;
-do_get_quorum_peers({joint, Quorum1, Quorum2}) ->
-    sets:union(do_get_quorum_peers(Quorum1),
-               do_get_quorum_peers(Quorum2)).
-
-have_quorum(AllVotes, Quorum)
-  when is_list(AllVotes) ->
-    do_have_quorum(sets:from_list(AllVotes), Quorum);
-have_quorum(AllVotes, Quorum) ->
-    do_have_quorum(AllVotes, Quorum).
-
-do_have_quorum(AllVotes, {joint, Quorum1, Quorum2}) ->
-    do_have_quorum(AllVotes, Quorum1) andalso do_have_quorum(AllVotes, Quorum2);
-do_have_quorum(AllVotes, {all, QuorumNodes}) ->
-    MissingVotes = sets:subtract(QuorumNodes, AllVotes),
-    sets:size(MissingVotes) =:= 0;
-do_have_quorum(AllVotes, {majority, QuorumNodes}) ->
-    Votes = sets:intersection(AllVotes, QuorumNodes),
-    sets:size(Votes) * 2 > sets:size(QuorumNodes).
-
-is_quorum_feasible(Peers, FailedVotes, Quorum) ->
-    PossibleVotes = Peers -- FailedVotes,
-    have_quorum(PossibleVotes, Quorum).
-
-%% TODO: find a better place for the following functions
-get_establish_quorum(Metadata) ->
-    case Metadata#metadata.pending_branch of
-        undefined ->
-            get_quorum(Metadata#metadata.config);
-        #branch{peers = BranchPeers} ->
-            {all, sets:from_list(BranchPeers)}
-    end.
-
-get_establish_peers(Metadata) ->
-    get_quorum_peers(get_establish_quorum(Metadata)).
 
 handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
     ?INFO("Peer ~p came up", [Peer]),
@@ -974,7 +915,7 @@ handle_down(MRef, Pid, Reason, State, Data) ->
     ?INFO("Observed agent ~p on peer ~p "
           "go down with reason ~p", [Pid, Peer, Reason]),
 
-    case Peer =:= ?PEER() of
+    case Peer =:= ?SELF_PEER of
         true ->
             ?ERROR("Terminating proposer because local "
                    "agent ~p terminated with reason ~p",
@@ -1046,7 +987,7 @@ handle_sync_quorum(ReplyTo, proposing,
                    #data{quorum_peers = Peers,
                          sync_requests = SyncRequests} = Data) ->
     %% TODO: timeouts
-    LivePeers = chronicle_peers:get_live_peers(Peers),
+    LivePeers = get_live_peers(Peers),
     DeadPeers = Peers -- LivePeers,
 
     Ref = make_ref(),
@@ -1110,9 +1051,13 @@ make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
                value = Value}.
 
 update_config(Config, Revision, #data{quorum_peers = OldQuorumPeers} = Data) ->
-    Quorum = get_quorum(Config),
+    RawQuorum = get_append_quorum(Config, Data),
+    BeingRemoved = not lists:member(?SELF_PEER, get_quorum_peers(RawQuorum)),
+
+    %% Always require include local to acknowledge writes, even if the node is
+    %% being removed.
+    Quorum = require_self_quorum(RawQuorum),
     QuorumPeers = get_quorum_peers(Quorum),
-    BeingRemoved = not lists:member(?PEER(), QuorumPeers),
 
     NewData = Data#data{config = Config,
                         config_revision = Revision,
@@ -1287,7 +1232,7 @@ send_local_establish_term(Metadata,
     Position = get_position(Metadata),
 
     send_requests(
-      [?PEER()], {establish_term, HistoryId, Term, Position}, Data,
+      [?SELF_PEER], {establish_term, HistoryId, Term, Position}, Data,
       fun (_Peer, Opaque) ->
               self() ! {Opaque, {ok, Metadata}}
       end).
@@ -1633,7 +1578,7 @@ sync_local_agent(#data{history_id = HistoryId,
         ok ->
             ok;
         Other ->
-            ?DEBUG("Failed to synchronize with local agent."
+            ?DEBUG("Failed to synchronize with local agent.~n"
                    "History id: ~p~n"
                    "Term: ~p~n"
                    "Committed seqno: ~p~n"
@@ -1643,3 +1588,41 @@ sync_local_agent(#data{history_id = HistoryId,
 
 reply_not_leader(ReplyTo) ->
     reply_request(ReplyTo, {error, {leader_error, not_leader}}).
+
+require_self_quorum(Quorum) ->
+    {joint, {all, sets:from_list([?SELF_PEER])}, Quorum}.
+
+get_establish_quorum(#metadata{peer = Self} = Metadata) ->
+    translate_quorum(chronicle_utils:get_establish_quorum(Metadata), Self).
+
+get_append_quorum(Config, #data{peer = Self}) ->
+    translate_quorum(chronicle_utils:get_append_quorum(Config), Self).
+
+translate_peers(Peers, Self) ->
+    case sets:is_element(Self, Peers) of
+        true ->
+            sets:add_element(?SELF_PEER, sets:del_element(Self, Peers));
+        false ->
+            Peers
+    end.
+
+translate_quorum({all, Peers}, Self) ->
+    {all, translate_peers(Peers, Self)};
+translate_quorum({majority, Peers}, Self) ->
+    {majority, translate_peers(Peers, Self)};
+translate_quorum({joint, Quorum1, Quorum2}, Self) ->
+    {joint,
+     translate_quorum(Quorum1, Self),
+     translate_quorum(Quorum2, Self)}.
+
+get_live_peers(Peers) ->
+    LivePeers = sets:from_list(chronicle_peers:get_live_peers()),
+    lists:filter(
+      fun (Peer) ->
+              case Peer of
+                  ?SELF_PEER ->
+                      true;
+                  _ ->
+                      sets:is_element(Peer, LivePeers)
+              end
+      end, Peers).

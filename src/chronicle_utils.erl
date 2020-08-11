@@ -143,8 +143,8 @@ terminate_linked_process(Pid, Reason) when is_pid(Pid) ->
             ok
     end.
 
-next_term({TermNo, _}) ->
-    {TermNo + 1, ?PEER()}.
+next_term({TermNo, _}, Peer) ->
+    {TermNo + 1, Peer}.
 
 call_async(ServerRef, Request) ->
     Ref = make_ref(),
@@ -435,3 +435,58 @@ with_leader_loop(TRef, Incarnation, Retries, Fun) ->
         _ ->
             Result
     end.
+
+get_establish_quorum(Metadata) ->
+    case Metadata#metadata.pending_branch of
+        undefined ->
+            get_append_quorum(Metadata#metadata.config);
+        #branch{peers = BranchPeers} ->
+            {all, sets:from_list(BranchPeers)}
+    end.
+
+get_establish_peers(Metadata) ->
+    get_quorum_peers(get_establish_quorum(Metadata)).
+
+get_append_quorum(#config{voters = Voters}) ->
+    {majority, sets:from_list(Voters)};
+get_append_quorum(#transition{current_config = Current,
+                              future_config = Future}) ->
+    {joint,
+     get_append_quorum(Current),
+     get_append_quorum(Future)}.
+
+get_quorum_peers(Quorum) ->
+    sets:to_list(do_get_quorum_peers(Quorum)).
+
+do_get_quorum_peers({majority, Peers}) ->
+    Peers;
+do_get_quorum_peers({all, Peers}) ->
+    Peers;
+do_get_quorum_peers({joint, Quorum1, Quorum2}) ->
+    sets:union(do_get_quorum_peers(Quorum1),
+               do_get_quorum_peers(Quorum2)).
+
+have_quorum(AllVotes, Quorum)
+  when is_list(AllVotes) ->
+    do_have_quorum(sets:from_list(AllVotes), Quorum);
+have_quorum(AllVotes, Quorum) ->
+    do_have_quorum(AllVotes, Quorum).
+
+do_have_quorum(AllVotes, {joint, Quorum1, Quorum2}) ->
+    do_have_quorum(AllVotes, Quorum1) andalso do_have_quorum(AllVotes, Quorum2);
+do_have_quorum(AllVotes, {all, QuorumNodes}) ->
+    MissingVotes = sets:subtract(QuorumNodes, AllVotes),
+    sets:size(MissingVotes) =:= 0;
+do_have_quorum(AllVotes, {majority, QuorumNodes}) ->
+    Votes = sets:intersection(AllVotes, QuorumNodes),
+    sets:size(Votes) * 2 > sets:size(QuorumNodes).
+
+is_quorum_feasible(Peers, FailedVotes, Quorum) ->
+    PossibleVotes = Peers -- FailedVotes,
+    have_quorum(PossibleVotes, Quorum).
+
+config_peers(#config{voters = Voters}) ->
+    Voters;
+config_peers(#transition{current_config = Current,
+                         future_config = Future}) ->
+    lists:usort(config_peers(Current) ++ config_peers(Future)).

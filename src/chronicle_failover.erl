@@ -22,25 +22,26 @@
 
 -import(chronicle_utils, [parallel_mapfold/4]).
 
--define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
+-define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -record(state, {}).
 
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
-failover(Peer, HistoryId, RemainingPeers) ->
-    gen_server:call(?SERVER(Peer), {failover, HistoryId, RemainingPeers}).
+failover(RemainingPeers) ->
+    gen_server:call(?SERVER, {failover, RemainingPeers}).
 
-retry_failover(Peer, HistoryId) ->
-    gen_server:call(?SERVER(Peer), {retry_failover, HistoryId}).
+%% TODO: this needs to go the coordinator node
+retry_failover(HistoryId) ->
+    gen_server:call(?SERVER, {retry_failover, HistoryId}).
 
 %% gen_server callbacks
 init([]) ->
     {ok, #state{}}.
 
-handle_call({failover, HistoryId, RemainingPeers}, _From, State) ->
-    handle_failover(HistoryId, RemainingPeers, State);
+handle_call({failover, RemainingPeers}, _From, State) ->
+    handle_failover(RemainingPeers, State);
 handle_call({retry_failover, HistoryId}, _From, State) ->
     handle_retry_failover(HistoryId, State);
 handle_call(_Call, _From, State) ->
@@ -52,14 +53,15 @@ handle_cast(Cast, State) ->
     {noreply, State}.
 
 %% internal
-handle_failover(HistoryId, RemainingPeers, State) ->
+handle_failover(RemainingPeers, State) ->
+    HistoryId = chronicle_utils:random_uuid(),
     {reply, prepare_branch(HistoryId, RemainingPeers), State}.
 
 handle_retry_failover(HistoryId, State) ->
     case chronicle_agent:get_metadata() of
         {ok, Metadata} ->
-            Self = ?PEER(),
-            #metadata{pending_branch = Branch} = Metadata,
+            #metadata{peer = Self,
+                      pending_branch = Branch} = Metadata,
             case Branch of
                 #branch{coordinator = Coordinator,
                         history_id = BranchId,
@@ -78,19 +80,17 @@ handle_retry_failover(HistoryId, State) ->
     end.
 
 prepare_branch(HistoryId, Peers) ->
-    %% TODO: check that Self is in peers?
-    Self = ?PEER(),
-
     Branch = #branch{history_id = HistoryId,
-                     coordinator = Self,
+                     coordinator = self,
                      peers = Peers,
                      status = unknown},
 
     %% Store a branch record locally first, so we can recover even if we crash
     %% somewhere in the middle.
-    case store_branch(Self, Branch) of
+    case store_branch(Branch) of
         {ok, Metadata} ->
-            prepare_branch_on_followers(Metadata, Branch);
+            FinalBranch = Metadata#metadata.pending_branch,
+            prepare_branch_on_followers(Metadata, FinalBranch);
         {error, _} = Error ->
             Error
     end.
@@ -108,8 +108,11 @@ prepare_branch_on_followers(SelfMetadata, #branch{coordinator = Self,
             {error, _} = Error ->
                 Error
         end,
-    update_branch_status(Self, Branch, Result),
+    update_branch_status(Branch, Result),
     Result.
+
+store_branch(Branch) ->
+    store_branch(?SELF_PEER, Branch).
 
 store_branch(Peer, Branch) ->
     ?DEBUG("Sending store_branch to ~p. Branch:~n~p", [Peer, Branch]),
@@ -138,7 +141,6 @@ prepare_branch_on_peers(Peers, Branch) ->
     end.
 
 check_prepare_branch_results(Results) ->
-    %% TODO: take pending branch into account
     Histories = chronicle_utils:groupby(
                   fun ({_Peer, Metadata}) ->
                           Metadata#metadata.history_id
@@ -158,14 +160,14 @@ check_prepare_branch_results(Results) ->
                      maps:to_list(ConflictingPeerGroups)}}
     end.
 
-update_branch_status(Self, Branch, Result) ->
+update_branch_status(Branch, Result) ->
     unknown = Branch#branch.status,
     case branch_status_from_result(Result) of
         unknown ->
             ok;
         NewStatus ->
             NewBranch = Branch#branch{status = NewStatus},
-            {ok, _} = store_branch(Self, NewBranch)
+            {ok, _} = store_branch(NewBranch)
     end.
 
 branch_status_from_result(Result) ->

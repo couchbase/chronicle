@@ -89,7 +89,7 @@ init([]) ->
               end
       end),
 
-    chronicle_leader:announce_leader(),
+    chronicle_leader:announce_leader_status(),
     {ok, #follower{}, #data{}}.
 
 handle_event(enter, OldState, State, Data) ->
@@ -138,7 +138,7 @@ terminate(_Reason, State, Data) ->
     handle_state_leave(State, Data).
 
 %% internal
-is_interesting_event({leader, _}) ->
+is_interesting_event({leader_status, _}) ->
     true;
 is_interesting_event(_) ->
     false.
@@ -179,30 +179,25 @@ handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
 handle_state_enter(_State, Data) ->
     Data.
 
-handle_chronicle_event({leader, LeaderInfo}, State, Data) ->
-    handle_new_leader(LeaderInfo, State, Data).
+handle_chronicle_event({leader_status, LeaderInfo}, State, Data) ->
+    handle_leader_status(LeaderInfo, State, Data).
 
-handle_new_leader(no_leader, _State, Data) ->
+handle_leader_status(not_leader, _State, Data) ->
     {next_state, #follower{}, Data};
-handle_new_leader(LeaderInfo, State, Data) ->
-    #{leader := Leader, history_id := HistoryId, term := Term} = LeaderInfo,
+handle_leader_status(LeaderInfo, State, Data) ->
+    #{history_id := HistoryId, term := Term} = LeaderInfo,
 
-    case Leader =:= ?PEER() of
-        true ->
-            case State of
-                #leader{history_id = OurHistoryId, term = OurTerm}
-                  when HistoryId =:= OurHistoryId andalso Term =:= OurTerm ->
-                    %% We've already reacted to a similar event.
-                    keep_state_and_data;
-                _ ->
-                    {next_state,
-                     #leader{history_id = HistoryId,
-                             term = Term,
-                             status = not_ready},
-                     Data}
-            end;
-        false ->
-            {next_state, #follower{}, Data}
+    case State of
+        #leader{history_id = OurHistoryId, term = OurTerm}
+          when HistoryId =:= OurHistoryId andalso Term =:= OurTerm ->
+            %% We've already reacted to a similar event.
+            keep_state_and_data;
+        _ ->
+            {next_state,
+             #leader{history_id = HistoryId,
+                     term = Term,
+                     status = not_ready},
+             Data}
     end.
 
 handle_process_exit(Pid, Reason, _State, #data{proposer = Proposer} = Data) ->
@@ -484,18 +479,21 @@ simple_test__(Nodes) ->
                           ok = chronicle:remove_voters([d]),
                           {ok, Voters} = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
-                          ok
-                  end),
 
-    ok = chronicle_failover:failover(a, <<"failover">>, [a, b]),
+                          ok = chronicle_failover:failover([a, b])
+                  end),
 
     ok = vnet:disconnect(a, c),
     ok = vnet:disconnect(a, d),
     ok = vnet:disconnect(b, c),
     ok = vnet:disconnect(b, d),
 
-    {error, {bad_failover, _}} =
-        chronicle_failover:retry_failover(a, <<"failover">>),
+    ok = rpc_node(a,
+                  fun () ->
+                          {error, {bad_failover, _}} =
+                              chronicle_failover:retry_failover(<<"failover">>),
+                          ok
+                  end),
 
     ok = rpc_node(b,
                   fun () ->

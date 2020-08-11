@@ -39,6 +39,8 @@ init([]) ->
               case Event of
                   {system_state, NewState, _} ->
                       dynamic_supervisor:send_event(Self, {state, NewState});
+                  {system_event, reprovisioned} ->
+                      dynamic_supervisor:send_event(Self, restart);
                   _ ->
                       ok
               end
@@ -52,6 +54,8 @@ init([]) ->
               period => 10},
     {ok, Flags, State}.
 
+handle_event(restart, State) ->
+    {restart, State};
 handle_event({state, NewState}, _) ->
     {noreply, NewState}.
 

@@ -27,23 +27,35 @@
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call_async/3,
+                          config_peers/1,
+                          next_term/2,
                           term_number/1,
                           compare_positions/2]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
--define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
+-define(SERVER(Peer),
+        case Peer of
+            ?SELF_PEER ->
+                ?SERVER;
+            _ ->
+                ?SERVER_NAME(Peer, ?MODULE)
+        end).
 
+-define(PROVISION_TIMEOUT, 10000).
 -define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
+-define(STORE_BRANCH_TIMEOUT, 15000).
 
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is
 %% _ReplyType. This is entirely useless for dializer, but is usefull for
 %% documentation purposes.
 -type replies(Tag, _ReplyType) :: Tag.
+-type peer() :: ?SELF_PEER | chronicle:peer().
 
 %% TODO: get rid of the duplication between #state{} and #metadata{}.
--record(state, { history_id,
+-record(state, { peer,
+                 history_id,
                  term,
                  term_voted,
                  high_seqno,
@@ -57,7 +69,7 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
--spec monitor(chronicle:peer()) -> reference().
+-spec monitor(peer()) -> reference().
 monitor(Peer) ->
     chronicle_utils:monitor_process(?SERVER(Peer)).
 
@@ -97,7 +109,16 @@ get_history_id(#metadata{pending_branch =
 -spec provision([Machine]) -> provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 provision(Machines) ->
-    case gen_server:call(?SERVER, {provision, Machines}) of
+    case gen_server:call(?SERVER, {provision, Machines}, ?PROVISION_TIMEOUT) of
+        ok ->
+            ok = chronicle_secondary_sup:sync();
+        Other ->
+            Other
+    end.
+
+-spec reprovision() -> provision_result().
+reprovision() ->
+    case gen_server:call(?SERVER, reprovision, ?PROVISION_TIMEOUT) of
         ok ->
             ok = chronicle_secondary_sup:sync();
         Other ->
@@ -129,7 +150,7 @@ establish_local_term(HistoryId, Term) ->
     gen_server:call(?SERVER, {establish_term, HistoryId, Term},
                     ?ESTABLISH_LOCAL_TERM_TIMEOUT).
 
--spec establish_term(chronicle:peer(),
+-spec establish_term(peer(),
                      Opaque,
                      chronicle:history_id(),
                      chronicle:leader_term(),
@@ -148,7 +169,7 @@ establish_term(Peer, Opaque, HistoryId, Term, Position) ->
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()}.
 
--spec ensure_term(chronicle:peer(),
+-spec ensure_term(peer(),
                   Opaque,
                   chronicle:history_id(),
                   chronicle:leader_term()) ->
@@ -163,7 +184,7 @@ ensure_term(Peer, Opaque, HistoryId, Term) ->
         {missing_entries, #metadata{}} |
         {protocol_error, any()}.
 
--spec append(chronicle:peer(),
+-spec append(peer(),
              Opaque,
              chronicle:history_id(),
              chronicle:leader_term(),
@@ -183,15 +204,16 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
                     {append, HistoryId, Term, CommittedSeqno, []},
                     ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
--spec store_branch(chronicle:peer(), #branch{}) ->
-          {ok, #metadata{}} |
-          {error, {concurrent_branch, OurBranch::#branch{}}}.
+-type store_branch_result() ::
+        {ok, #metadata{}} |
+        {error, {concurrent_branch, OurBranch::#branch{}}}.
+
+-spec store_branch(peer(), #branch{}) -> store_branch_result().
 store_branch(Peer, Branch) ->
-    gen_server:call(?SERVER(Peer), {store_branch, Branch}).
+    gen_server:call(?SERVER(Peer),
+                    {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
 
-
--spec undo_branch(chronicle:peer(), chronicle:history_id()) ->
-          ok | {error, Error} when
+-spec undo_branch(peer(), chronicle:history_id()) -> ok | {error, Error} when
       Error :: no_branch |
                {bad_branch, OurBranch::#branch{}}.
 undo_branch(Peer, BranchId) ->
@@ -209,6 +231,8 @@ handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno}, _From, State) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State);
 handle_call({provision, Machines}, _From, State) ->
     handle_provision(Machines, State);
+handle_call(reprovision, _From, State) ->
+    handle_reprovision(State);
 handle_call(wipe, _From, State) ->
     handle_wipe(State);
 handle_call({establish_term, HistoryId, Term}, _From,
@@ -237,17 +261,15 @@ handle_cast(Cast, State) ->
 
 %% internal
 handle_get_metadata(State) ->
-    Reply =
-        case is_provisioned(State) of
-            true ->
-                {ok, state2metadata(State)};
-            false ->
-                {error, not_provisioned}
-        end,
+    case check_provisioned(State) of
+        ok ->
+            {reply, {ok, state2metadata(State)}, State};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
 
-    {reply, Reply, State}.
-
-state2metadata(#state{history_id = HistoryId,
+state2metadata(#state{peer = Peer,
+                      history_id = HistoryId,
                       term = Term,
                       term_voted = TermVoted,
                       high_seqno = HighSeqno,
@@ -262,7 +284,8 @@ state2metadata(#state{history_id = HistoryId,
                 {Value, chronicle_proposer:log_entry_revision(ConfigEntry)}
         end,
 
-    #metadata{history_id = HistoryId,
+    #metadata{peer = Peer,
+              history_id = HistoryId,
               term = Term,
               term_voted = TermVoted,
               high_seqno = HighSeqno,
@@ -284,29 +307,102 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) ->
            check_same_term(Term, State),
            check_log_range(StartSeqno, EndSeqno, State)).
 
+handle_reprovision(#state{history_id = HistoryId,
+                          term = Term,
+                          high_seqno = HighSeqno} = State) ->
+    case check_reprovision(State) of
+        {ok, Config} ->
+            Peer = get_peer_name(),
+            NewTerm = next_term(Term, Peer),
+            NewConfig = Config#config{voters = [Peer]},
+            Seqno = HighSeqno + 1,
+
+            ConfigEntry = #log_entry{history_id = HistoryId,
+                                     term = NewTerm,
+                                     seqno = Seqno,
+                                     value = NewConfig},
+            NewState = State#state{peer = Peer,
+                                   term = NewTerm,
+                                   term_voted = NewTerm,
+                                   high_seqno = Seqno,
+                                   committed_seqno = Seqno,
+                                   config_entry = ConfigEntry,
+                                   committed_config_entry = ConfigEntry},
+
+            ?DEBUG("Reprovisioning peer with config:~n~p", [ConfigEntry]),
+
+            log_append([ConfigEntry], NewState),
+            persist_state(NewState),
+
+            announce_system_reprovisioned(),
+            announce_new_config(NewState),
+            announce_metadata(NewState),
+
+            {reply, ok, NewState};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_reprovision(#state{peer = Peer} = State) ->
+    case is_provisioned(State) of
+        true ->
+            ConfigEntry = State#state.config_entry,
+            Config = ConfigEntry#log_entry.value,
+            case Config of
+                #config{voters = Voters} ->
+                    case Voters of
+                        [Peer] ->
+                            {ok, Config};
+                        _ ->
+                            {error, {bad_config, Peer, Voters}}
+                    end;
+                #transition{} ->
+                    {error, {unstable_config, Config}}
+            end;
+        false ->
+            {error, not_provisioned}
+    end.
 
 handle_provision(Machines0, State) ->
     case check_not_provisioned(State) of
         ok ->
+            Peer = get_peer_name(),
             HistoryId = chronicle_utils:random_uuid(),
-            Term = ?NO_TERM,
+            Term = next_term(?NO_TERM, Peer),
             Seqno = 1,
 
             Machines = maps:from_list(
                          [{Name, #rsm_config{module = Module, args = Args}} ||
                              {Name, Module, Args} <- Machines0]),
 
-            Config = #config{voters = [?PEER()], state_machines = Machines},
+            Config = #config{voters = [Peer], state_machines = Machines},
+            ConfigEntry = #log_entry{history_id = HistoryId,
+                                     term = Term,
+                                     seqno = Seqno,
+                                     value = Config},
 
-            LogEntry = #log_entry{history_id = HistoryId,
-                                  term = Term,
-                                  seqno = Seqno,
-                                  value = Config},
+            NewState = State#state{peer = Peer,
+                                   history_id = HistoryId,
+                                   term = Term,
+                                   term_voted = Term,
+                                   committed_seqno = Seqno,
+                                   high_seqno = Seqno,
+                                   committed_config_entry = ConfigEntry,
+                                   config_entry = ConfigEntry},
+
+            Config = #config{voters = [Peer], state_machines = Machines},
 
             ?DEBUG("Provisioning with history ~p. Config:~n~p",
                    [HistoryId, Config]),
 
-            handle_append(HistoryId, Term, Seqno, [LogEntry], State);
+            log_append([ConfigEntry], NewState),
+            persist_state(NewState),
+
+            announce_system_provisioned(NewState),
+            announce_new_config(NewState),
+            announce_metadata(NewState),
+
+            {reply, ok, NewState};
         {error, _} = Error ->
             {reply, Error, State}
     end.
@@ -322,8 +418,17 @@ check_not_provisioned(State) ->
             ok
     end.
 
+check_provisioned(State) ->
+    case is_provisioned(State) of
+        true ->
+            ok;
+        false ->
+            {error, not_provisioned}
+    end.
+
 handle_wipe(State) ->
-    NewState = State#state{history_id = ?NO_HISTORY,
+    NewState = State#state{peer = ?NO_PEER,
+                           history_id = ?NO_HISTORY,
                            term = ?NO_TERM,
                            term_voted = ?NO_TERM,
                            high_seqno = ?NO_SEQNO,
@@ -474,24 +579,33 @@ complete_append(HistoryId, Term, Info,
                 State
         end,
 
-    log_append(Entries, NewState0),
-
     NewState1 = NewState0#state{history_id = HistoryId,
                                 term = Term,
                                 term_voted = Term,
                                 committed_seqno = NewCommittedSeqno,
                                 high_seqno = NewHighSeqno,
                                 pending_branch = undefined},
-    NewState = maybe_update_config(Entries, NewState1),
-    persist_state(NewState),
+    NewState2 = maybe_update_config(Entries, NewState1),
 
-    %% Announce if we got provisioned.
-    case is_provisioned(State) of
-        true ->
-            ok;
-        false ->
-            announce_system_state(provisioned, state2metadata(NewState))
-    end,
+    %% TODO: provision all nodes explicitly?
+    WasProvisioned = is_provisioned(State),
+    NewState =
+        case WasProvisioned of
+            true ->
+                NewState2;
+            false ->
+                Peer = get_peer_name(),
+                ConfigEntry = NewState2#state.config_entry,
+                Config = ConfigEntry#log_entry.value,
+                Peers = config_peers(Config),
+                true = lists:member(Peer, Peers),
+                NewState3 = NewState2#state{peer = Peer},
+                announce_system_state(provisioned, state2metadata(NewState3)),
+                NewState3
+        end,
+
+    log_append(Entries, NewState),
+    persist_state(NewState),
 
     maybe_announce_term_established(Term, State),
     maybe_announce_new_config(State, NewState),
@@ -661,15 +775,11 @@ check_not_earlier_term(Term, #state{term = CurrentTerm}) ->
 handle_store_branch(Branch, State) ->
     assert_valid_branch(Branch),
 
-    case check_compatible_branch(Branch, State) of
-        ok ->
-            %% NOTE: not updating history id here, so that if the node
-            %% is unprovisioned, it gets back to that state upon
-            %% rollback
-            %%
-            %% TODO: think more if we need to support
-            %% branching that involves unprovisioned nodes
-            NewState = State#state{pending_branch = Branch},
+    case ?CHECK(check_provisioned(State),
+                check_branch_compatible(Branch, State),
+                check_branch_coordinator(Branch, State)) of
+        {ok, FinalBranch} ->
+            NewState = State#state{pending_branch = FinalBranch},
             persist_state(NewState),
 
             case State#state.pending_branch of
@@ -681,16 +791,14 @@ handle_store_branch(Branch, State) ->
             end,
             announce_metadata(NewState),
 
-            ?DEBUG("Stored a branch record:~n~p", [Branch]),
+            ?DEBUG("Stored a branch record:~n~p", [FinalBranch]),
 
-            %% TODO: returing all metadata here for now, but that might be an
-            %% overkill.
-            {reply, {ok, state2metadata(State)}, NewState};
+            {reply, {ok, state2metadata(NewState)}, NewState};
         {error, _} = Error ->
             {reply, Error, State}
     end.
 
-check_compatible_branch(NewBranch, #state{pending_branch = PendingBranch}) ->
+check_branch_compatible(NewBranch, #state{pending_branch = PendingBranch}) ->
     case PendingBranch =:= undefined of
         true ->
             ok;
@@ -704,6 +812,25 @@ check_compatible_branch(NewBranch, #state{pending_branch = PendingBranch}) ->
                 false ->
                     {error, {concurrent_branch, PendingBranch}}
             end
+    end.
+
+check_branch_coordinator(Branch, #state{peer = Peer}) ->
+    Coordinator =
+        case Branch#branch.coordinator of
+            self ->
+                Peer;
+            Other ->
+                Other
+        end,
+
+    FinalBranch = Branch#branch{coordinator = Coordinator},
+    Peers = Branch#branch.peers,
+
+    case lists:member(Coordinator, Peers) of
+        true ->
+            {ok, FinalBranch};
+        false ->
+            {error, {coordinator_not_in_peers, Coordinator, Peers}}
     end.
 
 handle_undo_branch(BranchId, State) ->
@@ -815,7 +942,8 @@ write_file(Path, Body) ->
 
 restore_state() ->
     Log = log_create(),
-    State = #state{history_id = ?NO_HISTORY,
+    State = #state{peer = ?NO_PEER,
+                   history_id = ?NO_HISTORY,
                    term = ?NO_TERM,
                    term_voted = ?NO_TERM,
                    high_seqno = ?NO_SEQNO,
@@ -887,10 +1015,13 @@ maybe_announce_new_config(#state{config_entry = OldConfigEntry},
         true ->
             ok;
         false ->
-            Metadata = state2metadata(NewState),
-            Config = NewConfigEntry#log_entry.value,
-            chronicle_events:sync_notify({new_config, Config, Metadata})
+            announce_new_config(NewState)
     end.
+
+announce_new_config(#state{config_entry = ConfigEntry} = State) ->
+    Metadata = state2metadata(State),
+    Config = ConfigEntry#log_entry.value,
+    chronicle_events:sync_notify({new_config, Config, Metadata}).
 
 announce_metadata(State) ->
     chronicle_events:sync_notify({metadata, state2metadata(State)}).
@@ -900,6 +1031,12 @@ announce_system_state(SystemState) ->
 
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}).
+
+announce_system_provisioned(State) ->
+    announce_system_state(provisioned, state2metadata(State)).
+
+announce_system_reprovisioned() ->
+    chronicle_events:sync_notify({system_event, reprovisioned}).
 
 log_create() ->
     ets:new(log, [protected, ordered_set, {keypos, #log_entry.seqno}]).
@@ -927,3 +1064,12 @@ log_truncate(Seqno, #state{committed_seqno = CommittedSeqno, log_tab = Tab}) ->
 
 log_wipe(#state{log_tab = Tab}) ->
     ets:delete_all_objects(Tab).
+
+get_peer_name() ->
+    Peer = ?PEER(),
+    case Peer =:= ?NO_PEER of
+        true ->
+            exit(nodistribution);
+        false ->
+            Peer
+    end.

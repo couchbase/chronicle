@@ -47,6 +47,8 @@
 
 -define(SEND(Name, Msg), ?SEND(Name, Msg, [])).
 
+-define(SELF_PEER, 'self@nohost').
+-define(NO_PEER, 'nonode@nohost').
 -define(NO_HISTORY, <<"no-history">>).
 -define(NO_TERM, {0, <<"no-term">>}).
 -define(NO_SEQNO, 0).
@@ -68,7 +70,8 @@
           seqno :: chronicle:seqno(),
           value :: #config{} | #transition{} | #rsm_command{}}).
 
--record(metadata, { history_id,
+-record(metadata, { peer,
+                    history_id,
                     term,
                     term_voted,
                     high_seqno,
