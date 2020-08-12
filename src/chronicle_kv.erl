@@ -255,6 +255,14 @@ handle_rewrite(Fun, StateRevision, #state{table = Table}, Data) ->
                   case Fun(Key, Value) of
                       {update, NewValue} ->
                           [{set, Key, NewValue} | Acc];
+                      {update, NewKey, NewValue} ->
+                          case Key =:= NewKey of
+                              true ->
+                                  [{set, Key, NewValue} | Acc];
+                              false ->
+                                  [{delete, Key},
+                                   {set, NewKey, NewValue} | Acc]
+                          end;
                       keep ->
                           Acc;
                       delete ->

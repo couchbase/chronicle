@@ -535,10 +535,12 @@ simple_test__(Nodes) ->
                           {ok, _} =
                               chronicle_kv:rewrite(
                                 kv,
-                                fun (Key, _Value) ->
+                                fun (Key, Value) ->
                                         case Key of
                                             a ->
                                                 {update, 87};
+                                            b ->
+                                                {update, new_b, Value};
                                             c ->
                                                 delete;
                                             _ ->
@@ -546,6 +548,8 @@ simple_test__(Nodes) ->
                                         end
                                 end),
 
+                          {ok, {d, _}} = chronicle_kv:get(kv, new_b),
+                          {error, not_found} = chronicle_kv:get(kv, b),
                           {error, not_found} = chronicle_kv:get(kv, c),
 
                           ok
