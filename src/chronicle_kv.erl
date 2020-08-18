@@ -79,17 +79,28 @@ transaction(Name, Keys, Fun, Opts) ->
               {ok, {Snapshot, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
               case Fun(Snapshot) of
                   {commit, Updates} ->
-                      ConditionsMissing = [{missing, Key} || Key <- Missing],
-                      Conditions =
-                          maps:fold(
-                            fun (Key, {_, Revision}, Acc) ->
-                                    [{revision, Key, Revision} | Acc]
-                            end, ConditionsMissing, Snapshot),
+                      Conditions = transaction_conditions(Snapshot, Missing),
                       submit_transaction(Name, Conditions, Updates, TRef, Opts);
+                  {commit, Updates, Extra} ->
+                      Conditions = transaction_conditions(Snapshot, Missing),
+                      case submit_transaction(Name, Conditions,
+                                              Updates, TRef, Opts) of
+                          {ok, Revision} ->
+                              {ok, Revision, Extra};
+                          Other ->
+                              Other
+                      end;
                   {abort, Result} ->
                       Result
               end
       end).
+
+transaction_conditions(Snapshot, Missing) ->
+    ConditionsMissing = [{missing, Key} || Key <- Missing],
+    maps:fold(
+      fun (Key, {_, Revision}, Acc) ->
+              [{revision, Key, Revision} | Acc]
+      end, ConditionsMissing, Snapshot).
 
 submit_transaction(Name, Conditions, Updates) ->
     submit_transaction(Name, Conditions, Updates, #{}).
