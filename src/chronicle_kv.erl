@@ -23,8 +23,8 @@
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
 
--record(state, {table}).
--record(data, {event_mgr}).
+-record(state, {}).
+-record(data, {name, table, event_mgr}).
 -record(kv, {key, value, revision}).
 
 event_manager(Name) ->
@@ -167,10 +167,18 @@ specs(Name, _Args) ->
     [Spec].
 
 init(Name, []) ->
-    EventMgr = event_manager(Name),
-    Table = ets:new(?ETS_TABLE(Name),
+    %% In order to prevent client from reading from not fully initialized ets
+    %% table an internal table is used. The state is restored into this
+    %% internal table which is then published (by renaming) in post_init/3
+    %% callback.
+    Table = ets:new(internal_table(Name),
                     [protected, named_table, {keypos, #kv.key}]),
-    {ok, #state{table = Table}, #data{event_mgr = EventMgr}}.
+    {ok, #state{}, #data{name = Name, table = Table}}.
+
+post_init(_Revision, _State, #data{name = Name, table = Table} = Data) ->
+    NewTable = ets:rename(Table, ?ETS_TABLE(Name)),
+    {ok, Data#data{table = NewTable,
+                   event_mgr = event_manager(Name)}}.
 
 handle_command(_, _StateRevision, _State, Data) ->
     {apply, Data}.
@@ -259,7 +267,7 @@ get_read_own_writes_revision(Result, Opts) ->
             no_revision
     end.
 
-handle_rewrite(Fun, StateRevision, #state{table = Table}, Data) ->
+handle_rewrite(Fun, StateRevision, _State, #data{table = Table} = Data) ->
     Updates =
         ets:foldl(
           fun (#kv{key = Key, value = Value}, Acc) ->
@@ -284,10 +292,10 @@ handle_rewrite(Fun, StateRevision, #state{table = Table}, Data) ->
     Conditions = [{state_revision, StateRevision}],
     {reply, {ok, Conditions, Updates}, Data}.
 
-handle_get_snapshot(#state{table = Table}, Data) ->
+handle_get_snapshot(_State, #data{table = Table} = Data) ->
     {reply, ets:tab2list(Table), Data}.
 
-handle_get_snapshot(Keys, #state{table = Table}, Data) ->
+handle_get_snapshot(Keys, _State, #data{table = Table} = Data) ->
     Result =
         lists:foldl(
           fun (Key, {AccSnapshot, AccMissing}) ->
@@ -302,7 +310,7 @@ handle_get_snapshot(Keys, #state{table = Table}, Data) ->
     {reply, {ok, Result}, Data}.
 
 apply_add(Key, Value, Revision,
-          StateRevision, #state{table = Table} = State, Data) ->
+          StateRevision, State, #data{table = Table} = Data) ->
     Reply =
         case check_condition({missing, Key}, Revision, StateRevision, Table) of
             ok ->
@@ -314,7 +322,7 @@ apply_add(Key, Value, Revision,
     {reply, Reply, State, Data}.
 
 apply_set(Key, Value, ExpectedRevision, Revision,
-          StateRevision, #state{table = Table} = State, Data) ->
+          StateRevision, State, #data{table = Table} = Data) ->
     Reply =
         case check_condition(
                {revision, Key, ExpectedRevision}, Revision,
@@ -329,7 +337,7 @@ apply_set(Key, Value, ExpectedRevision, Revision,
     {reply, Reply, State, Data}.
 
 apply_delete(Key, ExpectedRevision, Revision,
-             StateRevision, #state{table = Table} = State, Data) ->
+             StateRevision, State, #data{table = Table} = Data) ->
     Reply =
         case check_condition(
                {revision, Key, ExpectedRevision}, Revision,
@@ -344,7 +352,7 @@ apply_delete(Key, ExpectedRevision, Revision,
 
 apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
     Reply =
-        case check_transaction(Conditions, Revision, StateRevision, State) of
+        case check_transaction(Conditions, Revision, StateRevision, Data) of
             ok ->
                 apply_transaction_updates(Updates, Revision, State, Data),
                 {ok, Revision};
@@ -353,7 +361,7 @@ apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
         end,
     {reply, Reply, State, Data}.
 
-check_transaction(Conditions, Revision, StateRevision, #state{table = Table}) ->
+check_transaction(Conditions, Revision, StateRevision, #data{table = Table}) ->
     check_transaction_loop(Conditions, Revision, StateRevision, Table).
 
 check_transaction_loop([], _, _, _) ->
@@ -414,17 +422,22 @@ handle_get(Table, Key) ->
             {ok, {Value, Revision}}
     end.
 
-handle_update(Key, Value, Revision, #state{table = Table}, Data) ->
+handle_update(Key, Value, Revision, _State, #data{table = Table} = Data) ->
     KV = #kv{key = Key, value = Value, revision = Revision},
     ets:insert(Table, KV),
     notify_key(Key, Revision, {updated, Value}, Data).
 
-handle_delete(Key, Revision, #state{table = Table}, Data) ->
+handle_delete(Key, Revision, _State, #data{table = Table} = Data) ->
     ets:delete(Table, Key),
     notify_key(Key, Revision, deleted, Data).
 
-notify(Event, #data{event_mgr = Mgr}) ->
-    gen_event:notify(Mgr, Event).
+notify(Event, #data{event_mgr = Mgr}) when Mgr =/= undefined ->
+    gen_event:notify(Mgr, Event);
+notify(_Event, _Data) ->
+    ok.
 
 notify_key(Key, Revision, Event, Data) ->
     notify({{key, Key}, Revision, Event}, Data).
+
+internal_table(Name) ->
+    ?ETS_TABLE(list_to_atom(atom_to_list(Name) ++ "-internal")).

@@ -13,6 +13,7 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
+%% TODO: turn {error, history_mismatch} into an exception.
 -module(chronicle_rsm).
 -compile(export_all).
 
@@ -25,7 +26,7 @@
 -define(SERVER(Name), ?SERVER_NAME(Name)).
 -define(SERVER(Peer, Name), ?SERVER_NAME(Peer, Name)).
 
--define(LOCAL_REVISION_KEY(Name), {Name, local_revision}).
+-define(LOCAL_REVISION_KEY(Name), {?RSM_TAG, Name, local_revision}).
 
 -type pending_client() ::
         {From :: any(),
@@ -51,12 +52,9 @@
                 applied_history_id :: chronicle:history_id(),
                 applied_seqno :: chronicle:seqno(),
                 read_seqno :: chronicle:seqno(),
-                available_seqno :: chronicle:seqno(),
 
                 pending_clients :: pending_clients(),
                 sync_revision_requests :: sync_revision_requests(),
-                reader :: undefined | pid(),
-                reader_mref :: undefined | reference(),
 
                 mod :: atom(),
                 mod_state :: any(),
@@ -148,20 +146,6 @@ init([Name, Mod, ModArgs]) ->
                       end
               end),
 
-            {ok, Metadata} = chronicle_agent:get_metadata(),
-            #metadata{committed_seqno = CommittedSeqno} = Metadata,
-
-            Data = #data{name = Name,
-                         applied_history_id = ?NO_HISTORY,
-                         applied_seqno = ?NO_SEQNO,
-                         read_seqno = ?NO_SEQNO,
-                         available_seqno = CommittedSeqno,
-                         pending_clients = #{},
-                         sync_revision_requests = gb_trees:empty(),
-                         mod = Mod,
-                         mod_state = ModState,
-                         mod_data = ModData},
-
             Effects =
                 case chronicle_server:register_rsm(Name, self()) of
                     {ok, HistoryId, Term, Seqno} ->
@@ -171,10 +155,28 @@ init([Name, Mod, ModArgs]) ->
                         []
                 end,
 
+            Data0 = #data{name = Name,
+                          applied_history_id = ?NO_HISTORY,
+                          applied_seqno = ?NO_SEQNO,
+                          read_seqno = ?NO_SEQNO,
+                          pending_clients = #{},
+                          sync_revision_requests = gb_trees:empty(),
+                          mod = Mod,
+                          mod_state = ModState,
+                          mod_data = ModData},
+
+            State = #follower{},
+            Data = read_log(State, Data0),
+
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
             publish_local_revision(Data),
 
-            {ok, #follower{}, maybe_start_reader(Data), Effects};
+            case call_callback(post_init, Data) of
+                {ok, NewModData} ->
+                    {ok, State, set_mod_data(NewModData, Data), Effects};
+                {stop, _} = Stop ->
+                    Stop
+            end;
         {stop, _} = Stop ->
             Stop
     end.
@@ -191,8 +193,6 @@ handle_event(cast, {term_established, HistoryId, Term, Seqno}, State, Data) ->
     handle_term_established(HistoryId, Term, Seqno, State, Data);
 handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
     handle_term_finished(HistoryId, Term, State, Data);
-handle_event(info, {?RSM_TAG, entries, HighSeqno, Entries}, State, Data) ->
-    handle_entries(HighSeqno, Entries, State, Data);
 handle_event(info, {?RSM_TAG, chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
 handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
@@ -201,10 +201,6 @@ handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, State, Data) ->
     handle_sync_quorum_result(Ref, Result, State, Data);
 handle_event(info, {?RSM_TAG, sync_revision_timeout, Request}, State, Data) ->
     handle_sync_revision_timeout(Request, State, Data);
-handle_event(info,
-            {'DOWN', _, process, Pid, Reason}, _State, #data{reader = Reader})
-  when Reader =:= Pid ->
-    {stop, {reader_died, Pid, Reason}};
 handle_event(info, Msg, _State, Data) ->
     case call_callback(handle_info, [Msg], Data) of
         {noreply, NewModData} ->
@@ -335,23 +331,6 @@ handle_sync_revision_timeout(Request, _State,
     {{From, _, _}, NewRequests} = gb_trees:take(Request, Requests),
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
-
-handle_entries(HighSeqno, Entries, State, #data{reader = Reader,
-                                                reader_mref = MRef} = Data) ->
-    true = is_pid(Reader),
-    true = is_reference(MRef),
-
-    erlang:demonitor(MRef, [flush]),
-
-    NewData0 = Data#data{reader = undefined, reader_mref = undefined},
-    NewData1 = apply_entries(HighSeqno, Entries, State, NewData0),
-    NewData = maybe_start_reader(NewData1),
-
-    publish_local_revision(NewData),
-
-    {next_state,
-     maybe_mark_leader_established(State, NewData),
-     NewData}.
 
 %% Mark the leader established when applied seqno catches up with the high
 %% seqno as of when the term was established.
@@ -547,13 +526,13 @@ handle_command_result(Ref, Result, State,
 
     {keep_state, Data#data{pending_clients = NewRequests}}.
 
-is_interesting_event({metadata, _}) ->
+is_interesting_event({committed_seqno, _}) ->
     true;
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({metadata, Metadata}, State, Data) ->
-    handle_new_metadata(Metadata, State, Data).
+handle_chronicle_event({committed_seqno, CommittedSeqno}, State, Data) ->
+    handle_new_committed_seqno(CommittedSeqno, State, Data).
 
 handle_term_established(HistoryId, Term, Seqno, #follower{}, Data) ->
     Status =
@@ -583,78 +562,41 @@ handle_term_finished(HistoryId, Term, State, Data) ->
 
             %% Synchronize with the log, so we respond to all requests that
             %% got committed.
-            NewData = sync_log(State, Data),
+            NewData = read_log(State, Data),
 
             {next_state,
              #follower{},
 
              %% We only respond to accepted commands here. Other in flight
              %% requests will get a propoer response from chronicle_server.
-             flush_accepted_commands({error, {leader_error, leader_lost2}},
+             flush_accepted_commands({error, {leader_error, leader_lost}},
                                      NewData)};
         #follower{} ->
             keep_state_and_data
     end.
 
-handle_new_metadata(#metadata{committed_seqno = CommittedSeqno},
-                    _State, Data) ->
-    NewData = Data#data{available_seqno = CommittedSeqno},
-    {keep_state, maybe_start_reader(NewData)}.
+handle_new_committed_seqno(CommittedSeqno, State,
+                           #data{read_seqno = ReadSeqno} = Data) ->
+    case CommittedSeqno > ReadSeqno of
+        true ->
+            NewData = read_log(State, Data),
+            {next_state,
+             maybe_mark_leader_established(State, NewData),
+             NewData};
+        false ->
+            keep_state_and_data
+    end.
 
-sync_log(State, #data{reader = undefined} = Data) ->
+read_log(State, Data) ->
+    {HighSeqno, Entries} = get_log(Data),
+    NewData = apply_entries(HighSeqno, Entries, State, Data),
+    publish_local_revision(NewData),
+    NewData.
+
+get_log(#data{name = Name, read_seqno = ReadSeqno}) ->
     {ok, Metadata} = chronicle_agent:get_metadata(),
     AvailableSeqno = Metadata#metadata.committed_seqno,
-    NewData0 = Data#data{available_seqno = AvailableSeqno},
-    NewData1 = maybe_start_reader(NewData0),
-    case NewData1#data.reader of
-        undefined ->
-            NewData1;
-        Pid when is_pid(Pid) ->
-            receive
-                {?RSM_TAG, entries, HighSeqno, Entries} ->
-                    {next_state, _NewState, NewData2} =
-                        handle_entries(HighSeqno, Entries, State, NewData1),
-                    NewData2;
-                {'DOWN', _, process, Pid, Reason} ->
-                    exit({reader_died, Pid, Reason})
-            end
-    end;
-sync_log(State, #data{reader = Pid, reader_mref = MRef} = Data)
-  when is_pid(Pid) ->
-    chronicle_utils:terminate_and_wait(Pid, shutdown),
-    erlang:demonitor(MRef, [flush]),
-    receive
-        {?RSM_TAG, entries, _, _} ->
-            ok
-    after
-        0 -> ok
-    end,
-    sync_log(State, Data#data{reader = undefined, reader_mref = undefined}).
 
-maybe_start_reader(#data{reader = undefined,
-                         read_seqno = ReadSeqno,
-                         available_seqno = AvailableSeqno} = Data) ->
-    case AvailableSeqno > ReadSeqno of
-        true ->
-            start_reader(Data);
-        false ->
-            Data
-    end;
-maybe_start_reader(Data) ->
-    Data.
-
-start_reader(Data) ->
-    Self = self(),
-    {Pid, MRef} = spawn_monitor(fun () -> reader(Self, Data) end),
-    Data#data{reader = Pid, reader_mref = MRef}.
-
-reader(Parent, Data) ->
-    {HighSeqno, Commands} = get_log(Data),
-    Parent ! {?RSM_TAG, entries, HighSeqno, Commands}.
-
-get_log(#data{name = Name,
-              read_seqno = ReadSeqno,
-              available_seqno = AvailableSeqno}) ->
     %% TODO: replace this with a dedicated call
     {ok, Log} = chronicle_agent:get_log(),
     Entries =
@@ -713,6 +655,9 @@ unwrap_command_reply(Reply) ->
         _ ->
             Reply
     end.
+
+call_callback(Callback, Data) ->
+    call_callback(Callback, [], Data).
 
 call_callback(Callback, Args, #data{mod = Mod,
                                     mod_state = ModState,

@@ -4,3 +4,5 @@
 /TAGS
 /TAGS.root
 /cluster/
+/priv/
+/c_src/*.d

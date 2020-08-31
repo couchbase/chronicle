@@ -70,12 +70,10 @@ get_leader() ->
     leader_info_to_leader(get_leader_info()).
 
 get_leader_info() ->
-    case ets:lookup(?TABLE, leader_info) of
-        [] ->
+    case chronicle_ets:get(leader_info) of
+        not_found ->
             no_leader;
-        [{leader_info, no_leader}] ->
-            no_leader;
-        [{leader_info, LeaderInfo}] ->
+        {ok, LeaderInfo} ->
             LeaderInfo
     end.
 
@@ -140,7 +138,7 @@ init([]) ->
               end
       end),
 
-    ets:new(?TABLE, [named_table, protected, {read_concurrency, true}]),
+    ok = chronicle_ets:register_writer([leader_info]),
 
     Data =
         case chronicle_agent:get_metadata() of
@@ -899,7 +897,7 @@ make_leader_info(Leader, HistoryId, Term, Status) ->
       status => Status}.
 
 publish_leader(LeaderInfo) ->
-    ets:insert(?TABLE, {leader_info, LeaderInfo}).
+    chronicle_ets:put(leader_info, LeaderInfo).
 
 announce_leader_status(Status) ->
     chronicle_events:sync_notify({leader_status, Status}).

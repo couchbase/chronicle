@@ -456,11 +456,13 @@ setup_vnet(Nodes) ->
     {ok, _} = vnet:start_link(Nodes),
     lists:foreach(
       fun (N) ->
-              ok = rpc_node(N, fun () ->
-                                       {ok, P} = chronicle_sup:start_link(),
-                                       unlink(P),
-                                       ok
-                               end)
+              ok = rpc_node(
+                     N, fun () ->
+                                application:set_env(chronicle, persist, false),
+                                {ok, P} = chronicle_sup:start_link(),
+                                unlink(P),
+                                ok
+                        end)
       end, Nodes).
 
 teardown_vnet(_) ->
@@ -517,13 +519,13 @@ simple_test__(Nodes) ->
                                                               [{revision, a, Rev2}],
                                                               [{set, a, 1234}]),
 
-                          {ok, _} =
+                          {ok, _, blah} =
                               chronicle_kv:transaction(
                                 kv, [a],
                                 fun (#{a := {A, _}}) ->
                                         84 = A,
                                         {commit, [{set, a, A+1},
-                                                  {delete, c}]}
+                                                  {delete, c}], blah}
                                 end,
                                 #{read_consistency => leader}),
 

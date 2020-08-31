@@ -15,10 +15,15 @@
 %%
 -module(chronicle_utils).
 
+-include_lib("kernel/include/file.hrl").
 -include("chronicle.hrl").
 
 -compile(export_all).
 -export_type([batch/0]).
+
+-ifdef(HAVE_SYNC_DIR).
+-on_load(init_sync_nif/0).
+-endif.
 
 groupby(Fun, List) ->
     lists:foldl(
@@ -490,3 +495,178 @@ config_peers(#config{voters = Voters}) ->
 config_peers(#transition{current_config = Current,
                          future_config = Future}) ->
     lists:usort(config_peers(Current) ++ config_peers(Future)).
+
+-ifdef(HAVE_SYNC_DIR).
+
+init_sync_nif() ->
+    PrivDir = case code:priv_dir(?MODULE) of
+                  {error, _} ->
+                      EbinDir = filename:dirname(code:which(?MODULE)),
+                      AppPath = filename:dirname(EbinDir),
+                      filename:join(AppPath, "priv");
+                  Path ->
+                      Path
+              end,
+    erlang:load_nif(filename:join(PrivDir, "sync_nif"), 0).
+
+encode_path(Path) ->
+    Encoded =
+        if
+            is_binary(Path) ->
+                Path;
+            is_list(Path) ->
+                case file:native_name_encoding() of
+                    latin1 ->
+                        list_to_binary(Path);
+                    utf8 ->
+                        case unicode:characters_to_nfc_binary(Path) of
+                            {error, _, _} ->
+                                error(badarg);
+                            Binary ->
+                                Binary
+                        end
+                end;
+            true ->
+                error(badarg)
+        end,
+
+    %% Null-terminate.
+    <<Encoded/binary, 0>>.
+
+sync_dir(Path) ->
+    do_sync_dir(encode_path(Path)).
+
+do_sync_dir(_Path) ->
+    erlang:nif_error(sync_nif_not_loaded).
+
+-else.                                          % -ifdef(HAVE_SYNC_DIR)
+
+sync_dir(_Path) ->
+    ok.
+
+-endif.
+
+atomic_write_file(Path, Body) ->
+    TmpPath = Path ++ ".tmp",
+    case file:open(TmpPath, [write, raw]) of
+        {ok, File} ->
+            try Body(File) of
+                ok ->
+                    atomic_write_file_commit(File, Path, TmpPath);
+                Error ->
+                    atomic_write_file_cleanup(File, TmpPath),
+                    Error
+            catch
+                T:E ->
+                    atomic_write_file_cleanup(File, TmpPath),
+                    erlang:raise(T, E, erlang:get_stacktrace())
+            end;
+        Error ->
+            Error
+    end.
+
+atomic_write_file_cleanup(File, TmpPath) ->
+    ok = file:close(File),
+    ok = file:delete(TmpPath).
+
+atomic_write_file_commit(File, Path, TmpPath) ->
+    Dir = filename:dirname(Path),
+    ok = file:sync(File),
+    ok = file:close(File),
+    ok = file:rename(TmpPath, Path),
+    ok = sync_dir(Dir).
+
+create_marker(Path) ->
+    create_marker(Path, <<>>).
+
+create_marker(Path, Content) ->
+    atomic_write_file(Path,
+                      fun (File) ->
+                              file:write(File, Content)
+                      end).
+
+delete_marker(Path) ->
+    Dir = filename:dirname(Path),
+    case file:delete(Path) of
+        ok ->
+            sync_dir(Dir);
+        {error, enoent} ->
+            sync_dir(Dir);
+        {error, _} = Error ->
+            Error
+    end.
+
+mkdir_p(Path) ->
+    case filelib:ensure_dir(Path) of
+        ok ->
+            case check_file_exists(Path, directory) of
+                ok ->
+                    ok;
+                {error, enoent} ->
+                    file:make_dir(Path);
+                {error, {wrong_file_type, _}} ->
+                    {error, eexist};
+                {error, _} = Error ->
+                    Error
+            end;
+        Error ->
+            Error
+    end.
+
+check_file_exists(Path, Type) ->
+    case file:read_file_info(Path) of
+        {ok, Info} ->
+            ActualType = Info#file_info.type,
+            case ActualType =:= Type of
+                true ->
+                    ok;
+                false ->
+                    {error, {wrong_file_type, ActualType}}
+            end;
+        Error ->
+            Error
+    end.
+
+delete_recursive(Path) ->
+    case filelib:is_dir(Path) of
+        true ->
+            case file:list_dir(Path) of
+                {ok, Children} ->
+                    delete_recursive_loop(Path, Children);
+                {error, enoent} ->
+                    ok;
+                {error, Error} = Error ->
+                    {error, {Error, Path}}
+            end;
+        false ->
+            delete(Path, regular)
+    end.
+
+delete_recursive_loop(Dir, []) ->
+    delete(Dir, directory);
+delete_recursive_loop(Dir, [Path|Paths]) ->
+    FullPath = filename:join(Dir, Path),
+    case delete_recursive(FullPath) of
+        ok ->
+            delete_recursive_loop(Dir, Paths);
+        {error, _} = Error ->
+            Error
+    end.
+
+delete(Path, Type) ->
+    Result =
+        case Type of
+            directory ->
+                file:del_dir(Path);
+            regular ->
+                file:delete(Path)
+        end,
+
+    case Result of
+        ok ->
+            ok;
+        {error, enoent} ->
+            ok;
+        {error, Error} ->
+            {error, {Error, Path}}
+    end.
