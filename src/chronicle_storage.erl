@@ -70,9 +70,9 @@ open(#{data_dir := Dir, persist := Persist}) ->
                 Storage
         end
     catch
-        T:E ->
+        T:E:Stack ->
             close(Storage),
-            erlang:raise(T, E, erlang:get_stacktrace())
+            erlang:raise(T, E, Stack)
     end.
 
 open_logs(Dir, Storage) ->

@@ -45,9 +45,9 @@ open(Path, Fun, State) ->
                     close(Log),
                     Error
             catch
-                T:E ->
+                T:E:Stack ->
                     close(Log),
-                    erlang:raise(T, E, erlang:get_stacktrace())
+                    erlang:raise(T, E, Stack)
             end;
         {error, _} = Error ->
             Error

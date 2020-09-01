@@ -92,8 +92,7 @@ notify_watchers(Event, Watchers) ->
                         end, Handlers),
                       Acc
                   catch
-                      T:E ->
-                          Stack = erlang:get_stacktrace(),
+                      T:E:Stack ->
                           Reason = {handler_crashed, {T, E, Stack}},
                           terminate_watcher(Pid, Reason),
                           [Pid | Acc]

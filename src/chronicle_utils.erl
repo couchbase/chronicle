@@ -173,11 +173,11 @@ do_call(ServerRef, Call, Timeout) ->
         {ok, Reply} ->
             Reply
     catch
-        Class:Reason ->
+        Class:Reason:Stack ->
             erlang:raise(
               Class,
               {Reason, {gen, call, [ServerRef, Call, Timeout]}},
-              erlang:get_stacktrace())
+              Stack)
     end.
 
 with_timeout(TRef, Fun)
@@ -287,9 +287,7 @@ run_on_process(Fun, Timeout) ->
                       Result ->
                           Parent ! {Ref, {ok, Result}}
                   catch
-                      T:E ->
-                          %% TODO: don't use get_stacktrace()
-                          Stack = erlang:get_stacktrace(),
+                      T:E:Stack ->
                           Parent ! {Ref, {raised, T, E, Stack}}
                   end
           end),
@@ -557,9 +555,9 @@ atomic_write_file(Path, Body) ->
                     atomic_write_file_cleanup(File, TmpPath),
                     Error
             catch
-                T:E ->
+                T:E:Stack ->
                     atomic_write_file_cleanup(File, TmpPath),
-                    erlang:raise(T, E, erlang:get_stacktrace())
+                    erlang:raise(T, E, Stack)
             end;
         Error ->
             Error
