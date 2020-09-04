@@ -39,9 +39,8 @@
                   }).
 
 open() ->
-    open(get_opts()).
+    Persist = chronicle_env:persist(),
 
-open(#{data_dir := Dir, persist := Persist}) ->
     LogInfoTab = ets:new(?MEM_LOG_INFO_TAB,
                          [protected, set, named_table,
                           {read_concurrency, true}]),
@@ -63,6 +62,7 @@ open(#{data_dir := Dir, persist := Persist}) ->
     try
         case Persist of
             true ->
+                Dir = chronicle_env:data_dir(),
                 maybe_complete_wipe(Dir),
                 ensure_dirs(Dir),
                 open_logs(Dir, Storage);
@@ -128,16 +128,17 @@ snapshots_dir(Dir) ->
     filename:join(chronicle_dir(Dir), "snapshots").
 
 wipe() ->
-    wipe(get_opts()).
-
-wipe(#{persist := false}) ->
-    ok;
-wipe(#{persist := true, data_dir := Dir}) ->
-    ChronicleDir = chronicle_dir(Dir),
-    case file_exists(ChronicleDir, directory) of
+    case chronicle_env:persist() of
         true ->
-            ok = chronicle_utils:create_marker(wipe_marker(Dir)),
-            complete_wipe(Dir);
+            Dir = chronicle_env:data_dir(),
+            ChronicleDir = chronicle_dir(Dir),
+            case file_exists(ChronicleDir, directory) of
+                true ->
+                    ok = chronicle_utils:create_marker(wipe_marker(Dir)),
+                    complete_wipe(Dir);
+                false ->
+                    ok
+            end;
         false ->
             ok
     end.
@@ -465,16 +466,3 @@ get_data_dir() ->
 
 get_persist_enabled() ->
     application:get_env(chronicle, persist, true).
-
-get_opts() ->
-    DataDir = get_data_dir(),
-    Persist = get_persist_enabled(),
-
-    case DataDir of
-        no_data_dir when Persist ->
-            exit(no_data_dir);
-        _ ->
-            ok
-    end,
-
-    #{data_dir => DataDir, persist => Persist}.
