@@ -16,6 +16,7 @@
 -module(chronicle_env).
 
 -export([data_dir/0, persist/0]).
+-export([check/0]).
 
 data_dir() ->
     case application:get_env(chronicle, data_dir) of
@@ -27,3 +28,17 @@ data_dir() ->
 
 persist() ->
     application:get_env(chronicle, persist, true).
+
+check() ->
+    case persist() of
+        true ->
+            try data_dir() of
+                _Dir ->
+                    ok
+            catch
+                exit:no_data_dir ->
+                    {error, {missing_parameter, data_dir}}
+            end;
+        false ->
+            ok
+    end.
