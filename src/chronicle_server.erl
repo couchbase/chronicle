@@ -444,6 +444,9 @@ foreach_rsm(Fun, #data{rsms = RSMs}) ->
 
 -ifdef(TEST).
 
+debug_log(Level, Fmt, Args, _Info) ->
+    ?debugFmt("[~p|~p] " ++ Fmt, [Level, ?PEER() | Args]).
+
 simple_test_() ->
     Nodes = [a, b, c, d],
 
@@ -459,6 +462,12 @@ setup_vnet(Nodes) ->
               ok = rpc_node(
                      N, fun () ->
                                 application:set_env(chronicle, persist, false),
+                                application:set_env(chronicle, logger_function,
+                                                    {?MODULE, debug_log}),
+                                ok = chronicle_env:setup(),
+
+                                ?debugFmt("persistent term:~n~p", [persistent_term:get()]),
+
                                 {ok, P} = chronicle_sup:start_link(),
                                 unlink(P),
                                 ok

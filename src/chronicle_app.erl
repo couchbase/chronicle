@@ -18,7 +18,7 @@
 -export([start/2, stop/1]).
 
 start(_Type, _Args) ->
-    case chronicle_env:check() of
+    case chronicle_env:setup() of
         ok ->
             chronicle_sup:start_link();
         {error, _} = Error ->

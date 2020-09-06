@@ -103,17 +103,15 @@
 -define(WARNING(Msg), ?WARNING(Msg, [])).
 -define(ERROR(Msg), ?ERROR(Msg, [])).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
+-define(CHRONICLE_LOGGER, '$chronicle_logger').
 -define(LOG(Level, Fmt, Args),
-        ?debugFmt("[~p|~p] " ++ Fmt,
-                  [Level, ?PEER() | Args])).
--else.
--define(LOG(Level, Fmt, Args),
-        io:format("[~p|~p:~p/~b:~b] " ++ Fmt ++ "~n",
-                  [Level, ?MODULE, ?FUNCTION_NAME,
-                   ?FUNCTION_ARITY, ?LINE | Args])).
--endif.
+        (persistent_term:get(?CHRONICLE_LOGGER))(
+          Level, Fmt, Args,
+          #{file => ?FILE,
+            line => ?LINE,
+            module => ?MODULE,
+            function => ?FUNCTION_NAME,
+            arity => ?FUNCTION_ARITY})).
 
 -define(CHECK(Cond1, Cond2),
         case Cond1 of

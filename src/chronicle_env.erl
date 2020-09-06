@@ -15,8 +15,10 @@
 %%
 -module(chronicle_env).
 
+-include("chronicle.hrl").
+
 -export([data_dir/0, persist/0]).
--export([check/0]).
+-export([setup/0]).
 
 data_dir() ->
     case application:get_env(chronicle, data_dir) of
@@ -29,7 +31,15 @@ data_dir() ->
 persist() ->
     application:get_env(chronicle, persist, true).
 
-check() ->
+setup() ->
+    case check_data_dir() of
+        ok ->
+            setup_logger();
+        {error, _} = Error ->
+            Error
+    end.
+
+check_data_dir() ->
     case persist() of
         true ->
             try data_dir() of
@@ -41,4 +51,35 @@ check() ->
             end;
         false ->
             ok
+    end.
+
+get_logger_function() ->
+    case application:get_env(chronicle, logger_function) of
+        {ok, ModFun} ->
+            case validate_logger_function(ModFun) of
+                {true, LoggerFun} ->
+                    {ok, LoggerFun};
+                false ->
+                    {error, {badarg, logger_function, ModFun}}
+            end;
+        undefined ->
+            {ok, fun logger:log/4}
+    end.
+
+validate_logger_function({Mod, Fun}) ->
+    case erlang:function_exported(Mod, Fun, 4) of
+        true ->
+            {true, fun Mod:Fun/4};
+        false ->
+            false
+    end;
+validate_logger_function(_) ->
+    false.
+
+setup_logger() ->
+    case get_logger_function() of
+        {ok, Fun} ->
+            persistent_term:put(?CHRONICLE_LOGGER, Fun);
+        {error, _} = Error ->
+            Error
     end.
