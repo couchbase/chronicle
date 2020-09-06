@@ -612,11 +612,7 @@ leader_transfer_test__(Nodes) ->
                    Pids =
                        [spawn_link(
                           fun () ->
-                                  random:seed(erlang:phash2([self()]),
-                                              erlang:monotonic_time(),
-                                              erlang:unique_integer()),
-
-                                  timer:sleep(random:uniform(500)),
+                                  timer:sleep(rand:uniform(500)),
                                   {ok, _} = chronicle_kv:set(kv, I, 2*I)
                           end) || I <- lists:seq(1, 20000)],
 
