@@ -18,6 +18,10 @@
 -include_lib("kernel/include/file.hrl").
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -compile(export_all).
 -export_type([batch/0]).
 

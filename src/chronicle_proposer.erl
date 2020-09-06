@@ -20,6 +20,10 @@
 
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -import(chronicle_utils, [get_position/1,
                           get_quorum_peers/1,
                           have_quorum/2,
