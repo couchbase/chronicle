@@ -943,6 +943,12 @@ storage_open() ->
                 chronicle_storage:store_meta(Storage0, SeedMeta)
         end,
 
+    %% Sync storage to make sure that whatever state is exposed to the outside
+    %% world is durable: theoretically it's possible for agent to crash after
+    %% writing an update out to storage but before making it durable. This is
+    %% meant to deal with such possibility.
+    chronicle_storage:sync(Storage1),
+
     chronicle_storage:publish(Storage1).
 
 append_entry(Entry, Meta, #state{storage = Storage}) ->
