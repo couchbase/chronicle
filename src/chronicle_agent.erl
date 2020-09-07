@@ -925,29 +925,32 @@ announce_system_reprovisioned() ->
     chronicle_events:sync_notify({system_event, reprovisioned}).
 
 storage_open() ->
-    Storage = chronicle_storage:open(),
-    Meta = chronicle_storage:get_meta(Storage),
-    case maps:size(Meta) > 0 of
-        true ->
-            Storage;
-        false ->
-            SeedMeta = #{peer => ?NO_PEER,
-                         history_id => ?NO_HISTORY,
-                         term => ?NO_TERM,
-                         term_voted => ?NO_TERM,
-                         committed_seqno => ?NO_SEQNO,
-                         pending_branch => undefined},
-            ?INFO("Found empty storage. "
-                  "Seeding it with default metadata:~n~p", [SeedMeta]),
-            chronicle_storage:store_meta(Storage, SeedMeta)
-    end.
+    Storage0 = chronicle_storage:open(),
+    Meta = chronicle_storage:get_meta(Storage0),
+    Storage1 =
+        case maps:size(Meta) > 0 of
+            true ->
+                Storage0;
+            false ->
+                SeedMeta = #{peer => ?NO_PEER,
+                             history_id => ?NO_HISTORY,
+                             term => ?NO_TERM,
+                             term_voted => ?NO_TERM,
+                             committed_seqno => ?NO_SEQNO,
+                             pending_branch => undefined},
+                ?INFO("Found empty storage. "
+                      "Seeding it with default metadata:~n~p", [SeedMeta]),
+                chronicle_storage:store_meta(Storage0, SeedMeta)
+        end,
+
+    chronicle_storage:publish(Storage1).
 
 append_entry(Entry, Meta, #state{storage = Storage}) ->
     Seqno = Entry#log_entry.seqno,
     NewStorage = chronicle_storage:append(Storage, Seqno, Seqno,
                                           [Entry], #{meta => Meta}),
     chronicle_storage:sync(NewStorage),
-    NewStorage.
+    chronicle_storage:publish(NewStorage).
 
 store_meta(Meta, #state{storage = Storage}) ->
     NewStorage = chronicle_storage:store_meta(Storage, Meta),
@@ -962,7 +965,7 @@ append_entries(StartSeqno, EndSeqno, Entries,
                                            EndSeqno, Entries, Opts),
     NewStorage2 = chronicle_storage:store_meta(NewStorage1, PostMetadata),
     chronicle_storage:sync(NewStorage2),
-    NewStorage2.
+    chronicle_storage:publish(NewStorage2).
 
 get_peer_name() ->
     Peer = ?PEER(),

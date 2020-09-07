@@ -104,15 +104,21 @@ open_logs(Dir, Storage) ->
                             make_handle_log_entry_fun(CurrentLogPath, Storage),
                             SealedState) of
         {ok, CurrentLog, {Meta, Config, StartSeqno, HighSeqno}} ->
-            publish_range(Storage#storage{current_log = CurrentLog,
-                                          start_seqno = StartSeqno,
-                                          high_seqno = HighSeqno,
-                                          meta = Meta,
-                                          config = Config});
+            Storage#storage{current_log = CurrentLog,
+                            start_seqno = StartSeqno,
+                            high_seqno = HighSeqno,
+                            meta = Meta,
+                            config = Config};
         {error, Error} ->
             ?ERROR("Failed to open log ~p: ~p", [CurrentLogPath, Error]),
             exit({failed_to_open_log, CurrentLogPath, Error})
     end.
+
+publish(#storage{log_info_tab = LogInfoTab,
+                 start_seqno = StartSeqno,
+                 high_seqno = HighSeqno} = Storage) ->
+    ets:insert(LogInfoTab, {?RANGE_KEY, StartSeqno, HighSeqno}),
+    Storage.
 
 ensure_dirs(Dir) ->
     ok = chronicle_utils:mkdir_p(logs_dir(Dir)),
@@ -407,14 +413,7 @@ mem_log_append(#storage{log_tab = LogTab,
             false ->
                 OurStartSeqno
         end,
-    publish_range(Storage#storage{start_seqno = NewStartSeqno,
-                                  high_seqno = EndSeqno}).
-
-publish_range(#storage{log_info_tab = LogInfoTab,
-                       start_seqno = StartSeqno,
-                       high_seqno = HighSeqno} = Storage) ->
-    ets:insert(LogInfoTab, {?RANGE_KEY, StartSeqno, HighSeqno}),
-    Storage.
+    Storage#storage{start_seqno = NewStartSeqno, high_seqno = EndSeqno}.
 
 file_exists(Path, Type) ->
     case chronicle_utils:check_file_exists(Path, Type) of
