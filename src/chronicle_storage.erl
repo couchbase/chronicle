@@ -28,6 +28,7 @@
 -record(storage, { current_log,
                    start_seqno,
                    high_seqno,
+                   committed_seqno,
                    meta,
                    config,
 
@@ -57,6 +58,7 @@ open() ->
                        persist = Persist,
                        start_seqno = ?NO_SEQNO,
                        high_seqno = ?NO_SEQNO,
+                       committed_seqno = ?NO_SEQNO,
                        meta = #{}},
 
     try
@@ -116,9 +118,20 @@ open_logs(Dir, Storage) ->
 
 publish(#storage{log_info_tab = LogInfoTab,
                  start_seqno = StartSeqno,
-                 high_seqno = HighSeqno} = Storage) ->
-    ets:insert(LogInfoTab, {?RANGE_KEY, StartSeqno, HighSeqno}),
+                 high_seqno = HighSeqno,
+                 committed_seqno = CommittedSeqno} = Storage) ->
+    ets:insert(LogInfoTab, {?RANGE_KEY, StartSeqno, HighSeqno, CommittedSeqno}),
     Storage.
+
+set_committed_seqno(Seqno, #storage{
+                              start_seqno = StartSeqno,
+                              high_seqno = HighSeqno,
+                              committed_seqno = CommittedSeqno} = Storage) ->
+    true = (Seqno >= CommittedSeqno),
+    true = (Seqno >= StartSeqno),
+    true = (Seqno =< HighSeqno),
+
+    Storage#storage{committed_seqno = Seqno}.
 
 ensure_dirs(Dir) ->
     ok = chronicle_utils:mkdir_p(logs_dir(Dir)),
@@ -452,7 +465,7 @@ get_log_loop(StartSeqno, EndSeqno, Acc) ->
     get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]).
 
 get_seqno_range() ->
-    [{_, StartSeqno, EndSeqno}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
+    [{_, StartSeqno, EndSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {StartSeqno, EndSeqno}.
 
 get_data_dir() ->

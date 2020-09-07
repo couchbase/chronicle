@@ -948,20 +948,23 @@ storage_open() ->
     %% writing an update out to storage but before making it durable. This is
     %% meant to deal with such possibility.
     chronicle_storage:sync(Storage1),
+    chronicle_storage:publish(propagate_committed_seqno(Storage1)).
 
-    chronicle_storage:publish(Storage1).
+propagate_committed_seqno(Storage) ->
+    #{committed_seqno := CommittedSeqno} = chronicle_storage:get_meta(Storage),
+    chronicle_storage:set_committed_seqno(CommittedSeqno, Storage).
 
 append_entry(Entry, Meta, #state{storage = Storage}) ->
     Seqno = Entry#log_entry.seqno,
     NewStorage = chronicle_storage:append(Storage, Seqno, Seqno,
                                           [Entry], #{meta => Meta}),
     chronicle_storage:sync(NewStorage),
-    chronicle_storage:publish(NewStorage).
+    chronicle_storage:publish(propagate_committed_seqno(NewStorage)).
 
 store_meta(Meta, #state{storage = Storage}) ->
     NewStorage = chronicle_storage:store_meta(Storage, Meta),
     chronicle_storage:sync(NewStorage),
-    NewStorage.
+    chronicle_storage:publish(propagate_committed_seqno(NewStorage)).
 
 append_entries(StartSeqno, EndSeqno, Entries,
                PreMetadata, PostMetadata, Opts,
@@ -971,7 +974,7 @@ append_entries(StartSeqno, EndSeqno, Entries,
                                            EndSeqno, Entries, Opts),
     NewStorage2 = chronicle_storage:store_meta(NewStorage1, PostMetadata),
     chronicle_storage:sync(NewStorage2),
-    chronicle_storage:publish(NewStorage2).
+    chronicle_storage:publish(propagate_committed_seqno(NewStorage2)).
 
 get_peer_name() ->
     Peer = ?PEER(),
