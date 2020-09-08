@@ -6,17 +6,23 @@ from os import path
 import subprocess
 import time
 
-DEFAULT_DATA_DIR=path.join(path.dirname(__file__), 'cluster')
+DEFAULT_DATA_DIR = path.join(path.dirname(__file__), 'cluster')
+DEFAULT_PROFILE = 'default'
+DEFAULT_HOSTNAME = 'localhost@localdomain'
 
 def mkdir(path):
     os.makedirs(path, exist_ok=True)
 
-def get_ebin_path():
-    return subprocess.run(['rebar3', 'path'],
-                          check=True, capture_output=True).stdout.decode()
+def get_ebin_path(profile):
+    profile_args = []
+    if profile != 'default':
+        profile_args = ['as', profile]
+    paths = subprocess.run(['rebar3'] + profile_args + ['path'],
+                           check=True, capture_output=True).stdout.decode()
+    return paths.split(' ')
 
-def start_node(i, ebin_path, data_dir):
-    name='chronicle_{}@localhost.localdomain'.format(i)
+def start_node(i, hostname, ebin_path, data_dir, profile):
+    name='chronicle_{0}@{1}'.format(i, hostname)
     node_dir = path.join(data_dir, name)
     mkdir(node_dir)
 
@@ -26,14 +32,13 @@ def start_node(i, ebin_path, data_dir):
     log_path = path.join(node_dir, 'log')
     log_file = open(log_path, 'a')
 
-    args = ['erl',
-            '+Bd',
+    args = ['erl', '-pa'] + ebin_path + \
+           ['+Bd',
             '+sbwt', 'none',
             '-name', name,
-            '-pa', ebin_path,
             '-noinput',
             '-chronicle', 'data_dir', '"{}"'.format(node_data_dir),
-            '-eval', 'ok = application:start(chronicle).']
+            '-run', 'chronicle_{0}'.format(profile), 'start', str(i)]
     process = subprocess.Popen(args, stdin=None,
                                stdout=log_file, stderr=log_file)
     atexit.register(lambda: kill_node(process))
@@ -47,13 +52,15 @@ def kill_node(process):
         pass
 
 def start_cluster(args):
-    ebin_path = get_ebin_path()
+    profile = args.profile
+    ebin_path = get_ebin_path(profile)
+    hostname = args.hostname
     data_dir = args.data_dir
     mkdir(data_dir)
 
     nodes = []
     for i in range(args.num_nodes):
-        nodes.append(start_node(i, ebin_path, data_dir))
+        nodes.append(start_node(i, hostname, ebin_path, data_dir, profile))
 
     return nodes
 
@@ -70,6 +77,8 @@ def main():
     parser.add_argument('--num-nodes', type=int,
                         dest='num_nodes', required=True)
     parser.add_argument('--data-dir', dest='data_dir', default=DEFAULT_DATA_DIR)
+    parser.add_argument('--profile', dest='profile', default=DEFAULT_PROFILE)
+    parser.add_argument('--hostname', dest='hostname', default=DEFAULT_PROFILE)
     args = parser.parse_args()
 
     nodes = start_cluster(args)
