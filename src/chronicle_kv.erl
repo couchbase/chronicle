@@ -24,7 +24,6 @@
 -define(DEFAULT_TIMEOUT, 15000).
 
 -record(data, {name, table, event_mgr}).
--record(kv, {key, value, revision}).
 
 event_manager(Name) ->
     ?SERVER_NAME(event_manager_name(Name)).
@@ -120,8 +119,8 @@ get(Name, Key, Opts) ->
             case ets:lookup(?ETS_TABLE(Name), Key) of
                 [] ->
                     {error, not_found};
-                [#kv{value = Value, revision = Revision}] ->
-                    {ok, {Value, Revision}}
+                [{_, ValueRev}] ->
+                    {ok, ValueRev}
             end;
         {error, _} = Error ->
             Error
@@ -175,8 +174,7 @@ init(Name, []) ->
     %% table an internal table is used. The state is restored into this
     %% internal table which is then published (by renaming) in post_init/3
     %% callback.
-    Table = ets:new(internal_table(Name),
-                    [protected, named_table, {keypos, #kv.key}]),
+    Table = ets:new(internal_table(Name), [protected, named_table]),
     {ok, #{}, #data{name = Name, table = Table}}.
 
 post_init(_Revision, _State, #data{name = Name, table = Table} = Data) ->
@@ -397,10 +395,10 @@ event_manager_name(Name) ->
     list_to_atom(atom_to_list(Name) ++ "-events").
 
 handle_update(Key, Value, Revision, State, #data{table = Table} = Data) ->
-    KV = #kv{key = Key, value = Value, revision = Revision},
-    ets:insert(Table, KV),
+    ValueRev = {Value, Revision},
+    ets:insert(Table, {Key, ValueRev}),
     notify_key(Key, Revision, {updated, Value}, Data),
-    maps:put(Key, {Value, Revision}, State).
+    maps:put(Key, ValueRev, State).
 
 handle_delete(Key, Revision, State, #data{table = Table} = Data) ->
     ets:delete(Table, Key),
