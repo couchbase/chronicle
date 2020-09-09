@@ -23,7 +23,6 @@
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
 
--record(state, {}).
 -record(data, {name, table, event_mgr}).
 -record(kv, {key, value, revision}).
 
@@ -118,7 +117,12 @@ get(Name, Key, Opts) ->
     Timeout = get_timeout(Opts),
     case handle_read_consistency(Name, Timeout, Opts) of
         ok ->
-            handle_get(?ETS_TABLE(Name), Key);
+            case ets:lookup(?ETS_TABLE(Name), Key) of
+                [] ->
+                    {error, not_found};
+                [#kv{value = Value, revision = Revision}] ->
+                    {ok, {Value, Revision}}
+            end;
         {error, _} = Error ->
             Error
     end.
@@ -173,7 +177,7 @@ init(Name, []) ->
     %% callback.
     Table = ets:new(internal_table(Name),
                     [protected, named_table, {keypos, #kv.key}]),
-    {ok, #state{}, #data{name = Name, table = Table}}.
+    {ok, #{}, #data{name = Name, table = Table}}.
 
 post_init(_Revision, _State, #data{name = Name, table = Table} = Data) ->
     NewTable = ets:rename(Table, ?ETS_TABLE(Name)),
@@ -267,10 +271,10 @@ get_read_own_writes_revision(Result, Opts) ->
             no_revision
     end.
 
-handle_rewrite(Fun, StateRevision, _State, #data{table = Table} = Data) ->
+handle_rewrite(Fun, StateRevision, State, Data) ->
     Updates =
-        ets:foldl(
-          fun (#kv{key = Key, value = Value}, Acc) ->
+        maps:fold(
+          fun (Key, {Value, _Rev}, Acc) ->
                   case Fun(Key, Value) of
                       {update, NewValue} ->
                           [{set, Key, NewValue} | Acc];
@@ -287,149 +291,121 @@ handle_rewrite(Fun, StateRevision, _State, #data{table = Table} = Data) ->
                       delete ->
                           [{delete, Key} | Acc]
                   end
-          end, [], Table),
+          end, [], State),
 
     Conditions = [{state_revision, StateRevision}],
     {reply, {ok, Conditions, Updates}, Data}.
 
-handle_get_snapshot(_State, #data{table = Table} = Data) ->
-    {reply, ets:tab2list(Table), Data}.
+handle_get_snapshot(State, Data) ->
+    {reply, {ok, State}, Data}.
 
-handle_get_snapshot(Keys, _State, #data{table = Table} = Data) ->
-    Result =
-        lists:foldl(
-          fun (Key, {AccSnapshot, AccMissing}) ->
-                  case handle_get(Table, Key) of
-                      {ok, ValueRev} ->
-                          {AccSnapshot#{Key => ValueRev}, AccMissing};
-                      {error, not_found} ->
-                          {AccSnapshot, [Key | AccMissing]}
-                  end
-          end, {#{}, []}, Keys),
+handle_get_snapshot(Keys, State, Data) ->
+    Snapshot = maps:with(Keys, State),
+    Missing = Keys -- maps:keys(Snapshot),
+    {reply, {ok, {Snapshot, Missing}}, Data}.
 
-    {reply, {ok, Result}, Data}.
+apply_add(Key, Value, Revision, StateRevision, State, Data) ->
+    case check_condition({missing, Key}, Revision, StateRevision, State) of
+        ok ->
+            NewState = handle_update(Key, Value, Revision, State, Data),
+            Reply = {ok, Revision},
+            {reply, Reply, NewState, Data};
+        {error, _} = Error ->
+            {reply, Error, State, Data}
+    end.
 
-apply_add(Key, Value, Revision,
-          StateRevision, State, #data{table = Table} = Data) ->
-    Reply =
-        case check_condition({missing, Key}, Revision, StateRevision, Table) of
-            ok ->
-                handle_update(Key, Value, Revision, State, Data),
-                {ok, Revision};
-            {error, _} = Error ->
-                Error
-        end,
-    {reply, Reply, State, Data}.
+apply_set(Key, Value, ExpectedRevision, Revision, StateRevision, State, Data) ->
+    case check_condition({revision, Key, ExpectedRevision},
+                         Revision, StateRevision, State) of
+        ok ->
+            NewState = handle_update(Key, Value, Revision, State, Data),
+            Reply = {ok, Revision},
+            {reply, Reply, NewState, Data};
+        {error, _} = Error ->
+            {reply, Error, State, Data}
+    end.
 
-apply_set(Key, Value, ExpectedRevision, Revision,
-          StateRevision, State, #data{table = Table} = Data) ->
-    Reply =
-        case check_condition(
-               {revision, Key, ExpectedRevision}, Revision,
-               StateRevision, Table) of
-            ok ->
-                handle_update(Key, Value, Revision, State, Data),
-                {ok, Revision};
-            {error, _} = Error ->
-                Error
-        end,
-
-    {reply, Reply, State, Data}.
-
-apply_delete(Key, ExpectedRevision, Revision,
-             StateRevision, State, #data{table = Table} = Data) ->
-    Reply =
-        case check_condition(
-               {revision, Key, ExpectedRevision}, Revision,
-               StateRevision, Table) of
-            ok ->
-                handle_delete(Key, Revision, State, Data),
-                {ok, Revision};
-            {error, _} = Error ->
-                Error
-        end,
-    {reply, Reply, State, Data}.
+apply_delete(Key, ExpectedRevision, Revision, StateRevision, State, Data) ->
+    case check_condition({revision, Key, ExpectedRevision},
+                         Revision, StateRevision, State) of
+        ok ->
+            NewState = handle_delete(Key, Revision, State, Data),
+            Reply = {ok, Revision},
+            {reply, Reply, NewState, Data};
+        {error, _} = Error ->
+            {reply, Error, State, Data}
+    end.
 
 apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
-    Reply =
-        case check_transaction(Conditions, Revision, StateRevision, Data) of
-            ok ->
+    case check_transaction(Conditions, Revision, StateRevision, State) of
+        ok ->
+            NewState =
                 apply_transaction_updates(Updates, Revision, State, Data),
-                {ok, Revision};
-            {error, _} = Error ->
-                Error
-        end,
-    {reply, Reply, State, Data}.
+            Reply = {ok, Revision},
+            {reply, Reply, NewState, Data};
+        {error, _} = Error ->
+            {reply, Error, State, Data}
+    end.
 
-check_transaction(Conditions, Revision, StateRevision, #data{table = Table}) ->
-    check_transaction_loop(Conditions, Revision, StateRevision, Table).
+check_transaction(Conditions, Revision, StateRevision, State) ->
+    check_transaction_loop(Conditions, Revision, StateRevision, State).
 
 check_transaction_loop([], _, _, _) ->
     ok;
-check_transaction_loop([Condition | Rest], Revision, StateRevision, Table) ->
-    case check_condition(Condition, Revision, StateRevision, Table) of
+check_transaction_loop([Condition | Rest], Revision, StateRevision, State) ->
+    case check_condition(Condition, Revision, StateRevision, State) of
         ok ->
-            check_transaction_loop(Rest, Revision, StateRevision, Table);
+            check_transaction_loop(Rest, Revision, StateRevision, State);
         {error, _} = Error ->
             Error
     end.
 
 apply_transaction_updates(Updates, Revision, State, Data) ->
-    lists:foreach(
-      fun (Update) ->
+    lists:foldl(
+      fun (Update, AccState) ->
               case Update of
                   {set, Key, Value} ->
-                      handle_update(Key, Value, Revision, State, Data);
+                      handle_update(Key, Value, Revision, AccState, Data);
                   {delete, Key} ->
-                      handle_delete(Key, Revision, State, Data)
+                      handle_delete(Key, Revision, AccState, Data)
               end
-      end, Updates).
+      end, State, Updates).
 
-check_condition(Condition, Revision, StateRevision, Table) ->
-    case condition_holds(Condition, StateRevision, Table) of
+check_condition(Condition, Revision, StateRevision, State) ->
+    case condition_holds(Condition, StateRevision, State) of
         true ->
             ok;
         false ->
             {error, {conflict, Revision}}
     end.
 
-condition_holds({state_revision, Revision}, StateRevision, _Table) ->
+condition_holds({state_revision, Revision}, StateRevision, _State) ->
     Revision =:= StateRevision;
-condition_holds({missing, Key}, _StateRevision, Table) ->
-    not ets:member(Table, Key);
-condition_holds({revision, _Key, any}, _StateRevision, _Table) ->
+condition_holds({missing, Key}, _StateRevision, State) ->
+    not maps:is_key(Key, State);
+condition_holds({revision, _Key, any}, _StateRevision, _State) ->
     true;
-condition_holds({revision, Key, Revision}, _StateRevision, Table) ->
-    try ets:lookup_element(Table, Key, #kv.revision) of
-        OurRevision when OurRevision =:= Revision ->
-            true;
-        _ ->
-            false
-    catch
-        error:badarg ->
-            %% The key is missing.
+condition_holds({revision, Key, Revision}, _StateRevision, State) ->
+    case maps:find(Key, State) of
+        {ok, {_, OurRevision}} ->
+            OurRevision =:= Revision;
+        error ->
             false
     end.
 
 event_manager_name(Name) ->
     list_to_atom(atom_to_list(Name) ++ "-events").
 
-handle_get(Table, Key) ->
-    case ets:lookup(Table, Key) of
-        [] ->
-            {error, not_found};
-        [#kv{value = Value, revision = Revision}] ->
-            {ok, {Value, Revision}}
-    end.
-
-handle_update(Key, Value, Revision, _State, #data{table = Table} = Data) ->
+handle_update(Key, Value, Revision, State, #data{table = Table} = Data) ->
     KV = #kv{key = Key, value = Value, revision = Revision},
     ets:insert(Table, KV),
-    notify_key(Key, Revision, {updated, Value}, Data).
+    notify_key(Key, Revision, {updated, Value}, Data),
+    maps:put(Key, {Value, Revision}, State).
 
-handle_delete(Key, Revision, _State, #data{table = Table} = Data) ->
+handle_delete(Key, Revision, State, #data{table = Table} = Data) ->
     ets:delete(Table, Key),
-    notify_key(Key, Revision, deleted, Data).
+    notify_key(Key, Revision, deleted, Data),
+    maps:remove(Key, State).
 
 notify(Event, #data{event_mgr = Mgr}) when Mgr =/= undefined ->
     gen_event:notify(Mgr, Event);
