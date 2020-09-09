@@ -174,7 +174,8 @@ init(Name, []) ->
     %% table an internal table is used. The state is restored into this
     %% internal table which is then published (by renaming) in post_init/3
     %% callback.
-    Table = ets:new(internal_table(Name), [protected, named_table]),
+    Table = ets:new(internal_table(Name),
+                    [protected, named_table, {read_concurrency, true}]),
     {ok, #{}, #data{name = Name, table = Table}}.
 
 post_init(_Revision, _State, #data{name = Name, table = Table} = Data) ->
