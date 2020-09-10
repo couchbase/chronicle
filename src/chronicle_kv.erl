@@ -23,7 +23,10 @@
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
 
--record(data, {name, table, event_mgr}).
+-record(data, {name,
+               meta_table,
+               kv_table,
+               event_mgr}).
 
 event_manager(Name) ->
     ?SERVER_NAME(event_manager_name(Name)).
@@ -112,7 +115,8 @@ get(Name, Key, Opts) ->
     Timeout = get_timeout(Opts),
     case handle_read_consistency(Name, Timeout, Opts) of
         ok ->
-            case ets:lookup(?ETS_TABLE(Name), Key) of
+            {ok, Table} = get_table(Name),
+            case ets:lookup(Table, Key) of
                 [] ->
                     {error, not_found};
                 [{_, ValueRev}] ->
@@ -166,14 +170,18 @@ init(Name, []) ->
     %% table an internal table is used. The state is restored into this
     %% internal table which is then published (by renaming) in post_init/3
     %% callback.
-    Table = ets:new(internal_table(Name),
-                    [protected, named_table, {read_concurrency, true}]),
-    {ok, #{}, #data{name = Name, table = Table}}.
+    MetaTable = ets:new(?ETS_TABLE(Name),
+                        [protected, named_table, {read_concurrency, true}]),
+    KvTable = ets:new(Name, [protected, {read_concurrency, true}]),
+    {ok, #{}, #data{name = Name,
+                    meta_table = ets:whereis(MetaTable),
+                    kv_table = KvTable}}.
 
-post_init(_Revision, _State, #data{name = Name, table = Table} = Data) ->
-    NewTable = ets:rename(Table, ?ETS_TABLE(Name)),
-    {ok, Data#data{table = NewTable,
-                   event_mgr = event_manager(Name)}}.
+post_init(_Revision, _State, #data{name = Name,
+                                   meta_table = MetaTable,
+                                   kv_table = KvTable} = Data) ->
+    true = ets:insert_new(MetaTable, {table, KvTable}),
+    {ok, Data#data{event_mgr = event_manager(Name)}}.
 
 handle_command(_, _StateRevision, _State, Data) ->
     {apply, Data}.
@@ -383,13 +391,13 @@ condition_holds({revision, Key, Revision}, _StateRevision, State) ->
 event_manager_name(Name) ->
     list_to_atom(atom_to_list(Name) ++ "-events").
 
-handle_update(Key, Value, Revision, State, #data{table = Table} = Data) ->
+handle_update(Key, Value, Revision, State, #data{kv_table = Table} = Data) ->
     ValueRev = {Value, Revision},
     ets:insert(Table, {Key, ValueRev}),
     notify_key(Key, Revision, {updated, Value}, Data),
     maps:put(Key, ValueRev, State).
 
-handle_delete(Key, Revision, State, #data{table = Table} = Data) ->
+handle_delete(Key, Revision, State, #data{kv_table = Table} = Data) ->
     ets:delete(Table, Key),
     notify_key(Key, Revision, deleted, Data),
     maps:remove(Key, State).
@@ -402,5 +410,11 @@ notify(_Event, _Data) ->
 notify_key(Key, Revision, Event, Data) ->
     notify({{key, Key}, Revision, Event}, Data).
 
-internal_table(Name) ->
-    ?ETS_TABLE(list_to_atom(atom_to_list(Name) ++ "-internal")).
+get_table(Name) ->
+    case ets:lookup(?ETS_TABLE(Name), table) of
+        [{_, TableRef}] ->
+            {ok, TableRef};
+        [] ->
+            %% The process is going through init.
+            {error, no_table}
+    end.
