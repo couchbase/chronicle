@@ -167,8 +167,9 @@ call_async(ServerRef, Tag, Request) ->
 call(ServerRef, Call) ->
     call(ServerRef, Call, 5000).
 
-%% A version of gen_{server,statem}:call/3 function that can take a timeout
-%% reference in place of a literal timeout value.
+%% A version of gen_{server,statem}:call/3 function that can take a timeout in
+%% the form of {since, StartTime, Timeout} tuple in place of a literal timeout
+%% value.
 call(ServerRef, Call, Timeout) ->
     do_call(ServerRef, Call, read_timeout(Timeout)).
 
@@ -184,31 +185,24 @@ do_call(ServerRef, Call, Timeout) ->
               Stack)
     end.
 
-with_timeout(TRef, Fun)
-  when is_reference(TRef) ->
-    Fun(TRef);
+with_timeout({since, _, _} = Timeout, Fun) ->
+    Fun(Timeout);
 with_timeout(infinity, Fun) ->
     Fun(infinity);
-with_timeout(Timeout, Fun) ->
-    TRef = erlang:start_timer(Timeout, self(), timeout),
-    try
-        Fun(TRef)
-    after
-        erlang:cancel_timer(TRef),
-        ?FLUSH({timeout, TRef, _})
-    end.
+with_timeout(Timeout, Fun)
+  when is_integer(Timeout), Timeout >= 0 ->
+    NowTs = erlang:monotonic_time(),
+    Fun({since, NowTs, Timeout}).
 
+read_timeout({since, StartTs, Timeout}) ->
+    NowTs = erlang:monotonic_time(),
+    Passed = erlang:convert_time_unit(NowTs - StartTs, native, millisecond),
+    Remaining = Timeout - Passed,
+    max(0, Remaining);
 read_timeout(infinity) ->
     infinity;
 read_timeout(Timeout) when is_integer(Timeout) ->
-    Timeout;
-read_timeout(TRef) when is_reference(TRef) ->
-    case erlang:read_timer(TRef) of
-        false ->
-            0;
-        T when is_integer(T) ->
-            T
-    end.
+    Timeout.
 
 term_number({TermNumber, _TermLeader}) ->
     TermNumber.
