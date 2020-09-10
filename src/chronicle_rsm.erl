@@ -20,7 +20,7 @@
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/3, read_timeout/1,
-                          with_leader/2, with_timeout/2]).
+                          with_leader/2, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
@@ -112,15 +112,13 @@ sync_revision(Name, Revision, Timeout0) ->
     end.
 
 sync(Name, Type, Timeout) ->
-    with_timeout(Timeout,
-                 fun (TRef) ->
-                         case get_applied_revision(Name, Type, TRef) of
-                             {ok, Revision} ->
-                                 sync_revision(Name, Revision, TRef);
-                             {error, _} = Error ->
-                                 Error
-                         end
-                 end).
+    TRef = start_timeout(Timeout),
+    case get_applied_revision(Name, Type, TRef) of
+        {ok, Revision} ->
+            sync_revision(Name, Revision, TRef);
+        {error, _} = Error ->
+            Error
+    end.
 
 note_term_established(Pid, HistoryId, Term, Seqno) ->
     gen_statem:cast(Pid, {term_established, HistoryId, Term, Seqno}).

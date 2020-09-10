@@ -185,14 +185,14 @@ do_call(ServerRef, Call, Timeout) ->
               Stack)
     end.
 
-with_timeout({since, _, _} = Timeout, Fun) ->
-    Fun(Timeout);
-with_timeout(infinity, Fun) ->
-    Fun(infinity);
-with_timeout(Timeout, Fun)
+start_timeout({since, _, _} = Timeout) ->
+    Timeout;
+start_timeout(infinity) ->
+    infinity;
+start_timeout(Timeout)
   when is_integer(Timeout), Timeout >= 0 ->
     NowTs = erlang:monotonic_time(),
-    Fun({since, NowTs, Timeout}).
+    {since, NowTs, Timeout}.
 
 read_timeout({since, StartTs, Timeout}) ->
     NowTs = erlang:monotonic_time(),
@@ -419,10 +419,8 @@ with_leader(Timeout, Fun) ->
     with_leader(Timeout, ?LEADER_RETRIES, Fun).
 
 with_leader(Timeout, Retries, Fun) ->
-    with_timeout(Timeout,
-                 fun (TRef) ->
-                         with_leader_loop(TRef, any, Retries, Fun)
-                 end).
+    TRef = start_timeout(Timeout),
+    with_leader_loop(TRef, any, Retries, Fun).
 
 with_leader_loop(TRef, Incarnation, Retries, Fun) ->
     {Leader, NewIncarnation} =

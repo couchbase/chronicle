@@ -18,7 +18,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [with_timeout/2]).
+-import(chronicle_utils, [start_timeout/1]).
 
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
@@ -71,27 +71,23 @@ transaction(Name, Keys, Fun) ->
     transaction(Name, Keys, Fun, #{}).
 
 transaction(Name, Keys, Fun, Opts) ->
-    with_timeout(
-      get_timeout(Opts),
-      fun (TRef) ->
-              {ok, {Snapshot, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
-              case Fun(Snapshot) of
-                  {commit, Updates} ->
-                      Conditions = transaction_conditions(Snapshot, Missing),
-                      submit_transaction(Name, Conditions, Updates, TRef, Opts);
-                  {commit, Updates, Extra} ->
-                      Conditions = transaction_conditions(Snapshot, Missing),
-                      case submit_transaction(Name, Conditions,
-                                              Updates, TRef, Opts) of
-                          {ok, Revision} ->
-                              {ok, Revision, Extra};
-                          Other ->
-                              Other
-                      end;
-                  {abort, Result} ->
-                      Result
-              end
-      end).
+    TRef = start_timeout(get_timeout(Opts)),
+    {ok, {Snapshot, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
+    case Fun(Snapshot) of
+        {commit, Updates} ->
+            Conditions = transaction_conditions(Snapshot, Missing),
+            submit_transaction(Name, Conditions, Updates, TRef, Opts);
+        {commit, Updates, Extra} ->
+            Conditions = transaction_conditions(Snapshot, Missing),
+            case submit_transaction(Name, Conditions, Updates, TRef, Opts) of
+                {ok, Revision} ->
+                    {ok, Revision, Extra};
+                Other ->
+                    Other
+            end;
+        {abort, Result} ->
+            Result
+    end.
 
 transaction_conditions(Snapshot, Missing) ->
     ConditionsMissing = [{missing, Key} || Key <- Missing],
@@ -130,17 +126,13 @@ rewrite(Name, Fun) ->
     rewrite(Name, Fun, #{}).
 
 rewrite(Name, Fun, Opts) ->
-    with_timeout(get_timeout(Opts),
-                 fun (TRef) ->
-                         case submit_query(Name, {rewrite, Fun}, TRef, Opts) of
-                             {ok, Conditions, Updates} ->
-                                 submit_transaction(Name,
-                                                    Conditions, Updates,
-                                                    TRef, Opts);
-                             {error, _} = Error ->
-                                 Error
-                         end
-                 end).
+    TRef = start_timeout(get_timeout(Opts)),
+    case submit_query(Name, {rewrite, Fun}, TRef, Opts) of
+        {ok, Conditions, Updates} ->
+            submit_transaction(Name, Conditions, Updates, TRef, Opts);
+        {error, _} = Error ->
+            Error
+    end.
 
 %% For debugging only.
 get_snapshot(Name) ->
@@ -219,15 +211,13 @@ get_timeout(Opts) ->
     maps:get(timeout, Opts, ?DEFAULT_TIMEOUT).
 
 submit_query(Name, Query, Timeout, Opts) ->
-    with_timeout(Timeout,
-                 fun (TRef) ->
-                         case handle_read_consistency(Name, TRef, Opts) of
-                             ok ->
-                                 chronicle_rsm:query(Name, Query, TRef);
-                             {error, _} = Error ->
-                                 Error
-                         end
-                 end).
+    TRef = start_timeout(Timeout),
+    case handle_read_consistency(Name, TRef, Opts) of
+        ok ->
+            chronicle_rsm:query(Name, Query, TRef);
+        {error, _} = Error ->
+            Error
+    end.
 
 handle_read_consistency(Name, Timeout, Opts) ->
     case maps:get(read_consistency, Opts, local) of
@@ -240,12 +230,10 @@ handle_read_consistency(Name, Timeout, Opts) ->
     end.
 
 submit_command(Name, Command, Timeout, Opts) ->
-    with_timeout(Timeout,
-                 fun (TRef) ->
-                         Result = chronicle_rsm:command(Name, Command, TRef),
-                         handle_read_own_writes(Name, Result, TRef, Opts),
-                         Result
-                 end).
+    TRef = start_timeout(Timeout),
+    Result = chronicle_rsm:command(Name, Command, TRef),
+    handle_read_own_writes(Name, Result, TRef, Opts),
+    Result.
 
 handle_read_own_writes(Name, Result, TRef, Opts) ->
     case get_read_own_writes_revision(Result, Opts) of
