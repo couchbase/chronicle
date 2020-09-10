@@ -112,15 +112,21 @@ get(Name, Key) ->
     get(Name, Key, #{}).
 
 get(Name, Key, Opts) ->
-    Timeout = get_timeout(Opts),
-    case handle_read_consistency(Name, Timeout, Opts) of
+    TRef = start_timeout(get_timeout(Opts)),
+    case handle_read_consistency(Name, TRef, Opts) of
         ok ->
-            {ok, Table} = get_table(Name),
-            case ets:lookup(Table, Key) of
-                [] ->
-                    {error, not_found};
-                [{_, ValueRev}] ->
-                    {ok, ValueRev}
+            case get_table(Name) of
+                {ok, Table} ->
+                    case ets:lookup(Table, Key) of
+                        [] ->
+                            {error, not_found};
+                        [{_, ValueRev}] ->
+                            {ok, ValueRev}
+                    end;
+                {error, no_table} ->
+                    %% The process is still initalizing, fall back to a
+                    %% regular query.
+                    chronicle_rsm:query(Name, {get, Key}, TRef)
             end;
         {error, _} = Error ->
             Error
@@ -188,6 +194,8 @@ handle_command(_, _StateRevision, _State, Data) ->
 
 handle_query({rewrite, Fun}, StateRevision, State, Data) ->
     handle_rewrite(Fun, StateRevision, State, Data);
+handle_query({get, Key}, _StateRevision, State, Data) ->
+    handle_get(Key, State, Data);
 handle_query(get_snapshot, _StateRevision, State, Data) ->
     handle_get_snapshot(State, Data);
 handle_query({get_snapshot, Keys}, _StateRevision, State, Data) ->
@@ -290,6 +298,17 @@ handle_rewrite(Fun, StateRevision, State, Data) ->
 
     Conditions = [{state_revision, StateRevision}],
     {reply, {ok, Conditions, Updates}, Data}.
+
+handle_get(Key, State, Data) ->
+    Reply =
+        case maps:find(Key, State) of
+            {ok, _} = Ok ->
+                Ok;
+            error ->
+                {error, not_found}
+        end,
+
+    {reply, Reply, Data}.
 
 handle_get_snapshot(State, Data) ->
     {reply, {ok, State}, Data}.
