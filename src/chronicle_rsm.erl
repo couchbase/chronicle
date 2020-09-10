@@ -63,6 +63,10 @@
 start_link(Name, Mod, ModArgs) ->
     gen_statem:start_link(?START_NAME(Name), ?MODULE, [Name, Mod, ModArgs], []).
 
+%% TODO: Commands need to be tagged with current history. If that's not the
+%% case, then after a quorum failover, the failed over part of the cluster may
+%% continue sending commands to the leader in the non-failed over part for
+%% some time.
 command(Name, Command) ->
     command(Name, Command, 5000).
 
