@@ -272,6 +272,12 @@ handle_sync_revision({HistoryId, Seqno}, Timeout, From,
             %% sequence numbers where they apply. Since this case is pretty
             %% rare, for the sake of simplicity we'll just tolerate a
             %% possibility of sync_revision() call failing unnecessarily.
+            %%
+            %% TODO: This may actually pose more issues that I thought. Post
+            %% quorum failover it will take a non-zero amount of time for all
+            %% rsm-s to catch up with the new history. So during this time
+            %% attempts to sync those rsm-s will be failing. Which is probably
+            %% undesirable.
             {keep_state_and_data,
              {reply, From, {error, history_mismatch}}}
     end.
