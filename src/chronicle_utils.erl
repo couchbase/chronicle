@@ -168,7 +168,7 @@ call(ServerRef, Call) ->
     call(ServerRef, Call, 5000).
 
 %% A version of gen_{server,statem}:call/3 function that can take a timeout in
-%% the form of {since, StartTime, Timeout} tuple in place of a literal timeout
+%% the form of {timeout, StartTime, Timeout} tuple in place of a literal timeout
 %% value.
 call(ServerRef, Call, Timeout) ->
     do_call(ServerRef, Call, read_timeout(Timeout)).
@@ -185,7 +185,7 @@ do_call(ServerRef, Call, Timeout) ->
               Stack)
     end.
 
-start_timeout({since, _, _} = Timeout) ->
+start_timeout({timeout, _, _} = Timeout) ->
     Timeout;
 start_timeout(infinity) ->
     infinity;
@@ -194,7 +194,7 @@ start_timeout(Timeout)
     NowTs = erlang:monotonic_time(),
     {since, NowTs, Timeout}.
 
-read_timeout({since, StartTs, Timeout}) ->
+read_timeout({timeout, StartTs, Timeout}) ->
     NowTs = erlang:monotonic_time(),
     Passed = erlang:convert_time_unit(NowTs - StartTs, native, millisecond),
     Remaining = Timeout - Passed,
