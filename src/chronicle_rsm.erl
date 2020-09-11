@@ -104,15 +104,23 @@ get_local_revision(Name) ->
             exit(not_running)
     end.
 
-sync_revision(Name, Revision, Timeout0) ->
-    %% TODO: add fast path
-    Timeout = read_timeout(Timeout0),
-    Request = {sync_revision, Revision, Timeout},
-    case call(?SERVER(Name), Request, infinity) of
-        ok ->
+sync_revision(Name, {RevHistoryId, RevSeqno} = Revision, Timeout0) ->
+    {LocalHistoryId, LocalSeqno} = get_local_revision(Name),
+    AlreadySynced =
+        (LocalHistoryId =:= RevHistoryId andalso LocalSeqno >= RevSeqno),
+
+    case AlreadySynced of
+        true ->
             ok;
-        {error, timeout} ->
-            exit({timeout, {sync_revision, Name, Revision, Timeout}})
+        false ->
+            Timeout = read_timeout(Timeout0),
+            Request = {sync_revision, Revision, Timeout},
+            case call(?SERVER(Name), Request, infinity) of
+                ok ->
+                    ok;
+                {error, timeout} ->
+                    exit({timeout, {sync_revision, Name, Revision, Timeout}})
+            end
     end.
 
 sync(Name, Type, Timeout) ->
