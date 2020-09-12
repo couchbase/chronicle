@@ -413,12 +413,12 @@ event_manager_name(Name) ->
 handle_update(Key, Value, Revision, State, #data{kv_table = Table} = Data) ->
     ValueRev = {Value, Revision},
     ets:insert(Table, {Key, ValueRev}),
-    notify_key(Key, Revision, {updated, Value}, Data),
+    notify_updated(Key, Revision, Value, Data),
     maps:put(Key, ValueRev, State).
 
 handle_delete(Key, Revision, State, #data{kv_table = Table} = Data) ->
     ets:delete(Table, Key),
-    notify_key(Key, Revision, deleted, Data),
+    notify_deleted(Key, Revision, Data),
     maps:remove(Key, State).
 
 notify(Event, #data{event_mgr = Mgr}) when Mgr =/= undefined ->
@@ -428,6 +428,12 @@ notify(_Event, _Data) ->
 
 notify_key(Key, Revision, Event, Data) ->
     notify({{key, Key}, Revision, Event}, Data).
+
+notify_deleted(Key, Revision, Data) ->
+    notify_key(Key, Revision, deleted, Data).
+
+notify_updated(Key, Revision, Value, Data) ->
+    notify_key(Key, Revision, {updated, Value}, Data).
 
 get_table(Name) ->
     case ets:lookup(?ETS_TABLE(Name), table) of
