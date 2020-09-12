@@ -26,7 +26,8 @@
 -record(data, {name,
                meta_table,
                kv_table,
-               event_mgr}).
+               event_mgr,
+               initialized}).
 
 event_manager(Name) ->
     ?SERVER_NAME(event_manager_name(Name)).
@@ -180,12 +181,14 @@ init(Name, []) ->
                         [protected, named_table, {read_concurrency, true}]),
     KvTable = create_kv_table(Name),
     {ok, #{}, #data{name = Name,
+                    initialized = false,
+                    event_mgr = event_manager(Name),
                     meta_table = ets:whereis(MetaTable),
                     kv_table = KvTable}}.
 
-post_init(_Revision, _State, #data{name = Name, kv_table = KvTable} = Data) ->
+post_init(_Revision, _State, #data{kv_table = KvTable} = Data) ->
     publish_kv_table(KvTable, Data),
-    {ok, Data#data{event_mgr = event_manager(Name)}}.
+    {ok, Data#data{initialized = true}}.
 
 handle_command(_, _StateRevision, _State, Data) ->
     {apply, Data}.
@@ -419,7 +422,7 @@ handle_delete(Key, Revision, State, #data{kv_table = Table} = Data) ->
     notify_deleted(Key, Revision, Data),
     maps:remove(Key, State).
 
-notify(Event, #data{event_mgr = Mgr}) when Mgr =/= undefined ->
+notify(Event, #data{initialized = true, event_mgr = Mgr}) ->
     gen_event:notify(Mgr, Event);
 notify(_Event, _Data) ->
     ok.
