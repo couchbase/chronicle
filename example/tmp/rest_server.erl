@@ -19,8 +19,7 @@
 -include("chronicle.hrl").
 
 -export([init/2, content_types_provided/2, json_api/2, get_options/0,
-         content_types_accepted/2, allowed_methods/2, resource_exists/2,
-         allow_missing_post/2, delete_resource/2]).
+         content_types_accepted/2, allowed_methods/2, resource_exists/2]).
 
 -record(state, {domain, op}).
 
@@ -37,7 +36,8 @@ get_options() ->
                                                          op=removenode}},
                   {"/config/provision", ?MODULE, #state{domain=config,
                                                         op=provision}},
-                  {"/kv/:key", ?MODULE, #state{domain=kv}}
+                  {"/kv/get/:key", ?MODULE, #state{domain=kv, op=get}},
+                  {"/kv/set/:key", ?MODULE, #state{domain=kv, op=set}}
                  ]}
           ]),
     #{env => #{dispatch => Dispatch}}.
@@ -45,9 +45,7 @@ get_options() ->
 init(Req, State) ->
     case State of
         #state{domain=kv} ->
-            Method = method_to_atom(cowboy_req:method(Req)),
-            ?DEBUG("Method: ~p", [Method]),
-            {cowboy_rest, Req, State#state{op = Method}};
+            {cowboy_rest, Req, State};
         _ ->
             {ok, config_api(Req, State), State}
     end.
@@ -68,41 +66,43 @@ content_types_accepted(Req, State) ->
 
 resource_exists(Req, State) ->
     case get_value(Req) of
-        {ok, Value} ->
-            ?DEBUG("Resource exists: ~p", [Value]),
+        {ok, _} ->
             {true, Req, State};
         _ ->
             {false, Req, State}
     end.
 
-delete_resource(Req, State) ->
-    Key = cowboy_req:binding(key, Req),
-    ?DEBUG("delete_resource called for key: ~p", [Key]),
-    Result = delete_value(Req, any),
-    {Result, Req, State}.
-
-allow_missing_post(Req, State) ->
-    {false, Req, State}.
-
 json_api(Req, #state{domain=kv, op=get}=State) ->
-    case get_value(Req) of
-        {ok, {Val, {HistoryId, Seqno} = Rev}} ->
-            ?DEBUG("Rev: ~p", [Rev]),
-            R = {[{<<"rev">>,
-                   {[{<<"history_id">>, HistoryId},
-                     {<<"seqno">>, Seqno}]}
-                  },
-                  {<<"value">>, jiffy:decode(Val)}]},
-            {jiffy:encode(R), Req, State};
+    case cowboy_req:method(Req) of
+        <<"GET">> ->
+            case get_value(Req) of
+                {ok, {Val, {HistoryId, Seqno} = Rev}} ->
+                    ?DEBUG("Rev: ~p", [Rev]),
+                    R = {[{<<"rev">>,
+                           {[{<<"history_id">>, HistoryId},
+                             {<<"seqno">>, Seqno}]}
+                          },
+                          {<<"value">>, jiffy:decode(Val)}]},
+                    {jiffy:encode(R), Req, State};
+                _ ->
+                    {<<"">>, Req, State}
+            end;
         _ ->
-            {<<"">>, Req, State}
+            ?DEBUG("get must be a GET"),
+            {<<"get must be a GET">>, Req, State}
     end;
-json_api(Req, #state{domain=kv, op=post}=State) ->
-    {Result, Req1} = set_value(Req, any),
-    {Result, Req1, State};
-json_api(Req, #state{domain=kv, op=put}=State) ->
-    {Result, Req1} = set_value(Req, any),
-    {Result, Req1, State}.
+json_api(Req, #state{domain=kv, op=set}=State) ->
+    case cowboy_req:method(Req) of
+        <<"POST">> ->
+            {Result, Req1} = set_value(Req),
+            {Result, Req1, State};
+        <<"PUT">> ->
+            {Result, Req1} = set_value(Req),
+            {Result, Req1, State};
+        _ ->
+            ?DEBUG("set must be a put or a post"),
+            {"set must be a put or a post", Req, State}
+    end.
 
 config_api(Req, #state{domain=config, op=info}) ->
     {ok, Vs} = chronicle:get_voters(),
@@ -151,15 +151,6 @@ config_api(Req, #state{domain=config, op=provision}) ->
 
 %% internal module functions
 
-method_to_atom(<<"GET">>) ->
-    get;
-method_to_atom(<<"PUT">>) ->
-    put;
-method_to_atom(<<"POST">>) ->
-    post;
-method_to_atom(<<"DELETE">>) ->
-    delete.
-
 get_value(Req) ->
     case cowboy_req:binding(key, Req) of
         undefined ->
@@ -179,7 +170,7 @@ do_get_value(Key) ->
             not_found
     end.
 
-set_value(Req, ExpectedRevision) ->
+set_value(Req) ->
     BinKey = cowboy_req:binding(key, Req),
     Key = binary_to_list(BinKey),
     ?DEBUG("key: ~p", [Key]),
@@ -187,19 +178,12 @@ set_value(Req, ExpectedRevision) ->
     ?DEBUG("read content: ~p", [Body]),
     try jiffy:decode(Body) of
         _ ->
-            chronicle_kv:set(kv, Key, Body, ExpectedRevision),
+            chronicle_kv:set(kv, Key, Body),
             {true, Req1}
     catch _:_ ->
             ?DEBUG("body not json: ~p", [Body]),
             {false, Req}
     end.
-
-delete_value(Req, ExpectedRevision) ->
-    BinKey = cowboy_req:binding(key, Req),
-    Key = binary_to_list(BinKey),
-    ?DEBUG("deleting key: ~p", [Key]),
-    chronicle_kv:delete(kv, Key, ExpectedRevision),
-    true.
 
 parse_nodes(Body) ->
     try jiffy:decode(Body) of
