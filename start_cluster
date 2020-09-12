@@ -78,7 +78,7 @@ def main():
                         dest='num_nodes', required=True)
     parser.add_argument('--data-dir', dest='data_dir', default=DEFAULT_DATA_DIR)
     parser.add_argument('--profile', dest='profile', default=DEFAULT_PROFILE)
-    parser.add_argument('--hostname', dest='hostname', default=DEFAULT_PROFILE)
+    parser.add_argument('--hostname', dest='hostname', default=DEFAULT_HOSTNAME)
     args = parser.parse_args()
 
     nodes = start_cluster(args)
