@@ -581,7 +581,7 @@ simple_test__(Nodes) ->
 
     ?debugFmt("~nKV snapshots:~n~p~n",
               [[{N, rpc_node(N, fun () ->
-                                        chronicle_kv:get_snapshot(kv)
+                                        chronicle_kv:get_full_snapshot(kv)
                                 end)} || N <- [a, b]]]),
 
     ok.

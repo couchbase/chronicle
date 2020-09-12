@@ -159,9 +159,11 @@ rewrite(Name, Fun, Opts) ->
             Error
     end.
 
-%% For debugging only.
-get_snapshot(Name) ->
-    submit_query(Name, get_snapshot, ?DEFAULT_TIMEOUT, #{}).
+get_full_snapshot(Name) ->
+    get_full_snapshot(Name, #{}).
+
+get_full_snapshot(Name, Opts) ->
+    submit_query(Name, get_full_snapshot, get_timeout(Opts), Opts).
 
 get_snapshot(Name, Keys) ->
     get_snapshot(Name, Keys, #{}).
@@ -232,8 +234,8 @@ handle_query({rewrite, Fun}, StateRevision, State, Data) ->
     handle_rewrite(Fun, StateRevision, State, Data);
 handle_query({get, Key}, _StateRevision, State, Data) ->
     handle_get(Key, State, Data);
-handle_query(get_snapshot, _StateRevision, State, Data) ->
-    handle_get_snapshot(State, Data);
+handle_query(get_full_snapshot, _StateRevision, State, Data) ->
+    handle_get_full_snapshot(State, Data);
 handle_query({get_snapshot, Keys}, _StateRevision, State, Data) ->
     handle_get_snapshot(Keys, State, Data).
 
@@ -346,7 +348,7 @@ handle_get(Key, State, Data) ->
 
     {reply, Reply, Data}.
 
-handle_get_snapshot(State, Data) ->
+handle_get_full_snapshot(State, Data) ->
     {reply, {ok, State}, Data}.
 
 handle_get_snapshot(Keys, State, Data) ->
