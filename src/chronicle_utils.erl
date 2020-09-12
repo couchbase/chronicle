@@ -192,7 +192,7 @@ start_timeout(infinity) ->
 start_timeout(Timeout)
   when is_integer(Timeout), Timeout >= 0 ->
     NowTs = erlang:monotonic_time(),
-    {since, NowTs, Timeout}.
+    {timeout, NowTs, Timeout}.
 
 read_timeout({timeout, StartTs, Timeout}) ->
     NowTs = erlang:monotonic_time(),
