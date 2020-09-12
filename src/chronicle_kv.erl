@@ -115,7 +115,7 @@ get(Name, Key, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     case handle_read_consistency(Name, TRef, Opts) of
         ok ->
-            case get_table(Name) of
+            case get_kv_table(Name) of
                 {ok, Table} ->
                     case ets:lookup(Table, Key) of
                         [] ->
@@ -435,7 +435,7 @@ notify_deleted(Key, Revision, Data) ->
 notify_updated(Key, Revision, Value, Data) ->
     notify_key(Key, Revision, {updated, Value}, Data).
 
-get_table(Name) ->
+get_kv_table(Name) ->
     case ets:lookup(?ETS_TABLE(Name), table) of
         [{_, TableRef}] ->
             {ok, TableRef};
