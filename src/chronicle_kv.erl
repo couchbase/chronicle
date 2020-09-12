@@ -116,21 +116,35 @@ get(Name, Key, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     case handle_read_consistency(Name, TRef, Opts) of
         ok ->
-            case get_kv_table(Name) of
-                {ok, Table} ->
-                    case ets:lookup(Table, Key) of
-                        [] ->
-                            {error, not_found};
-                        [{_, ValueRev}] ->
-                            {ok, ValueRev}
-                    end;
-                {error, no_table} ->
-                    %% The process is still initalizing, fall back to a
-                    %% regular query.
-                    chronicle_rsm:query(Name, {get, Key}, TRef)
+            case get_fast_path(Name, Key) of
+                use_slow_path ->
+                    chronicle_rsm:query(Name, {get, Key}, TRef);
+                Other ->
+                    Other
             end;
         {error, _} = Error ->
             Error
+    end.
+
+get_fast_path(Name, Key) ->
+    case get_kv_table(Name) of
+        {ok, Table} ->
+            try ets:lookup(Table, Key) of
+                [] ->
+                    {error, not_found};
+                [{_, ValueRev}] ->
+                    {ok, ValueRev}
+            catch
+                error:badarg ->
+                    %% When a new snapshot installed, the old table might get
+                    %% deleted underneath us (yet it's also possible that the
+                    %% process simply died). Fall back to the slow path
+                    use_slow_path
+            end;
+        {error, no_table} ->
+            %% The process is still initalizing, fall back to a
+            %% regular query.
+            use_slow_path
     end.
 
 rewrite(Name, Fun) ->
@@ -189,6 +203,27 @@ init(Name, []) ->
 post_init(_Revision, _State, #data{kv_table = KvTable} = Data) ->
     publish_kv_table(KvTable, Data),
     {ok, Data#data{initialized = true}}.
+
+apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, _OldState,
+               #data{name = Name,
+                     kv_table = OldKvTable,
+                     initialized = Initialized} = Data) ->
+    KvTable = create_kv_table(Name),
+    maps:fold(
+      fun (Key, ValueRev, _) ->
+              true = ets:insert_new(KvTable, {Key, ValueRev})
+      end, unused, SnapshotState),
+
+    case Initialized of
+        true ->
+            publish_kv_table(KvTable, Data);
+        false ->
+            %% post_init() will publish the table once fully initialized
+            ok
+    end,
+    ets:delete(OldKvTable),
+    notify_snapshot_installed(SnapshotRevision, Data),
+    {ok, Data#data{kv_table = KvTable}}.
 
 handle_command(_, _StateRevision, _State, Data) ->
     {apply, Data}.
@@ -435,6 +470,9 @@ notify_deleted(Key, Revision, Data) ->
 
 notify_updated(Key, Revision, Value, Data) ->
     notify_key(Key, Revision, {updated, Value}, Data).
+
+notify_snapshot_installed(Revision, Data) ->
+    notify({snapshot_installed, Revision}, Data).
 
 get_kv_table(Name) ->
     case ets:lookup(?ETS_TABLE(Name), table) of
