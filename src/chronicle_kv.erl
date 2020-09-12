@@ -178,15 +178,13 @@ init(Name, []) ->
     %% callback.
     MetaTable = ets:new(?ETS_TABLE(Name),
                         [protected, named_table, {read_concurrency, true}]),
-    KvTable = ets:new(Name, [protected, {read_concurrency, true}]),
+    KvTable = create_kv_table(Name),
     {ok, #{}, #data{name = Name,
                     meta_table = ets:whereis(MetaTable),
                     kv_table = KvTable}}.
 
-post_init(_Revision, _State, #data{name = Name,
-                                   meta_table = MetaTable,
-                                   kv_table = KvTable} = Data) ->
-    true = ets:insert_new(MetaTable, {table, KvTable}),
+post_init(_Revision, _State, #data{name = Name, kv_table = KvTable} = Data) ->
+    publish_kv_table(KvTable, Data),
     {ok, Data#data{event_mgr = event_manager(Name)}}.
 
 handle_command(_, _StateRevision, _State, Data) ->
@@ -443,3 +441,9 @@ get_kv_table(Name) ->
             %% The process is going through init.
             {error, no_table}
     end.
+
+create_kv_table(Name) ->
+    ets:new(Name, [protected, {read_concurrency, true}]).
+
+publish_kv_table(KvTable, #data{meta_table = MetaTable}) ->
+    ets:insert(MetaTable, {table, KvTable}).
