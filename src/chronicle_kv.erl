@@ -113,32 +113,30 @@ get(Name, Key) ->
     get(Name, Key, #{}).
 
 get(Name, Key, Opts) ->
-    TRef = start_timeout(get_timeout(Opts)),
-    case handle_read_consistency(Name, TRef, Opts) of
-        ok ->
-            case get_fast_path(Name, Key) of
-                {ok, _} = Ok ->
-                    Ok;
-                {error, no_table} ->
-                    %% This may happen in multiple situations:
-                    %%
-                    %% 1. The chronicle_kv process is still initializing.
-                    %% 2. New snapshot is installed around the time when we
-                    %%    attempt to read from the table.
-                    %% 3. The process is dead/restarting.
-                    %%
-                    %% It's not possible to distinguish between these cases
-                    %% easily. In some cases (2), we could simply retry, in
-                    %% others (3), retrying is not likely to help. For
-                    %% simplicity all these cases are dealt with by falling
-                    %% back to a query to the chronicle_kv process.
-                    chronicle_rsm:query(Name, {get, Key}, TRef);
-                {error, _} = Error ->
-                    Error
-            end;
-        {error, _} = Error ->
-            Error
-    end.
+    optimistic_query(
+      Name, {get, Key}, get_timeout(Opts), Opts,
+      fun () ->
+              case get_fast_path(Name, Key) of
+                  {ok, _} = Ok ->
+                      Ok;
+                  {error, no_table} ->
+                      %% This may happen in multiple situations:
+                      %%
+                      %% 1. The chronicle_kv process is still initializing.
+                      %% 2. New snapshot is installed around the time when we
+                      %%    attempt to read from the table.
+                      %% 3. The process is dead/restarting.
+                      %%
+                      %% It's not possible to distinguish between these cases
+                      %% easily. In some cases (2), we could simply retry, in
+                      %% others (3), retrying is not likely to help. For
+                      %% simplicity all these cases are dealt with by falling
+                      %% back to a query to the chronicle_kv process.
+                      use_slow_path;
+                  {error, _} = Error ->
+                      Error
+              end
+      end).
 
 get_fast_path(Name, Key) ->
     case get_kv_table(Name) of
@@ -173,19 +171,11 @@ get_snapshot(Name, Keys, Opts) ->
     get_snapshot(Name, Keys, get_timeout(Opts), Opts).
 
 get_snapshot(Name, Keys, Timeout, Opts) ->
-    TRef = start_timeout(Timeout),
-    case handle_read_consistency(Name, TRef, Opts) of
-        ok ->
-            case get_snapshot_fast_path(Name, Keys) of
-                use_slow_path ->
-                    %% TODO: consider implementing optimistic snapshots
-                    chronicle_rsm:query(Name, {get_snapshot, Keys}, Timeout);
-                Other ->
-                    Other
-            end;
-        {error, _} = Error ->
-            Error
-    end.
+    optimistic_query(
+      Name, {get_snapshot, Keys}, Timeout, Opts,
+      fun () ->
+              get_snapshot_fast_path(Name, Keys)
+      end).
 
 get_snapshot_fast_path(_Name, _Keys) ->
     use_slow_path.
@@ -278,6 +268,22 @@ terminate(_Reason, _StateRevision, _State, _Data) ->
 %% internal
 get_timeout(Opts) ->
     maps:get(timeout, Opts, ?DEFAULT_TIMEOUT).
+
+optimistic_query(Name, Query, Timeout, Opts, Body) ->
+    TRef = start_timeout(Timeout),
+    case handle_read_consistency(Name, TRef, Opts) of
+        ok ->
+            case Body() of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, _} = Error ->
+                    Error;
+                use_slow_path ->
+                    chronicle_rsm:query(Name, Query, TRef)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 submit_query(Name, Query, Timeout, Opts) ->
     TRef = start_timeout(Timeout),
