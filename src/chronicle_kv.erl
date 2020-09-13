@@ -117,10 +117,24 @@ get(Name, Key, Opts) ->
     case handle_read_consistency(Name, TRef, Opts) of
         ok ->
             case get_fast_path(Name, Key) of
-                use_slow_path ->
+                {ok, _} = Ok ->
+                    Ok;
+                {error, no_table} ->
+                    %% This may happen in multiple situations:
+                    %%
+                    %% 1. The chronicle_kv process is still initializing.
+                    %% 2. New snapshot is installed around the time when we
+                    %%    attempt to read from the table.
+                    %% 3. The process is dead/restarting.
+                    %%
+                    %% It's not possible to distinguish between these cases
+                    %% easily. In some cases (2), we could simply retry, in
+                    %% others (3), retrying is not likely to help. For
+                    %% simplicity all these cases are dealt with by falling
+                    %% back to a query to the chronicle_kv process.
                     chronicle_rsm:query(Name, {get, Key}, TRef);
-                Other ->
-                    Other
+                {error, _} = Error ->
+                    Error
             end;
         {error, _} = Error ->
             Error
@@ -129,22 +143,9 @@ get(Name, Key, Opts) ->
 get_fast_path(Name, Key) ->
     case get_kv_table(Name) of
         {ok, Table} ->
-            try ets:lookup(Table, Key) of
-                [] ->
-                    {error, not_found};
-                [{_, ValueRev}] ->
-                    {ok, ValueRev}
-            catch
-                error:badarg ->
-                    %% When a new snapshot installed, the old table might get
-                    %% deleted underneath us (yet it's also possible that the
-                    %% process simply died). Fall back to the slow path
-                    use_slow_path
-            end;
-        {error, no_table} ->
-            %% The process is still initalizing, fall back to a
-            %% regular query.
-            use_slow_path
+            get_from_kv_table(Table, Key);
+        {error, no_table} = Error ->
+            Error
     end.
 
 rewrite(Name, Fun) ->
@@ -504,3 +505,14 @@ create_kv_table(Name) ->
 
 publish_kv_table(KvTable, #data{meta_table = MetaTable}) ->
     ets:insert(MetaTable, {table, KvTable}).
+
+get_from_kv_table(Table, Key) ->
+    try ets:lookup(Table, Key) of
+        [] ->
+            {error, not_found};
+        [{_, ValueRev}] ->
+            {ok, ValueRev}
+    catch
+        error:badarg ->
+            {error, no_table}
+    end.
