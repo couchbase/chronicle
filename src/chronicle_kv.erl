@@ -177,8 +177,47 @@ get_snapshot(Name, Keys, Timeout, Opts) ->
               get_snapshot_fast_path(Name, Keys)
       end).
 
-get_snapshot_fast_path(_Name, _Keys) ->
-    use_slow_path.
+get_snapshot_fast_path(Name, Keys) ->
+    case get_kv_table(Name) of
+        {ok, Table} ->
+            {_, TableSeqno} = get_revision(Name),
+            get_snapshot_fast_path_loop(Table, TableSeqno, Keys, #{});
+        {error, no_table} ->
+            use_slow_path
+    end.
+
+get_snapshot_fast_path_loop(_Table, _TableSeqno, [], Snapshot) ->
+    {ok, {Snapshot, []}};
+get_snapshot_fast_path_loop(Table, TableSeqno, [Key | RestKeys], Snapshot) ->
+    case get_from_kv_table(Table, Key) of
+        {ok, {_, {_HistoryId, Seqno}} = ValueRev} ->
+            case Seqno =< TableSeqno of
+                true ->
+                    get_snapshot_fast_path_loop(
+                      Table, TableSeqno, RestKeys,
+                      maps:put(Key, ValueRev, Snapshot));
+                false ->
+                    %% The table revision is updated strictly after pushing
+                    %% all changes to the ets table. So as long as all values
+                    %% that we read have revisions that are not greater than
+                    %% the table revision, we are guaranteed to have observed
+                    %% a consistent snapshot. Otherwise, there's no such
+                    %% guarantee and we need to fall back to the slow path.
+                    use_slow_path
+            end;
+        {error, Error} when Error =:= no_table;
+                            Error =:= not_found ->
+            %% Note that any key that we fail to find forces the slow
+            %% path. This could be avoided if deletion tombstones were kept in
+            %% the ets table. Then we could simply use the revision of the
+            %% tombstone to find out if this read could violate snapshot
+            %% isolation just like in the normal case above. But since there
+            %% are no tombstones, we need to use the slow path. Essentially,
+            %% we assume that in most cases the keys that the caller is
+            %% interested in will exist and therefore this optimization will
+            %% be benefitial.
+            use_slow_path
+    end.
 
 get_revision(Name) ->
     chronicle_rsm:get_local_revision(Name).

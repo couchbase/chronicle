@@ -530,9 +530,10 @@ simple_test__(Nodes) ->
 
                           {ok, _, blah} =
                               chronicle_kv:transaction(
-                                kv, [a],
-                                fun (#{a := {A, _}}) ->
+                                kv, [a, c],
+                                fun (#{a := {A, _}, c := {C, _}}) ->
                                         84 = A,
+                                        42 = C,
                                         {commit, [{set, a, A+1},
                                                   {delete, c}], blah}
                                 end,
