@@ -172,8 +172,22 @@ get_snapshot(Name, Keys, Opts) ->
     get_snapshot(Name, Keys, get_timeout(Opts), Opts).
 
 get_snapshot(Name, Keys, Timeout, Opts) ->
-    %% TODO: consider implementing optimistic snapshots
-    submit_query(Name, {get_snapshot, Keys}, Timeout, Opts).
+    TRef = start_timeout(Timeout),
+    case handle_read_consistency(Name, TRef, Opts) of
+        ok ->
+            case get_snapshot_fast_path(Name, Keys) of
+                use_slow_path ->
+                    %% TODO: consider implementing optimistic snapshots
+                    chronicle_rsm:query(Name, {get_snapshot, Keys}, Timeout);
+                Other ->
+                    Other
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+get_snapshot_fast_path(_Name, _Keys) ->
+    use_slow_path.
 
 get_revision(Name) ->
     chronicle_rsm:get_local_revision(Name).
