@@ -236,14 +236,6 @@ compare_positions({TermVotedA, HighSeqnoA}, {TermVotedB, HighSeqnoB}) ->
             lt
     end.
 
-loop(Fun, Acc) ->
-    case Fun(Acc) of
-        {continue, NewAcc} ->
-            loop(Fun, NewAcc);
-        {stop, NewAcc} ->
-            NewAcc
-    end.
-
 %% A version of erlang:monitor(process, ...) that knows how to deal with {via,
 %% Registry, Name} processes that are used by vnet.
 monitor_process({via, Registry, Name}) ->

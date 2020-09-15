@@ -126,13 +126,12 @@
         ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4))).
 
 -define(FLUSH(Pattern),
-        chronicle_utils:loop(
-          fun (Acc) ->
-                  receive
-                      Pattern ->
-                          {continue, Acc + 1}
-                  after
-                      0 ->
-                          {stop, Acc}
-                  end
-          end, 0)).
+        (fun __Loop(__N) ->
+                 receive
+                     Pattern ->
+                         __Loop(__N + 1)
+                 after
+                     0 ->
+                         __N
+                 end
+         end)(0)).
