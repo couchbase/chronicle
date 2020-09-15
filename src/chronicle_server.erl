@@ -674,4 +674,49 @@ leader_transfer_test__(Nodes) ->
 
     ok.
 
+reprovision_test_() ->
+    Nodes = [a],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 10, fun reprovision_test__/0}}.
+
+reprovision_test__() ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines),
+                          {ok, _} = chronicle_kv:set(kv, a, 42),
+                          ok
+                  end),
+    reprovision_test_loop(100).
+
+reprovision_test_loop(0) ->
+    ok;
+reprovision_test_loop(I) ->
+    Child = spawn_link(
+              fun Loop() ->
+                      %% Sequentially consistent gets should work even during
+                      %% reprovisioning.
+                      {ok, _} = rpc_node(a, fun () ->
+                                                    chronicle_kv:get(kv, a)
+                                            end),
+                      Loop()
+              end),
+
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:reprovision(),
+
+                          %% Make sure writes succeed after reprovision()
+                          %% returns.
+                          {ok, _} = chronicle_kv:set(kv, a, 42),
+                          ok
+                  end),
+
+    unlink(Child),
+    chronicle_utils:terminate_and_wait(Child, shutdown),
+
+    reprovision_test_loop(I - 1).
+
 -endif.
