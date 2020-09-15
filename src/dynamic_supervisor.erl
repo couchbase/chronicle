@@ -82,8 +82,6 @@ handle_cast({event, Event}, #state{mod = Module,
     case Module:handle_event(Event, ModState) of
         {noreply, NewModState} ->
             {noreply, handle_mod_state(NewModState, State)};
-        {restart, NewModState} ->
-            {noreply, handle_restart(NewModState, State)};
         {stop, _Reason} = Stop ->
             Stop
     end.
@@ -105,12 +103,6 @@ terminate(Reason, #state{supervisor = Supervisor}) ->
     end.
 
 %% internal
-handle_restart(NewModState, #state{supervisor = Pid,
-                                   child_specs = Specs} = State) ->
-    stop_children(Pid, Specs),
-    manage_children(State#state{mod_state = NewModState,
-                                child_specs = []}).
-
 handle_mod_state(NewModState, #state{mod_state = OldModState} = State) ->
     case NewModState =:= OldModState of
         true ->
