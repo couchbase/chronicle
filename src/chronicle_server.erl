@@ -466,8 +466,6 @@ setup_vnet(Nodes) ->
                                                     {?MODULE, debug_log}),
                                 ok = chronicle_env:setup(),
 
-                                ?debugFmt("persistent term:~n~p", [persistent_term:get()]),
-
                                 {ok, P} = chronicle_sup:start_link(),
                                 unlink(P),
                                 ok
