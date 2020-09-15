@@ -100,7 +100,7 @@ get_history_id(#metadata{pending_branch =
 provision(Machines) ->
     case gen_server:call(?SERVER, {provision, Machines}, ?PROVISION_TIMEOUT) of
         ok ->
-            ok = chronicle_secondary_sup:sync();
+            ok = chronicle_secondary_sup:sync_system_state_change();
         Other ->
             Other
     end.
@@ -109,7 +109,7 @@ provision(Machines) ->
 reprovision() ->
     case gen_server:call(?SERVER, reprovision, ?PROVISION_TIMEOUT) of
         ok ->
-            ok = chronicle_secondary_sup:sync();
+            ok = chronicle_secondary_sup:sync_system_state_change();
         Other ->
             Other
     end.
@@ -118,7 +118,7 @@ reprovision() ->
 wipe() ->
     case gen_server:call(?SERVER, wipe) of
         ok ->
-            ok = chronicle_secondary_sup:sync();
+            ok = chronicle_secondary_sup:sync_system_state_change();
         Other ->
             Other
     end.
@@ -323,7 +323,7 @@ handle_reprovision(State) ->
 
             NewState = State#state{storage = NewStorage},
 
-            announce_system_reprovisioned(),
+            announce_system_reprovisioned(NewState),
             announce_new_config(NewState),
             announce_committed_seqno(Seqno),
 
@@ -921,8 +921,9 @@ announce_system_state(SystemState, Extra) ->
 announce_system_provisioned(State) ->
     announce_system_state(provisioned, state2metadata(State)).
 
-announce_system_reprovisioned() ->
-    chronicle_events:sync_notify({system_event, reprovisioned}).
+announce_system_reprovisioned(State) ->
+    chronicle_events:sync_notify({system_event,
+                                  reprovisioned, state2metadata(State)}).
 
 storage_open() ->
     Storage0 = chronicle_storage:open(),

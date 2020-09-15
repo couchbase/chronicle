@@ -120,6 +120,9 @@ note_term_finished(HistoryId, Term) ->
 note_term_established(HistoryId, Term) ->
     gen_statem:cast(?SERVER, {note_term_status, HistoryId, Term, established}).
 
+sync() ->
+    gen_statem:call(?SERVER, sync, 10000).
+
 %% gen_statem callbacks
 callback_mode() ->
     [handle_event_function, state_enter].
@@ -182,6 +185,8 @@ handle_event({call, From},
 handle_event({call, From},
              {wait_for_leader, Incarnation, Timeout}, State, Data) ->
     handle_wait_for_leader(Incarnation, Timeout, From, State, Data);
+handle_event({call, From}, sync, _State, _Data) ->
+    {keep_state_and_data, [{reply, From, ok}]};
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, [{reply, From, nack}]};
 handle_event(Type, Event, _State, _Data) ->
@@ -308,6 +313,8 @@ get_heartbeat_interval() ->
 
 is_interesting_event({system_state, _, _}) ->
     true;
+is_interesting_event({system_event, _, _}) ->
+    true;
 is_interesting_event({new_history, _, _}) ->
     true;
 is_interesting_event({term_established, _}) ->
@@ -321,6 +328,8 @@ handle_chronicle_event({system_state, unprovisioned, _}, State, Data) ->
     handle_unprovisioned(State, Data);
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
+handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
+    handle_reprovisioned(Metadata, State, Data);
 handle_chronicle_event({new_config, Config, Metadata}, State, Data) ->
     handle_new_config(Config, Metadata, State, Data);
 handle_chronicle_event({new_history, HistoryId, Metadata}, State, Data) ->
@@ -348,6 +357,18 @@ handle_provisioned(Metadata, State, Data) ->
                 State
         end,
     {next_state, NewState, NewData}.
+
+handle_reprovisioned(Metadata, _State, Data) ->
+    ?INFO("System reprovisioned."),
+    NewData = metadata2data(Metadata, Data),
+
+    %% This ultimately terminates the current term and starts a new one. We're
+    %% transitioning straight to the candidate state to avoid extra election
+    %% timeout that would have to expire if we moved to the observer state as
+    %% is down elsewhere. Moving straight to the candidate state should be
+    %% fine since reprovisioning can happen only when we are the only node in
+    %% the cluster.
+    {next_state, #candidate{}, NewData}.
 
 handle_new_config(_Config, Metadata, _State, Data) ->
     NewData = metadata2data(Metadata, Data),
