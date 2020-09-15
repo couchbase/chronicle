@@ -445,7 +445,49 @@ foreach_rsm(Fun, #data{rsms = RSMs}) ->
 -ifdef(TEST).
 
 debug_log(Level, Fmt, Args, _Info) ->
-    ?debugFmt("[~p|~p] " ++ Fmt, [Level, ?PEER() | Args]).
+    Time = format_time(os:timestamp()),
+    ?debugFmt("~s [~p|~p] " ++ Fmt, [Time, Level, ?PEER() | Args]).
+
+format_time(Time) ->
+    LocalTime = calendar:now_to_local_time(Time),
+    UTCTime = calendar:now_to_universal_time(Time),
+
+    {{Year, Month, Day}, {Hour, Minute, Second}} = LocalTime,
+    Millis = erlang:element(3, Time) div 1000,
+    TimeHdr0 = io_lib:format("~B-~2.10.0B-~2.10.0BT~2.10.0B:"
+                             "~2.10.0B:~2.10.0B.~3.10.0B",
+                             [Year, Month, Day, Hour, Minute, Second, Millis]),
+    [TimeHdr0 | get_timezone_hdr(LocalTime, UTCTime)].
+
+get_timezone_hdr(LocalTime, UTCTime) ->
+    case get_timezone_offset(LocalTime, UTCTime) of
+        utc ->
+            "Z";
+        {Sign, DiffH, DiffM} ->
+            io_lib:format("~s~2.10.0B:~2.10.0B", [Sign, DiffH, DiffM])
+    end.
+
+%% Return offset of local time zone w.r.t UTC
+get_timezone_offset(LocalTime, UTCTime) ->
+    %% Do the calculations in terms of # of seconds
+    DiffInSecs = calendar:datetime_to_gregorian_seconds(LocalTime) -
+        calendar:datetime_to_gregorian_seconds(UTCTime),
+    case DiffInSecs =:= 0 of
+        true ->
+            %% UTC
+            utc;
+        false ->
+            %% Convert back to hours and minutes
+            {DiffH, DiffM, _ } = calendar:seconds_to_time(abs(DiffInSecs)),
+            case DiffInSecs < 0 of
+                true ->
+                    %% Time Zone behind UTC
+                    {"-", DiffH, DiffM};
+                false ->
+                    %% Time Zone ahead of UTC
+                    {"+", DiffH, DiffM}
+            end
+    end.
 
 simple_test_() ->
     Nodes = [a, b, c, d],
