@@ -26,7 +26,7 @@
 -define(RANGE_KEY, '$range').
 
 -record(storage, { current_log,
-                   start_seqno,
+                   low_seqno,
                    high_seqno,
                    committed_seqno,
                    meta,
@@ -53,7 +53,7 @@ open() ->
                        log_tab = ets:whereis(?MEM_LOG_TAB),
                        config_index_tab = ets:whereis(?CONFIG_INDEX),
                        persist = Persist,
-                       start_seqno = ?NO_SEQNO,
+                       low_seqno = ?NO_SEQNO,
                        high_seqno = ?NO_SEQNO,
                        committed_seqno = ?NO_SEQNO,
                        meta = #{}},
@@ -102,9 +102,9 @@ open_logs(Dir, Storage) ->
     case chronicle_log:open(CurrentLogPath,
                             make_handle_log_entry_fun(CurrentLogPath, Storage),
                             SealedState) of
-        {ok, CurrentLog, {Meta, Config, StartSeqno, HighSeqno}} ->
+        {ok, CurrentLog, {Meta, Config, LowSeqno, HighSeqno}} ->
             Storage#storage{current_log = CurrentLog,
-                            start_seqno = StartSeqno,
+                            low_seqno = LowSeqno,
                             high_seqno = HighSeqno,
                             meta = Meta,
                             config = Config};
@@ -114,18 +114,18 @@ open_logs(Dir, Storage) ->
     end.
 
 publish(#storage{log_info_tab = LogInfoTab,
-                 start_seqno = StartSeqno,
+                 low_seqno = LowSeqno,
                  high_seqno = HighSeqno,
                  committed_seqno = CommittedSeqno} = Storage) ->
-    ets:insert(LogInfoTab, {?RANGE_KEY, StartSeqno, HighSeqno, CommittedSeqno}),
+    ets:insert(LogInfoTab, {?RANGE_KEY, LowSeqno, HighSeqno, CommittedSeqno}),
     Storage.
 
 set_committed_seqno(Seqno, #storage{
-                              start_seqno = StartSeqno,
+                              low_seqno = LowSeqno,
                               high_seqno = HighSeqno,
                               committed_seqno = CommittedSeqno} = Storage) ->
     true = (Seqno >= CommittedSeqno),
-    true = (Seqno >= StartSeqno),
+    true = (Seqno >= LowSeqno),
     true = (Seqno =< HighSeqno),
 
     Storage#storage{committed_seqno = Seqno}.
@@ -187,7 +187,7 @@ make_handle_log_entry_fun(LogPath, Storage) ->
     end.
 
 handle_log_entry(LogPath, Storage, Entry,
-                 {Meta, Config, StartSeqno, PrevSeqno} = State) ->
+                 {Meta, Config, LowSeqno, PrevSeqno} = State) ->
     case Entry of
         {atomic, Entries} ->
             lists:foldl(
@@ -195,17 +195,17 @@ handle_log_entry(LogPath, Storage, Entry,
                       handle_log_entry(LogPath, Storage, SubEntry, Acc)
               end, State, Entries);
         {meta, KVs} ->
-            {maps:merge(Meta, KVs), Config, StartSeqno, PrevSeqno};
+            {maps:merge(Meta, KVs), Config, LowSeqno, PrevSeqno};
         {truncate, Seqno} ->
-            NewStartSeqno =
-                case StartSeqno > Seqno of
+            NewLowSeqno =
+                case LowSeqno > Seqno of
                     true ->
                         Seqno;
                     false ->
-                        StartSeqno
+                        LowSeqno
                 end,
             NewConfig = truncate_table(Storage#storage.config_index_tab, Seqno),
-            {Meta, NewConfig, NewStartSeqno, Seqno};
+            {Meta, NewConfig, NewLowSeqno, Seqno};
         #log_entry{seqno = Seqno} ->
             case Seqno =:= PrevSeqno + 1 orelse PrevSeqno =:= ?NO_SEQNO of
                 true ->
@@ -214,10 +214,10 @@ handle_log_entry(LogPath, Storage, Entry,
                     exit({inconsistent_log, LogPath, Entry, PrevSeqno})
             end,
 
-            NewStartSeqno =
-                case StartSeqno =/= ?NO_SEQNO of
+            NewLowSeqno =
+                case LowSeqno =/= ?NO_SEQNO of
                     true ->
-                        StartSeqno;
+                        LowSeqno;
                     false ->
                         Seqno
                 end,
@@ -232,7 +232,7 @@ handle_log_entry(LogPath, Storage, Entry,
                         Config
                 end,
 
-            {Meta, NewConfig, NewStartSeqno, Seqno}
+            {Meta, NewConfig, NewLowSeqno, Seqno}
     end.
 
 is_config_entry(#log_entry{value = Value}) ->
@@ -411,19 +411,19 @@ truncate_table_loop(Table, Last, Seqno) ->
     end.
 
 mem_log_append(#storage{log_tab = LogTab,
-                        start_seqno = OurStartSeqno} = Storage,
+                        low_seqno = LowSeqno} = Storage,
                StartSeqno, EndSeqno, Entries) ->
     ets:insert(LogTab, Entries),
-    NewStartSeqno =
-        case OurStartSeqno =:= ?NO_SEQNO
+    NewLowSeqno =
+        case LowSeqno =:= ?NO_SEQNO
             %% truncate
-            orelse OurStartSeqno > StartSeqno of
+            orelse LowSeqno > StartSeqno of
             true ->
                 StartSeqno;
             false ->
-                OurStartSeqno
+                LowSeqno
         end,
-    Storage#storage{start_seqno = NewStartSeqno, high_seqno = EndSeqno}.
+    Storage#storage{low_seqno = NewLowSeqno, high_seqno = EndSeqno}.
 
 file_exists(Path, Type) ->
     case chronicle_utils:check_file_exists(Path, Type) of
@@ -444,13 +444,13 @@ sync_dir(Dir) ->
     end.
 
 get_log() ->
-    {LogStartSeqno, LogEndSeqno} = get_seqno_range(),
-    get_log_loop(LogStartSeqno, LogEndSeqno, []).
+    {LogLowSeqno, LogHighSeqno} = get_seqno_range(),
+    get_log_loop(LogLowSeqno, LogHighSeqno, []).
 
 get_log(StartSeqno, EndSeqno) ->
-    {LogStartSeqno, LogEndSeqno} = get_seqno_range(),
-    true = (StartSeqno >= LogStartSeqno),
-    true = (EndSeqno =< LogEndSeqno),
+    {LogLowSeqno, LogHighSeqno} = get_seqno_range(),
+    true = (StartSeqno >= LogLowSeqno),
+    true = (EndSeqno =< LogHighSeqno),
 
     get_log_loop(StartSeqno, EndSeqno, []).
 
@@ -462,8 +462,8 @@ get_log_loop(StartSeqno, EndSeqno, Acc) ->
     get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]).
 
 get_seqno_range() ->
-    [{_, StartSeqno, EndSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
-    {StartSeqno, EndSeqno}.
+    [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
+    {LowSeqno, HighSeqno}.
 
 get_data_dir() ->
     case application:get_env(chronicle, data_dir) of
