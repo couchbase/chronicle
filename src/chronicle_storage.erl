@@ -280,7 +280,8 @@ store_meta_prepare(#storage{meta = Meta} = Storage, Updates) ->
             not_needed
     end.
 
-append(#storage{high_seqno = HighSeqno} = Storage,
+append(#storage{high_seqno = HighSeqno,
+                committed_seqno = CommittedSeqno} = Storage,
        StartSeqno, EndSeqno, Entries, Opts) ->
     Truncate = maps:get(truncate, Opts, false),
     LogEntries0 =
@@ -289,6 +290,7 @@ append(#storage{high_seqno = HighSeqno} = Storage,
                 true = (StartSeqno =:= HighSeqno + 1),
                 Entries;
             true ->
+                true = (StartSeqno > CommittedSeqno),
                 [{truncate, StartSeqno - 1} | Entries]
         end,
     {LogEntries, NewStorage0} = append_handle_meta(Storage, LogEntries0, Opts),
