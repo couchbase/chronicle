@@ -485,6 +485,9 @@ config_peers(#transition{current_config = Current,
 config_rsms(#config{state_machines = RSMs}) ->
     RSMs;
 config_rsms(#transition{current_config = Config}) ->
+    %% TODO: currently there's no way to change the set of state machines once
+    %% the cluster is provisioned, so this is correct. Reconsider once state
+    %% machines can be added dynamically.
     config_rsms(Config).
 
 -ifdef(HAVE_SYNC_DIR).
