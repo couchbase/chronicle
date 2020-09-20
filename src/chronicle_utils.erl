@@ -482,6 +482,11 @@ config_peers(#transition{current_config = Current,
                          future_config = Future}) ->
     lists:usort(config_peers(Current) ++ config_peers(Future)).
 
+config_rsms(#config{state_machines = RSMs}) ->
+    RSMs;
+config_rsms(#transition{current_config = Config}) ->
+    config_rsms(Config).
+
 -ifdef(HAVE_SYNC_DIR).
 
 init_sync_nif() ->

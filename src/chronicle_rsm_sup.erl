@@ -51,10 +51,10 @@ init([]) ->
               intensity => 3,
               period => 10},
 
-    {ok, Flags, get_rsms(Metadata#metadata.config)}.
+    {ok, Flags, chronicle_utils:config_rsms(Metadata#metadata.config)}.
 
 handle_event({new_config, Config}, _) ->
-    {noreply, get_rsms(Config)}.
+    {noreply, chronicle_utils:config_rsms(Config)}.
 
 child_specs(RSMs) ->
     lists:map(
@@ -66,9 +66,3 @@ child_specs(RSMs) ->
                 restart => permanent,
                 type => supervisor}
       end, maps:to_list(RSMs)).
-
-%% internal
-get_rsms(#config{state_machines = RSMs}) ->
-    RSMs;
-get_rsms(#transition{current_config = Config}) ->
-    get_rsms(Config).
