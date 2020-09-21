@@ -583,14 +583,8 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
         {stop, Reason} ->
             stop(Reason, State, Data);
         ignored ->
-            case Error of
-                {missing_entries, Metadata} ->
-                    reset_peer_status(Peer, Metadata, Data),
-                    {keep_state, replicate(Data)};
-                _ ->
-                    ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
-                    stop({unexpected_error, Peer, Error}, State, Data)
-            end
+            ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
+            stop({unexpected_error, Peer, Error}, State, Data)
     end.
 
 handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
@@ -1165,10 +1159,6 @@ get_peer_status(Peer, #data{peer_statuses = Tab}) ->
 update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     ets:insert(Tab, Fun(PeerStatus)).
-
-reset_peer_status(Peer, Metadata, Data) ->
-    remove_peer_status(Peer, Data),
-    init_peer_status(Peer, Metadata, Data).
 
 init_peer_status(Peer, Metadata, #data{term = OurTerm,
                                        peer_statuses = Tab}) ->
