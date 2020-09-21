@@ -573,10 +573,30 @@ handle_append_result(Peer, Request, Result, proposing = State, Data) ->
 
     case Result of
         ok ->
-            handle_append_ok(Peer, HighSeqno, CommittedSeqno, State, Data);
+            NewData = maybe_drop_pending_entries(Peer, CommittedSeqno, Data),
+            handle_append_ok(Peer, HighSeqno, CommittedSeqno, State, NewData);
         {error, Error} ->
             handle_append_error(Peer, Error, State, Data)
     end.
+
+maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
+  when Peer =:= ?SELF_PEER ->
+    OldCommittedSeqno = get_local_committed_seqno(Data),
+    case OldCommittedSeqno =:= NewCommittedSeqno of
+        true ->
+            Data;
+        false ->
+            PendingEntries = Data#data.pending_entries,
+            NewPendingEntries =
+                queue_dropwhile(
+                  fun (Entry) ->
+                          Entry#log_entry.seqno =< NewCommittedSeqno
+                  end, PendingEntries),
+
+            Data#data{pending_entries = NewPendingEntries}
+    end;
+maybe_drop_pending_entries(_, _, Data) ->
+    Data.
 
 handle_append_error(Peer, Error, proposing = State, Data) ->
     case handle_common_error(Peer, Error, Data) of
@@ -589,8 +609,7 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
 
 handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                  proposing = State,
-                 #data{committed_seqno = CommittedSeqno,
-                       pending_entries = PendingEntries} = Data) ->
+                 #data{committed_seqno = CommittedSeqno} = Data) ->
     ?DEBUG("Append ok on peer ~p.~n"
            "High Seqno: ~p~n"
            "Committed Seqno: ~p",
@@ -604,14 +623,7 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                    "New committed seqno: ~p~n"
                    "Old committed seqno: ~p",
                    [NewCommittedSeqno, CommittedSeqno]),
-            NewPendingEntries =
-                queue_dropwhile(
-                  fun (Entry) ->
-                          Entry#log_entry.seqno =< NewCommittedSeqno
-                  end, PendingEntries),
-
-            NewData0 = Data#data{committed_seqno = NewCommittedSeqno,
-                                 pending_entries = NewPendingEntries},
+            NewData0 = Data#data{committed_seqno = NewCommittedSeqno},
 
             case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
@@ -1306,12 +1318,13 @@ send_append(PeersInfo0,
       end).
 
 %% TODO: think about how to backfill peers properly
-get_entries(Seqno, #data{committed_seqno = CommittedSeqno,
-                         pending_entries = PendingEntries} = Data) ->
+get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
+    LocalCommittedSeqno = get_local_committed_seqno(Data),
+
     BackfillEntries =
-        case Seqno < CommittedSeqno of
+        case Seqno < LocalCommittedSeqno of
             true ->
-                get_local_log(Seqno + 1, CommittedSeqno, Data);
+                get_local_log(Seqno + 1, LocalCommittedSeqno, Data);
             false ->
                 []
         end,
@@ -1325,6 +1338,10 @@ get_entries(Seqno, #data{committed_seqno = CommittedSeqno,
           end, PendingEntries),
 
     BackfillEntries ++ queue:to_list(Entries).
+
+get_local_committed_seqno(Data) ->
+    {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),
+    PeerStatus#peer_status.acked_commit_seqno.
 
 get_local_log(StartSeqno, EndSeqno,
               #data{history_id = HistoryId, term = Term}) ->
