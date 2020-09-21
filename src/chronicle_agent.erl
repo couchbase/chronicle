@@ -83,6 +83,15 @@ get_metadata() ->
 get_log() ->
     gen_server:call(?SERVER, get_log).
 
+-spec get_log(chronicle:history_id(),
+              chronicle:leader_term(),
+              chronicle:seqno(),
+              chronicle:seqno()) ->
+          {ok, [#log_entry{}]} |
+          {error, Error} when
+      Error :: {history_mismatch, chronicle:history_id()} |
+               {conflicting_term, chronicle:leader_term()} |
+               bad_range.
 get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
     gen_server:call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).
 
