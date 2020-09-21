@@ -68,7 +68,6 @@
 
                 %% Used when the state is 'proposing'.
                 pending_entries,
-                pending_high_seqno,
                 sync_requests,
 
                 config_change_reply_to,
@@ -253,7 +252,6 @@ preload_pending_entries(#data{history_id = HistoryId,
             case chronicle_agent:get_log(HistoryId, Term,
                                          CommittedSeqno + 1, HighSeqno) of
                 {ok, Entries} ->
-                    true = (HighSeqno =:= Data#data.pending_high_seqno),
                     {ok, Data#data{pending_entries = queue:from_list(Entries)}};
                 {error, Error} ->
                     ?WARNING("Encountered an error while fetching "
@@ -322,7 +320,6 @@ establish_term_init(Metadata,
                                     config = Config,
                                     config_revision = ConfigRevision,
                                     high_seqno = HighSeqno,
-                                    pending_high_seqno = HighSeqno,
                                     committed_seqno = CommittedSeqno,
                                     branch = PendingBranch,
                                     being_removed = false},
@@ -550,7 +547,6 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
                         %%  other words, we won't truncate something that was
                         %%  known to have been committed.
                         high_seqno = CommittedSeqno,
-                        pending_high_seqno = CommittedSeqno,
                         pending_entries = queue:new()},
 
     %% Note, that the new config may be based on an uncommitted config that
@@ -621,7 +617,6 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                   end, PendingEntries),
 
             NewData0 = Data#data{committed_seqno = NewCommittedSeqno,
-                                 high_seqno = NewCommittedSeqno,
                                  pending_entries = NewPendingEntries},
 
             case handle_config_post_append(Data, NewData0) of
@@ -864,8 +859,7 @@ is_revision_committed({_, _, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
     Seqno =< CommittedSeqno.
 
 replicate(Data) ->
-    #data{committed_seqno = CommittedSeqno,
-          pending_high_seqno = HighSeqno} = Data,
+    #data{committed_seqno = CommittedSeqno, high_seqno = HighSeqno} = Data,
 
     case get_peers_to_replicate(HighSeqno, CommittedSeqno, Data) of
         [] ->
@@ -982,9 +976,9 @@ handle_append_commands(Commands, proposing, #data{being_removed = true}) ->
     keep_state_and_data;
 handle_append_commands(Commands,
                        proposing,
-                       #data{pending_high_seqno = PendingHighSeqno,
+                       #data{high_seqno = HighSeqno,
                              pending_entries = PendingEntries} = Data) ->
-    {NewPendingHighSeqno, NewPendingEntries, NewData0} =
+    {NewHighSeqno, NewPendingEntries, NewData0} =
         lists:foldl(
           fun ({ReplyTo, Command}, {PrevSeqno, AccEntries, AccData} = Acc) ->
                   Seqno = PrevSeqno + 1,
@@ -997,10 +991,10 @@ handle_append_commands(Commands,
                           Acc
                   end
           end,
-          {PendingHighSeqno, PendingEntries, Data}, Commands),
+          {HighSeqno, PendingEntries, Data}, Commands),
 
     NewData1 = NewData0#data{pending_entries = NewPendingEntries,
-                             pending_high_seqno = NewPendingHighSeqno},
+                             high_seqno = NewHighSeqno},
 
     {keep_state, replicate(NewData1)}.
 
@@ -1148,7 +1142,7 @@ propose_config(Config, ReplyTo, Data) ->
 
 %% TODO: right now when this function is called we replicate the proposal in
 %% its own batch. But it can be coalesced with user batches.
-do_propose_config(Config, ReplyTo, #data{pending_high_seqno = HighSeqno,
+do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
                                          pending_entries = Entries} = Data) ->
     Seqno = HighSeqno + 1,
     LogEntry = make_log_entry(Seqno, Config, Data),
@@ -1156,7 +1150,7 @@ do_propose_config(Config, ReplyTo, #data{pending_high_seqno = HighSeqno,
 
     NewEntries = queue:in(LogEntry, Entries),
     NewData = Data#data{pending_entries = NewEntries,
-                        pending_high_seqno = Seqno,
+                        high_seqno = Seqno,
                         config_change_reply_to = ReplyTo},
     update_config(Config, Revision, NewData).
 
@@ -1298,7 +1292,7 @@ send_append(PeersInfo0,
             #data{history_id = HistoryId,
                   term = Term,
                   committed_seqno = CommittedSeqno,
-                  pending_high_seqno = HighSeqno} = Data) ->
+                  high_seqno = HighSeqno} = Data) ->
     Request = {append, HistoryId, Term, CommittedSeqno, HighSeqno},
 
     PeersInfo = maps:from_list(PeersInfo0),
