@@ -229,17 +229,21 @@ handle_state_enter(establish_term,
                    [HistoryId, Term, Error]),
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
-handle_state_enter(proposing, #data{parent = Parent,
-                                    history_id = HistoryId,
-                                    term = Term,
-                                    high_seqno = HighSeqno} = Data) ->
-    chronicle_server:proposer_ready(Parent, HistoryId, Term, HighSeqno),
-
+handle_state_enter(proposing, Data) ->
     NewData0 = maybe_resolve_branch(Data),
     NewData = maybe_complete_config_transition(NewData0),
+
+    announce_proposer_ready(NewData),
+
     {keep_state, replicate(check_peers(NewData))};
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
+
+announce_proposer_ready(#data{parent = Parent,
+                              history_id = HistoryId,
+                              term = Term,
+                              high_seqno = HighSeqno}) ->
+    chronicle_server:proposer_ready(Parent, HistoryId, Term, HighSeqno).
 
 establish_term_init(Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
