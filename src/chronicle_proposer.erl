@@ -230,14 +230,46 @@ handle_state_enter(establish_term,
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
 handle_state_enter(proposing, Data) ->
-    NewData0 = maybe_resolve_branch(Data),
-    NewData = maybe_complete_config_transition(NewData0),
+    case preload_pending_entries(Data) of
+        {ok, NewData0} ->
+            NewData1 = maybe_resolve_branch(NewData0),
+            NewData = maybe_complete_config_transition(NewData1),
 
-    announce_proposer_ready(NewData),
+            announce_proposer_ready(NewData),
 
-    {keep_state, replicate(check_peers(NewData))};
+            {keep_state, replicate(check_peers(NewData))};
+        {stop, _} = Stop ->
+            Stop
+    end;
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
+
+preload_pending_entries(#data{history_id = HistoryId,
+                              term = Term,
+                              high_seqno = HighSeqno,
+                              committed_seqno = CommittedSeqno} = Data) ->
+    case HighSeqno > CommittedSeqno of
+        true ->
+            case chronicle_agent:get_log(HistoryId, Term,
+                                         CommittedSeqno + 1, HighSeqno) of
+                {ok, Entries} ->
+                    true = (HighSeqno =:= Data#data.pending_high_seqno),
+                    {ok, Data#data{pending_entries = queue:from_list(Entries)}};
+                {error, Error} ->
+                    ?WARNING("Encountered an error while fetching "
+                             "uncommitted entries from local agent.~n"
+                             "History id: ~p~n"
+                             "Term: ~p~n"
+                             "Committed seqno: ~p~n"
+                             "High seqno: ~p~n"
+                             "Error: ~p",
+                             [HistoryId, Term,
+                              CommittedSeqno, HighSeqno, Error]),
+                    {stop, Error}
+            end;
+        false ->
+            {ok, Data}
+    end.
 
 announce_proposer_ready(#data{parent = Parent,
                               history_id = HistoryId,
@@ -518,7 +550,8 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
                         %%  other words, we won't truncate something that was
                         %%  known to have been committed.
                         high_seqno = CommittedSeqno,
-                        pending_high_seqno = CommittedSeqno},
+                        pending_high_seqno = CommittedSeqno,
+                        pending_entries = queue:new()},
 
     %% Note, that the new config may be based on an uncommitted config that
     %% will get truncated from the history. This can be confusing and it's
@@ -1289,12 +1322,12 @@ send_append(PeersInfo0,
       end).
 
 %% TODO: think about how to backfill peers properly
-get_entries(Seqno, #data{high_seqno = HighSeqno,
+get_entries(Seqno, #data{committed_seqno = CommittedSeqno,
                          pending_entries = PendingEntries} = Data) ->
     BackfillEntries =
-        case Seqno < HighSeqno of
+        case Seqno < CommittedSeqno of
             true ->
-                get_local_log(Seqno + 1, HighSeqno, Data);
+                get_local_log(Seqno + 1, CommittedSeqno, Data);
             false ->
                 []
         end,
