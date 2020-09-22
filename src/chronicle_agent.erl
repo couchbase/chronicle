@@ -193,13 +193,20 @@ append(Peer, Opaque, HistoryId, Term, CommittedSeqno, Entries) ->
     call_async(?SERVER(Peer), Opaque,
                {append, HistoryId, Term, CommittedSeqno, Entries}).
 
+-type local_mark_committed_result() ::
+        ok | {error, local_mark_committed_error()}.
+-type local_mark_committed_error() ::
+        {history_mismatch, chronicle:history_id()} |
+        {conflicting_term, chronicle:leader_term()} |
+        {protocol_error, any()}.
+
 -spec local_mark_committed(chronicle:history_id(),
                            chronicle:leader_term(),
                            chronicle:seqno()) ->
-          append_result().
+          local_mark_committed_result().
 local_mark_committed(HistoryId, Term, CommittedSeqno) ->
     gen_server:call(?SERVER,
-                    {append, HistoryId, Term, CommittedSeqno, []},
+                    {local_mark_committed, HistoryId, Term, CommittedSeqno},
                     ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
 -type store_branch_result() ::
@@ -244,6 +251,9 @@ handle_call({ensure_term, HistoryId, Term}, _From, State) ->
     handle_ensure_term(HistoryId, Term, State);
 handle_call({append, HistoryId, Term, CommittedSeqno, Entries}, _From, State) ->
     handle_append(HistoryId, Term, CommittedSeqno, Entries, State);
+handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
+            _From, State) ->
+    handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State);
 handle_call({store_branch, Branch}, _From, State) ->
     handle_store_branch(Branch, State);
 handle_call({undo_branch, BranchId}, _From, State) ->
@@ -719,6 +729,39 @@ check_not_earlier_term(Term, State) ->
         false ->
             {error, {conflicting_term, CurrentTerm}}
     end.
+
+handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
+    case check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) of
+        ok ->
+            HighSeqno = get_high_seqno(State),
+
+            complete_append(HistoryId, Term,
+                            #{entries => [],
+                              start_seqno => HighSeqno + 1,
+                              end_seqno => HighSeqno,
+                              committed_seqno => CommittedSeqno,
+
+                              %% This call is only performed by the local
+                              %% leader, so there should never be a need to
+                              %% truncate the uncommitted tail.
+                              truncate_uncommitted => false},
+                            State);
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
+    ?CHECK(check_history_id(HistoryId, State),
+           check_same_term(Term, State),
+           case check_committed_seqno_rollback(Term, CommittedSeqno, State) of
+               {ok, FinalCommittedSeqno} ->
+                   %% This is only ever called by the local leader, so there
+                   %% never should be a possibility of rollback.
+                   true = (FinalCommittedSeqno =:= CommittedSeqno),
+                   ok;
+               {error, _} = Error ->
+                   Error
+           end).
 
 handle_store_branch(Branch, State) ->
     assert_valid_branch(Branch),
