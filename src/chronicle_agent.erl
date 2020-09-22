@@ -490,11 +490,12 @@ handle_ensure_term(HistoryId, Term, State) ->
             {reply, Error, State}
     end.
 
-handle_append(HistoryId, Term, CommittedSeqno, _AtSeqno, Entries, State) ->
+handle_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
-    case check_append(HistoryId, Term, CommittedSeqno, Entries, State) of
+    case check_append(HistoryId, Term,
+                      CommittedSeqno, AtSeqno, Entries, State) of
         {ok, Info} ->
             complete_append(HistoryId, Term, Info, State);
         {error, _} = Error ->
@@ -580,13 +581,14 @@ complete_append(HistoryId, Term, Info, State) ->
 
     {reply, ok, NewState}.
 
-check_append(HistoryId, Term, CommittedSeqno, Entries, State) ->
+check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State) ->
     ?CHECK(check_history_id(HistoryId, State),
            check_not_earlier_term(Term, State),
-           check_append_obsessive(Term, CommittedSeqno, Entries, State)).
+           check_append_obsessive(Term, CommittedSeqno,
+                                  AtSeqno, Entries, State)).
 
-check_append_obsessive(Term, CommittedSeqno, Entries, State) ->
-    case get_entries_seqnos(Entries, State) of
+check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
+    case get_entries_seqnos(AtSeqno, Entries) of
         {ok, StartSeqno, EndSeqno} ->
             #{term_voted := OurTermVoted,
               committed_seqno := OurCommittedSeqno} = get_meta(State),
@@ -658,23 +660,18 @@ check_append_obsessive(Term, CommittedSeqno, Entries, State) ->
 
     end.
 
-get_entries_seqnos([], State) ->
-    HighSeqno = get_high_seqno(State),
-    {ok, HighSeqno + 1, HighSeqno};
-get_entries_seqnos([_|_] = Entries, _State) ->
-    get_entries_seqnos(Entries, undefined, undefined).
+get_entries_seqnos(AtSeqno, Entries) ->
+    get_entries_seqnos_loop(Entries, AtSeqno + 1, AtSeqno).
 
-get_entries_seqnos([], StartSeqno, EndSeqno) ->
+get_entries_seqnos_loop([], StartSeqno, EndSeqno) ->
     {ok, StartSeqno, EndSeqno};
-get_entries_seqnos([Entry|Rest], StartSeqno, EndSeqno) ->
+get_entries_seqnos_loop([Entry|Rest], StartSeqno, EndSeqno) ->
     Seqno = Entry#log_entry.seqno,
 
-    if
-        EndSeqno =:= undefined ->
-            get_entries_seqnos(Rest, Seqno, Seqno);
-        Seqno =:= EndSeqno + 1 ->
-            get_entries_seqnos(Rest, StartSeqno, Seqno);
+    case Seqno =:= EndSeqno + 1 of
         true ->
+            get_entries_seqnos_loop(Rest, StartSeqno, Seqno);
+        false ->
             {error, {malformed, Entry}}
     end.
 
