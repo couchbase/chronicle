@@ -1314,7 +1314,8 @@ send_append(PeersInfo0,
                      [Peer, HistoryId, Term, CommittedSeqno, Entries]),
 
               chronicle_agent:append(Peer, Opaque,
-                                     HistoryId, Term, CommittedSeqno, Entries)
+                                     HistoryId, Term, CommittedSeqno,
+                                     PeerSeqno, Entries)
       end).
 
 %% TODO: think about how to backfill peers properly

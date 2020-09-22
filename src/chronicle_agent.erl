@@ -187,11 +187,12 @@ ensure_term(Peer, Opaque, HistoryId, Term) ->
              chronicle:history_id(),
              chronicle:leader_term(),
              chronicle:seqno(),
+             chronicle:seqno(),
              [#log_entry{}]) ->
           replies(Opaque, append_result()).
-append(Peer, Opaque, HistoryId, Term, CommittedSeqno, Entries) ->
+append(Peer, Opaque, HistoryId, Term, CommittedSeqno, AtSeqno, Entries) ->
     call_async(?SERVER(Peer), Opaque,
-               {append, HistoryId, Term, CommittedSeqno, Entries}).
+               {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries}).
 
 -type local_mark_committed_result() ::
         ok | {error, local_mark_committed_error()}.
@@ -249,8 +250,9 @@ handle_call({establish_term, HistoryId, Term, Position}, _From, State) ->
     handle_establish_term(HistoryId, Term, Position, State);
 handle_call({ensure_term, HistoryId, Term}, _From, State) ->
     handle_ensure_term(HistoryId, Term, State);
-handle_call({append, HistoryId, Term, CommittedSeqno, Entries}, _From, State) ->
-    handle_append(HistoryId, Term, CommittedSeqno, Entries, State);
+handle_call({append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
+            _From, State) ->
+    handle_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State);
 handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
             _From, State) ->
     handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State);
@@ -488,7 +490,7 @@ handle_ensure_term(HistoryId, Term, State) ->
             {reply, Error, State}
     end.
 
-handle_append(HistoryId, Term, CommittedSeqno, Entries, State) ->
+handle_append(HistoryId, Term, CommittedSeqno, _AtSeqno, Entries, State) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
