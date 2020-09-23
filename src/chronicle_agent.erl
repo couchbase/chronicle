@@ -520,7 +520,7 @@ complete_append(HistoryId, Term, Info, State) ->
       start_seqno := StartSeqno,
       end_seqno := EndSeqno,
       committed_seqno := NewCommittedSeqno,
-      truncate_uncommitted := TruncateUncommitted} = Info,
+      truncate := Truncate} = Info,
 
     WasProvisioned = is_provisioned(State),
     Peer =
@@ -550,10 +550,10 @@ complete_append(HistoryId, Term, Info, State) ->
 
     PostMetadata = #{committed_seqno => NewCommittedSeqno},
 
-    %% TODO: Truncate needs to be atomic, but it currently is not.
+    %% TODO: truncate needs to happen before appending PreMetadata
     NewStorage = append_entries(StartSeqno, EndSeqno, Entries,
                                 PreMetadata, PostMetadata,
-                                #{truncate => TruncateUncommitted},
+                                #{truncate => Truncate},
                                 State),
 
     NewState = State#state{storage = NewStorage},
@@ -594,7 +594,7 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
               committed_seqno := OurCommittedSeqno} = get_meta(State),
             OurHighSeqno = get_high_seqno(State),
 
-            {SafeHighSeqno, Truncate} =
+            {SafeHighSeqno, NewTerm} =
                 case Term =:= OurTermVoted of
                     true ->
                         {OurHighSeqno, false};
@@ -630,22 +630,24 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
                             case check_committed_seqno(Term, CommittedSeqno,
                                                        EndSeqno, State) of
                                 {ok, FinalCommittedSeqno} ->
-                                    %% TODO: validate that the entries we're
-                                    %% dropping are the same that we've got?
-                                    FinalEntries =
-                                        lists:dropwhile(
-                                          fun (#log_entry{seqno = Seqno}) ->
-                                                  Seqno =< SafeHighSeqno
-                                          end, Entries),
-
-                                    {ok,
-                                     #{entries => FinalEntries,
-                                       start_seqno => SafeHighSeqno + 1,
-                                       end_seqno => EndSeqno,
-                                       committed_seqno => FinalCommittedSeqno,
-                                       truncate_uncommitted => Truncate}};
-                                {error, _} = Error ->
-                                    Error
+                                    case drop_known_entries(
+                                           Entries,
+                                           SafeHighSeqno, OurHighSeqno,
+                                           NewTerm, State) of
+                                        {ok,
+                                         FinalStartSeqno,
+                                         Truncate,
+                                         FinalEntries} ->
+                                            {ok,
+                                             #{entries => FinalEntries,
+                                               start_seqno => FinalStartSeqno,
+                                               end_seqno => EndSeqno,
+                                               committed_seqno =>
+                                                   FinalCommittedSeqno,
+                                               truncate => Truncate}};
+                                        {error, _} = Error ->
+                                            Error
+                                    end
                             end
                     end
             end;
@@ -658,6 +660,57 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
             {error, {protocol_error,
                      {malformed_append, Entry, Entries}}}
 
+    end.
+
+drop_known_entries(Entries, SafeHighSeqno, HighSeqno, NewTerm, State) ->
+    {SafeEntries, UnsafeEntries} = split_entries(SafeHighSeqno, Entries),
+
+    %% All safe entries must match.
+    case check_entries_match(SafeEntries, State) of
+        ok ->
+            {PreHighSeqnoEntries, PostHighSeqnoEntries} =
+                split_entries(HighSeqno, UnsafeEntries),
+
+            case check_entries_match(PreHighSeqnoEntries, State) of
+                ok ->
+                    {ok, HighSeqno + 1, false, PostHighSeqnoEntries};
+                {mismatch, MismatchSeqno, _OurEntry, Remaining} ->
+                    true = NewTerm,
+
+                    ?DEBUG("Mismatch at seqno ~p. "
+                           "Going to drop the log tail.", [MismatchSeqno]),
+                    {ok, MismatchSeqno, true, Remaining ++ PostHighSeqnoEntries}
+            end;
+        {mismatch, Seqno, OurEntry, Remaining} ->
+            %% TODO: don't log entries
+            ?ERROR("Unexpected mismatch in entries sent by the proposer.~n"
+                   "Seqno: ~p~n"
+                   "Our entry:~n~p~n"
+                   "Remaining entries:~n~p",
+                   [Seqno, OurEntry, Remaining]),
+            {error, {protocol_error,
+                     {mismatched_entry, Remaining, OurEntry}}}
+    end.
+
+split_entries(Seqno, Entries) ->
+    lists:splitwith(
+      fun (#log_entry{seqno = EntrySeqno}) ->
+              EntrySeqno =< Seqno
+      end, Entries).
+
+check_entries_match([], _State) ->
+    ok;
+check_entries_match([Entry | Rest] = Entries, State) ->
+    EntrySeqno = Entry#log_entry.seqno,
+    {ok, OurEntry} = get_log_entry(EntrySeqno, State),
+
+    %% TODO: it should be enough to compare histories and terms here. But for
+    %% now let's compare complete entries to be doubly confident.
+    case Entry =:= OurEntry of
+        true ->
+            check_entries_match(Rest, State);
+        false ->
+            {mismatch, EntrySeqno, OurEntry, Entries}
     end.
 
 get_entries_seqnos(AtSeqno, Entries) ->
@@ -743,7 +796,7 @@ handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
                               %% This call is only performed by the local
                               %% leader, so there should never be a need to
                               %% truncate the uncommitted tail.
-                              truncate_uncommitted => false},
+                              truncate => false},
                             State);
         {error, _} = Error ->
             {reply, Error, State}
@@ -1048,3 +1101,6 @@ get_high_seqno(#state{storage = Storage}) ->
 
 get_config(#state{storage = Storage}) ->
     chronicle_storage:get_config(Storage).
+
+get_log_entry(Seqno, #state{storage = Storage}) ->
+    chronicle_storage:get_log_entry(Seqno, Storage).

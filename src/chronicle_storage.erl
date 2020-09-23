@@ -463,6 +463,14 @@ get_log_loop(StartSeqno, EndSeqno, Acc) ->
     [Entry] = ets:lookup(?MEM_LOG_TAB, EndSeqno),
     get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]).
 
+get_log_entry(Seqno, #storage{log_tab = Tab}) ->
+    case ets:lookup(Tab, Seqno) of
+        [Entry] ->
+            {ok, Entry};
+        [] ->
+            {error, not_found}
+    end.
+
 get_seqno_range() ->
     [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {LowSeqno, HighSeqno}.
