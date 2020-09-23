@@ -280,23 +280,22 @@ store_meta_prepare(#storage{meta = Meta} = Storage, Updates) ->
             not_needed
     end.
 
-append(#storage{high_seqno = HighSeqno,
-                committed_seqno = CommittedSeqno} = Storage,
+truncate(Seqno, #storage{high_seqno = HighSeqno,
+                         committed_seqno = CommittedSeqno} = Storage) ->
+    true = (Seqno >= CommittedSeqno),
+    true = (Seqno =< HighSeqno),
+
+    log_append(Storage, [{truncate, Seqno}]),
+    NewStorage = config_index_truncate(Seqno, Storage),
+    NewStorage#storage{high_seqno = Seqno}.
+
+append(#storage{high_seqno = HighSeqno} = Storage,
        StartSeqno, EndSeqno, Entries, Opts) ->
-    Truncate = maps:get(truncate, Opts, false),
-    LogEntries0 =
-        case Truncate of
-            false ->
-                true = (StartSeqno =:= HighSeqno + 1),
-                Entries;
-            true ->
-                true = (StartSeqno > CommittedSeqno),
-                [{truncate, StartSeqno - 1} | Entries]
-        end,
-    {LogEntries, NewStorage0} = append_handle_meta(Storage, LogEntries0, Opts),
-    log_append(NewStorage0, LogEntries),
+    true = (StartSeqno =:= HighSeqno + 1),
+    {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
+    log_append(NewStorage0, DiskEntries),
     NewStorage1 = mem_log_append(NewStorage0, StartSeqno, EndSeqno, Entries),
-    config_index_append(NewStorage1, StartSeqno, Truncate, Entries).
+    config_index_append(NewStorage1, Entries).
 
 append_handle_meta(Storage, Entries, Opts) ->
     case maps:find(meta, Opts) of
@@ -370,22 +369,18 @@ log_append(#storage{current_log = Log, persist = true}, Records) ->
 log_append(#storage{persist = false}, _Records) ->
     ok.
 
+config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
+    NewConfig = truncate_table(Tab, Seqno),
+    Storage#storage{config = NewConfig}.
+
 config_index_append(#storage{config_index_tab = ConfigIndex,
                              config = Config} = Storage,
-                    StartSeqno, Truncate, Entries) ->
-    NewConfig0 =
-        case Truncate of
-            true ->
-                truncate_table(ConfigIndex, StartSeqno - 1);
-            false ->
-                Config
-        end,
-
+                    Entries) ->
     ConfigEntries = lists:filter(fun is_config_entry/1, Entries),
     NewConfig =
         case ConfigEntries of
             [] ->
-                NewConfig0;
+                Config;
             _ ->
                 ets:insert(ConfigIndex, ConfigEntries),
                 lists:last(ConfigEntries)
@@ -417,9 +412,7 @@ mem_log_append(#storage{log_tab = LogTab,
                StartSeqno, EndSeqno, Entries) ->
     ets:insert(LogTab, Entries),
     NewLowSeqno =
-        case LowSeqno =:= ?NO_SEQNO
-            %% truncate
-            orelse LowSeqno > StartSeqno of
+        case LowSeqno =:= ?NO_SEQNO of
             true ->
                 StartSeqno;
             false ->

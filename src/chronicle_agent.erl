@@ -547,14 +547,10 @@ complete_append(HistoryId, Term, Info, State) ->
           term_voted => Term,
           pending_branch => undefined,
           peer => Peer},
-
     PostMetadata = #{committed_seqno => NewCommittedSeqno},
-
-    %% TODO: truncate needs to happen before appending PreMetadata
     NewStorage = append_entries(StartSeqno, EndSeqno, Entries,
                                 PreMetadata, PostMetadata,
-                                #{truncate => Truncate},
-                                State),
+                                Truncate, State),
 
     NewState = State#state{storage = NewStorage},
 
@@ -1072,14 +1068,31 @@ store_meta(Meta, #state{storage = Storage}) ->
     chronicle_storage:publish(propagate_committed_seqno(NewStorage)).
 
 append_entries(StartSeqno, EndSeqno, Entries,
-               PreMetadata, PostMetadata, Opts,
+               PreMetadata, PostMetadata, Truncate,
                #state{storage = Storage}) ->
-    NewStorage0 = chronicle_storage:store_meta(Storage, PreMetadata),
-    NewStorage1 = chronicle_storage:append(NewStorage0, StartSeqno,
-                                           EndSeqno, Entries, Opts),
-    NewStorage2 = chronicle_storage:store_meta(NewStorage1, PostMetadata),
-    chronicle_storage:sync(NewStorage2),
-    chronicle_storage:publish(propagate_committed_seqno(NewStorage2)).
+    NewStorage0 =
+        case Truncate of
+            true ->
+                %% It's important to truncate diverged entries before logging
+                %% metadata. We only truncate on the first append in a new
+                %% term. So the metadata will include the new term_voted
+                %% value. But if truncate happens after this metadata gets
+                %% logged, if the process crashes, upon recovery we might end
+                %% up with an untruncated log and the new term_voted. Which
+                %% would be in violation of the following invariant: all nodes
+                %% with the same term_voted agree on the longest common prefix
+                %% of their histories.
+                chronicle_storage:truncate(StartSeqno - 1, Storage);
+            false ->
+                Storage
+        end,
+
+    NewStorage1 = chronicle_storage:store_meta(NewStorage0, PreMetadata),
+    NewStorage2 = chronicle_storage:append(NewStorage1, StartSeqno,
+                                           EndSeqno, Entries, #{}),
+    NewStorage3 = chronicle_storage:store_meta(NewStorage2, PostMetadata),
+    chronicle_storage:sync(NewStorage3),
+    chronicle_storage:publish(propagate_committed_seqno(NewStorage3)).
 
 get_peer_name() ->
     Peer = ?PEER(),
