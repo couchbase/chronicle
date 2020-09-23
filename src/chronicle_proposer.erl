@@ -639,13 +639,13 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
             %% erased. If the previous committed seqno was acknowledged only
             %% by a minimal majority of nodes, any of them going down will
             %% result in the deduced seqno going backwards.
-            keep_state_and_data;
+            {keep_state, Data};
         no_quorum ->
             %% This case is possible because deduce_committed_seqno/1 always
             %% uses the most up-to-date config. So what was committed in the
             %% old config, might not yet have a quorum in the current
             %% configuration.
-            keep_state_and_data
+            {keep_state, Data}
     end.
 
 handle_peer_position_result(Peer, Result, proposing = State, Data) ->
