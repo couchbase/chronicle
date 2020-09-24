@@ -83,6 +83,10 @@ open_logs(Dir, Storage) ->
                 {lists:droplast(Logs), lists:last(Logs)}
         end,
 
+    InitState = #{meta => #{},
+                  config => undefined,
+                  low_seqno => ?NO_SEQNO,
+                  high_seqno => ?NO_SEQNO},
     SealedState =
         lists:foldl(
           fun (LogIndex, Acc) ->
@@ -96,13 +100,15 @@ open_logs(Dir, Storage) ->
                           ?ERROR("Failed to read log ~p: ~p", [LogPath, Error]),
                           exit({failed_to_read_log, LogPath, Error})
                   end
-          end, {#{}, undefined, ?NO_SEQNO, ?NO_SEQNO}, Sealed),
+          end, InitState, Sealed),
 
     CurrentLogPath = log_path(Dir, Current),
     case chronicle_log:open(CurrentLogPath,
                             make_handle_log_entry_fun(CurrentLogPath, Storage),
                             SealedState) of
-        {ok, CurrentLog, {Meta, Config, LowSeqno, HighSeqno}} ->
+        {ok, CurrentLog, FinalState} ->
+            #{meta := Meta, config := Config,
+              low_seqno := LowSeqno, high_seqno := HighSeqno} = FinalState,
             Storage#storage{current_log = CurrentLog,
                             low_seqno = LowSeqno,
                             high_seqno = HighSeqno,
@@ -186,8 +192,7 @@ make_handle_log_entry_fun(LogPath, Storage) ->
             handle_log_entry(LogPath, Storage, Entry, State)
     end.
 
-handle_log_entry(LogPath, Storage, Entry,
-                 {Meta, Config, LowSeqno, PrevSeqno} = State) ->
+handle_log_entry(LogPath, Storage, Entry, State) ->
     case Entry of
         {atomic, Entries} ->
             lists:foldl(
@@ -195,8 +200,13 @@ handle_log_entry(LogPath, Storage, Entry,
                       handle_log_entry(LogPath, Storage, SubEntry, Acc)
               end, State, Entries);
         {meta, KVs} ->
-            {maps:merge(Meta, KVs), Config, LowSeqno, PrevSeqno};
+            maps:update_with(meta,
+                             fun (CurrentMeta) ->
+                                     maps:merge(CurrentMeta, KVs)
+                             end, State);
         {truncate, Seqno} ->
+            LowSeqno = maps:get(low_seqno, State),
+
             NewLowSeqno =
                 case LowSeqno > Seqno of
                     true ->
@@ -205,8 +215,14 @@ handle_log_entry(LogPath, Storage, Entry,
                         LowSeqno
                 end,
             NewConfig = truncate_table(Storage#storage.config_index_tab, Seqno),
-            {Meta, NewConfig, NewLowSeqno, Seqno};
+            State#{config => NewConfig,
+                   low_seqno => NewLowSeqno,
+                   high_seqno => Seqno};
         #log_entry{seqno = Seqno} ->
+            #{low_seqno := LowSeqno,
+              high_seqno := PrevSeqno,
+              config := Config} = State,
+
             case Seqno =:= PrevSeqno + 1 orelse PrevSeqno =:= ?NO_SEQNO of
                 true ->
                     ok;
@@ -232,7 +248,9 @@ handle_log_entry(LogPath, Storage, Entry,
                         Config
                 end,
 
-            {Meta, NewConfig, NewLowSeqno, Seqno}
+            State#{config => NewConfig,
+                   low_seqno => NewLowSeqno,
+                   high_seqno => Seqno}
     end.
 
 is_config_entry(#log_entry{value = Value}) ->
