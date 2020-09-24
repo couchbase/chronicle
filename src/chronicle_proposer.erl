@@ -345,8 +345,16 @@ handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
 
 check_peers(#data{peers = Peers} = Data) ->
     LivePeers = get_live_peers(Peers),
-    MonitoredPeers = get_monitored_peers(Data),
-    PeersToCheck = LivePeers -- MonitoredPeers,
+    PeersToCheck =
+        lists:filter(
+          fun (Peer) ->
+                  case get_peer_status(Peer, Data) of
+                      {ok, _} ->
+                          false;
+                      not_found ->
+                          true
+                  end
+          end, LivePeers),
 
     erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
     send_request_position(PeersToCheck, Data).
@@ -892,6 +900,8 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
                           false ->
                               false
                       end;
+                  {ok, requested} ->
+                      false;
                   not_found ->
                       false
               end
@@ -926,7 +936,7 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
         proposing ->
             case lists:member(Peer, Peers) of
                 true ->
-                    case get_peer_monitor(Peer, Data) of
+                    case get_peer_status(Peer, Data) of
                         {ok, _} ->
                             %% We are already in contact with the peer
                             %% (likely, check_peers initiated the connection
@@ -1160,7 +1170,7 @@ do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
 
 get_peer_status(Peer, #data{peer_statuses = Tab}) ->
     case ets:lookup(Tab, Peer) of
-        [{_, #peer_status{} = PeerStatus}] ->
+        [{_, PeerStatus}] ->
             {ok, PeerStatus};
         [] ->
             not_found
@@ -1170,8 +1180,11 @@ update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     ets:insert(Tab, {Peer, Fun(PeerStatus)}).
 
+mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
+    true = ets:insert_new(Tab, [{Peer, requested} || Peer <- Peers]).
+
 init_peer_status(Peer, Metadata, #data{term = OurTerm,
-                                       peer_statuses = Tab}) ->
+                                       peer_statuses = Tab} = Data) ->
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
               high_seqno = PeerHighSeqno} = Metadata,
@@ -1207,12 +1220,20 @@ init_peer_status(Peer, Metadata, #data{term = OurTerm,
                 {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
         end,
 
+    %% We should never overwrite an existing peer status.
+    case get_peer_status(Peer, Data) of
+        {ok, requested} ->
+            ok;
+        not_found ->
+            ok
+    end,
+
     PeerStatus = #peer_status{needs_sync = NeedsSync,
                               acked_seqno = HighSeqno,
                               sent_seqno = HighSeqno,
                               acked_commit_seqno = CommittedSeqno,
                               sent_commit_seqno = CommittedSeqno},
-    true = ets:insert_new(Tab, {Peer, PeerStatus}).
+    ets:insert(Tab, {Peer, PeerStatus}).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
@@ -1359,6 +1380,7 @@ send_request_peer_position(Peer, Data) ->
     send_request_position([Peer], Data).
 
 send_request_position(Peers, Data) ->
+    mark_status_requested(Peers, Data),
     send_ensure_term(Peers, peer_position, Data).
 
 queue_takefold(Fun, Acc, Queue) ->
@@ -1479,9 +1501,6 @@ get_peer_monitor(Peer, #data{monitors_peers = MPeers}) ->
         error ->
             not_found
     end.
-
-get_monitored_peers(#data{monitors_peers = MPeers}) ->
-    maps:keys(MPeers).
 
 deduce_committed_seqno(#data{quorum_peers = Peers,
                              quorum = Quorum} = Data) ->
