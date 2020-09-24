@@ -664,3 +664,11 @@ delete(Path, Type) ->
         {error, Error} ->
             {error, {Error, Path}}
     end.
+
+read_full(Fd, Size) ->
+    case file:read(Fd, Size) of
+        {ok, Data} when byte_size(Data) < Size ->
+            eof;
+        Other ->
+            Other
+    end.

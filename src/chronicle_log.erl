@@ -112,7 +112,7 @@ create(Path) ->
     end.
 
 check_header(Fd) ->
-    case read_full(Fd, ?HEADER_BYTES) of
+    case chronicle_utils:read_full(Fd, ?HEADER_BYTES) of
         {ok, Data} ->
             check_header_data(Data);
         eof ->
@@ -135,14 +135,6 @@ check_header_data(Data) ->
                 false ->
                     {error, {corrupt_log, bad_header}}
             end
-    end.
-
-read_full(Fd, Size) ->
-    case file:read(Fd, Size) of
-        {ok, Data} when byte_size(Data) < Size ->
-            eof;
-        Other ->
-            Other
     end.
 
 write_header(Fd) ->
