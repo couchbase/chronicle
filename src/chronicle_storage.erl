@@ -485,14 +485,3 @@ get_log_entry(Seqno, #storage{log_tab = Tab}) ->
 get_seqno_range() ->
     [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {LowSeqno, HighSeqno}.
-
-get_data_dir() ->
-    case application:get_env(chronicle, data_dir) of
-        {ok, Dir} ->
-            Dir;
-        undefined ->
-            no_data_dir
-    end.
-
-get_persist_enabled() ->
-    application:get_env(chronicle, persist, true).
