@@ -756,6 +756,21 @@ partition_test__() ->
 
     ok = rpc_node(b,
                   fun () ->
+                          %% TODO: Currently leader going out abruptly is not
+                          %% handled very well: since in general writes are
+                          %% not idempotent, they can't be retried. So if the
+                          %% set below is submitted while node 'b' still
+                          %% thinks 'a' is the leader, the test will fail. So
+                          %% for now we'll just wait until we elect a new
+                          %% leader.
+                          case chronicle_leader:get_leader() of
+                              {a, Incarnation} ->
+                                  chronicle_leader:wait_for_leader(Incarnation,
+                                                                   1000);
+                              _ ->
+                                  ok
+                          end,
+
                           {ok, _} = chronicle_kv:set(kv, c, 44),
                           ok
                   end),
