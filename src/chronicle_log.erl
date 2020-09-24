@@ -27,8 +27,6 @@
 -define(READ_CHUNK_SIZE, 1024 * 1024).
 -define(WRITE_CHUNK_SIZE, 1024 * 1024).
 
--define(CRC_BITS, 32).
--define(CRC_BYTES, (?CRC_BITS bsr 3)).
 -define(TERM_SIZE_BITS, 32).
 -define(TERM_SIZE_BYTES, (?TERM_SIZE_BITS bsr 3)).
 -define(TERM_SIZE_MAX, (1 bsl ?TERM_SIZE_BITS) - 1).

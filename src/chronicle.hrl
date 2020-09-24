@@ -135,3 +135,6 @@
                          __N
                  end
          end)(0)).
+
+-define(CRC_BITS, 32).
+-define(CRC_BYTES, (?CRC_BITS bsr 3)).
