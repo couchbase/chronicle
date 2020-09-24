@@ -719,4 +719,60 @@ reprovision_test_loop(I) ->
 
     reprovision_test_loop(I - 1).
 
+partition_test_() ->
+    Nodes = [a, b, c, d],
+
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+
+     %% TODO: currently a hefty timeout is required here because nodeup events
+     %% are not produced when vnet is used. So when the partition is lifted,
+     %% we have to rely on check_peers() logic in chronicle_proposer to
+     %% attempt to reestablish connection to the partitioned node. But that
+     %% only happens at 5 second intervals.
+     {timeout, 10, fun partition_test__/0}}.
+
+partition_test__() ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines),
+                          ok = chronicle:add_voters([a, b, c, d]),
+                          {ok, _} = chronicle_kv:set(kv, a, 42),
+                          {a, _} = chronicle_leader:get_leader(),
+                          ok
+                  end),
+
+    [ok = vnet:disconnect(a, N) || N <- [b, c, d]],
+
+    Pid = rpc_node(a,
+                   fun () ->
+                           spawn(
+                             fun () ->
+                                     chronicle_kv:set(kv, b, 43)
+                             end)
+                   end),
+
+    ok = rpc_node(b,
+                  fun () ->
+                          {ok, _} = chronicle_kv:set(kv, c, 44),
+                          ok
+                  end),
+
+    chronicle_utils:terminate_and_wait(Pid, shutdown),
+
+    [ok = vnet:connect(a, N) || N <- [b, c, d]],
+
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle_rsm:sync(kv, quorum, 10000),
+                          {ok, {42, _}} = chronicle_kv:get(kv, a),
+                          {error, not_found} = chronicle_kv:get(kv, b),
+                          {ok, {44, _}} = chronicle_kv:get(kv, c),
+                          ok
+                  end),
+
+    ok.
+
 -endif.
