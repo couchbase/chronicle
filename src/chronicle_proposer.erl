@@ -73,8 +73,7 @@
                 config_change_reply_to,
                 postponed_config_requests }).
 
--record(peer_status, { peer,
-                       needs_sync,
+-record(peer_status, { needs_sync,
                        acked_seqno,
                        acked_commit_seqno,
                        sent_seqno,
@@ -112,8 +111,7 @@ callback_mode() ->
 init([Parent, HistoryId, Term]) ->
     chronicle_peers:monitor(),
 
-    PeerStatuses = ets:new(peer_statuses,
-                           [protected, set, {keypos, #peer_status.peer}]),
+    PeerStatuses = ets:new(peer_statuses, [protected, set]),
     SyncRequests = ets:new(sync_requests,
                            [protected, set, {keypos, #sync_request.ref}]),
     Data = #data{ parent = Parent,
@@ -1162,7 +1160,7 @@ do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
 
 get_peer_status(Peer, #data{peer_statuses = Tab}) ->
     case ets:lookup(Tab, Peer) of
-        [#peer_status{} = PeerStatus] ->
+        [{_, #peer_status{} = PeerStatus}] ->
             {ok, PeerStatus};
         [] ->
             not_found
@@ -1170,7 +1168,7 @@ get_peer_status(Peer, #data{peer_statuses = Tab}) ->
 
 update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
-    ets:insert(Tab, Fun(PeerStatus)).
+    ets:insert(Tab, {Peer, Fun(PeerStatus)}).
 
 init_peer_status(Peer, Metadata, #data{term = OurTerm,
                                        peer_statuses = Tab}) ->
@@ -1209,13 +1207,12 @@ init_peer_status(Peer, Metadata, #data{term = OurTerm,
                 {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
         end,
 
-    true = ets:insert_new(Tab,
-                          #peer_status{peer = Peer,
-                                       needs_sync = NeedsSync,
-                                       acked_seqno = HighSeqno,
-                                       sent_seqno = HighSeqno,
-                                       acked_commit_seqno = CommittedSeqno,
-                                       sent_commit_seqno = CommittedSeqno}).
+    PeerStatus = #peer_status{needs_sync = NeedsSync,
+                              acked_seqno = HighSeqno,
+                              sent_seqno = HighSeqno,
+                              acked_commit_seqno = CommittedSeqno,
+                              sent_commit_seqno = CommittedSeqno},
+    true = ets:insert_new(Tab, {Peer, PeerStatus}).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
