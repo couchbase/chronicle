@@ -46,6 +46,23 @@ This will "provision" node 0, that is, turns node 0 from an uninitialized node
 to an initialized one node cluster running chronicle. One replicated state
 machine is provisioned with name `kv`. 
 
+## Check the configuration
+
+Run: 
+
+`curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/info`
+
+You should see something like:
+
+```
+HTTP/1.1 200 OK
+content-length: 60
+content-type: application/json
+date: Fri, 25 Sep 2020 05:41:28 GMT
+server: Cowboy
+{"voters":["chronicle_0@127.0.0.1"]}.
+```
+
 ## Add a key-value pair
 
 Run:
@@ -91,8 +108,19 @@ To add two, run:
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/addnode 
          -d '["chronicle_1@127.0.0.1", "chronicle_2@127.0.0.1"]'`
 
-Once the nodes are added you can verify that the new nodes also return the value
-associated with the key. Run:
+Check the configuration from the newly added node:
+
+```
+$ curl -i -H "Content-Type: application/json" localhost:8081/config/info
+HTTP/1.1 200 OK
+content-length: 60
+content-type: application/json
+date: Fri, 25 Sep 2020 05:41:28 GMT
+server: Cowboy
+{"voters":["chronicle_0@127.0.0.1","chronicle_1@127.0.0.1"]}.
+```
+
+Verify that the new nodes also return the value associated with the key. Run:
 
 
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8081/kv/key`
@@ -114,3 +142,9 @@ To remove a node, run:
 
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/removenode 
          -d '"chronicle_0@127.0.0.1"'`
+
+## Delete a key
+
+Run: 
+
+`curl -i -H "Content-Type: application/json" 127.0.0.1:8081/kv/key -X DELETE`
