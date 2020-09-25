@@ -61,10 +61,10 @@ open() ->
     try
         case Persist of
             true ->
-                Dir = chronicle_env:data_dir(),
-                maybe_complete_wipe(Dir),
-                ensure_dirs(Dir),
-                open_logs(Dir, Storage);
+                DataDir = chronicle_env:data_dir(),
+                maybe_complete_wipe(DataDir),
+                ensure_dirs(DataDir),
+                open_logs(DataDir, Storage);
             false ->
                 Storage
         end
@@ -74,9 +74,9 @@ open() ->
             erlang:raise(T, E, Stack)
     end.
 
-open_logs(Dir, Storage) ->
+open_logs(DataDir, Storage) ->
     {Sealed, Current} =
-        case find_logs(Dir) of
+        case find_logs(DataDir) of
             [] ->
                 {[], 0};
             Logs ->
@@ -90,7 +90,7 @@ open_logs(Dir, Storage) ->
     SealedState =
         lists:foldl(
           fun (LogIndex, Acc) ->
-                  LogPath = log_path(Dir, LogIndex),
+                  LogPath = log_path(DataDir, LogIndex),
                   HandleEntryFun = make_handle_log_entry_fun(LogPath, Storage),
 
                   case chronicle_log:read_log(LogPath, HandleEntryFun, Acc) of
@@ -102,7 +102,7 @@ open_logs(Dir, Storage) ->
                   end
           end, InitState, Sealed),
 
-    CurrentLogPath = log_path(Dir, Current),
+    CurrentLogPath = log_path(DataDir, Current),
     case chronicle_log:open(CurrentLogPath,
                             make_handle_log_entry_fun(CurrentLogPath, Storage),
                             SealedState) of
@@ -136,28 +136,28 @@ set_committed_seqno(Seqno, #storage{
 
     Storage#storage{committed_seqno = Seqno}.
 
-ensure_dirs(Dir) ->
-    ok = chronicle_utils:mkdir_p(logs_dir(Dir)),
-    ok = chronicle_utils:mkdir_p(snapshots_dir(Dir)).
+ensure_dirs(DataDir) ->
+    ok = chronicle_utils:mkdir_p(logs_dir(DataDir)),
+    ok = chronicle_utils:mkdir_p(snapshots_dir(DataDir)).
 
-chronicle_dir(Dir) ->
-    filename:join(Dir, "chronicle").
+chronicle_dir(DataDir) ->
+    filename:join(DataDir, "chronicle").
 
-logs_dir(Dir) ->
-    filename:join(chronicle_dir(Dir), "logs").
+logs_dir(DataDir) ->
+    filename:join(chronicle_dir(DataDir), "logs").
 
-snapshots_dir(Dir) ->
-    filename:join(chronicle_dir(Dir), "snapshots").
+snapshots_dir(DataDir) ->
+    filename:join(chronicle_dir(DataDir), "snapshots").
 
 wipe() ->
     case chronicle_env:persist() of
         true ->
-            Dir = chronicle_env:data_dir(),
-            ChronicleDir = chronicle_dir(Dir),
+            DataDir = chronicle_env:data_dir(),
+            ChronicleDir = chronicle_dir(DataDir),
             case file_exists(ChronicleDir, directory) of
                 true ->
-                    ok = chronicle_utils:create_marker(wipe_marker(Dir)),
-                    complete_wipe(Dir);
+                    ok = chronicle_utils:create_marker(wipe_marker(DataDir)),
+                    complete_wipe(DataDir);
                 false ->
                     ok
             end;
@@ -165,27 +165,27 @@ wipe() ->
             ok
     end.
 
-complete_wipe(Dir) ->
-    case chronicle_utils:delete_recursive(chronicle_dir(Dir)) of
+complete_wipe(DataDir) ->
+    case chronicle_utils:delete_recursive(chronicle_dir(DataDir)) of
         ok ->
-            sync_dir(Dir),
-            ok = chronicle_utils:delete_marker(wipe_marker(Dir));
+            sync_dir(DataDir),
+            ok = chronicle_utils:delete_marker(wipe_marker(DataDir));
         {error, Error} ->
             exit({wipe_failed, Error})
     end.
 
-maybe_complete_wipe(Dir) ->
-    Marker = wipe_marker(Dir),
+maybe_complete_wipe(DataDir) ->
+    Marker = wipe_marker(DataDir),
     case file_exists(Marker, regular) of
         true ->
             ?INFO("Found wipe marker file ~p. Completing wipe.", [Marker]),
-            complete_wipe(Dir);
+            complete_wipe(DataDir);
         false ->
             ok
     end.
 
-wipe_marker(Dir) ->
-    filename:join(Dir, "chronicle.wipe").
+wipe_marker(DataDir) ->
+    filename:join(DataDir, "chronicle.wipe").
 
 make_handle_log_entry_fun(LogPath, Storage) ->
     fun (Entry, State) ->
