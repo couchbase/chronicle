@@ -10,6 +10,17 @@ You build the example as follows:
 
 `rebar3 as example compile`
 
+There are instructions to get rebar3 on your system at: https://github.com/erlang/rebar3.
+Given that you'll need Erlang on your system to run chronicle, the easiest
+thing to do is probably to build it and install it locally via:
+
+```
+$ git clone https://github.com/erlang/rebar3.git
+$ cd rebar3
+$ ./bootstrap
+$ rebar3 local install
+```
+
 ## Start a cluster of example nodes
 
 Run:
@@ -102,6 +113,4 @@ server: Cowboy
 To remove a node, run:
 
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/removenode 
-         -d '"chronicle_0@127.0.0.1"'
-         
-`
+         -d '"chronicle_0@127.0.0.1"'`
