@@ -3,6 +3,7 @@ import argparse
 import atexit
 import os
 from os import path
+import glob
 import subprocess
 import time
 
@@ -14,12 +15,7 @@ def mkdir(path):
     os.makedirs(path, exist_ok=True)
 
 def get_ebin_path(profile):
-    profile_args = []
-    if profile != 'default':
-        profile_args = ['as', profile]
-    paths = subprocess.run(['rebar3'] + profile_args + ['path'],
-                           check=True, capture_output=True).stdout.decode()
-    return paths.split(' ')
+    return glob.glob("_build/{0}/lib/*/ebin".format(profile))
 
 def start_node(i, hostname, ebin_path, data_dir, profile):
     name='chronicle_{0}@{1}'.format(i, hostname)
