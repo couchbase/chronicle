@@ -1,8 +1,8 @@
 # Example
 
-The chronicle library has very few dependencies, which is good for reuse but 
-can mean it's hard to get started with. This example allows you to start a 
-REST API server on a collection of nodes that drives a chronicle process. 
+The chronicle library has very few dependencies, which is good for reuse but
+can mean it's hard to get started with. This example allows you to start a
+REST API server on a collection of nodes that drives a chronicle process.
 
 ## Build
 
@@ -26,11 +26,11 @@ $ rebar3 local install
 Run:
 
 `start_cluster --profile example --num-nodes N --hostname 127.0.0.1`
- 
+
 This will start a cluster of N example nodes listening on the loopback
 interface. The `--profile example` argument instructs the script to start
-the example server - the script can also be used to nodes running only 
-chronicle. 
+the example server - the script can also be used to nodes running only
+chronicle.
 
 The i-th node in the cluster is:
 - named `chronicle_i@127.0.0.1`
@@ -44,11 +44,11 @@ Run:
 
 This will "provision" node 0, that is, turns node 0 from an uninitialized node
 to an initialized one node cluster running chronicle. One replicated state
-machine is provisioned with name `kv`. 
+machine is provisioned with name `kv`.
 
 ## Check the configuration
 
-Run: 
+Run:
 
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/info`
 
@@ -94,7 +94,7 @@ Run:
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key -X POST -d '{"value": 1}'`
 
 PUTs are used to add key-value pairs; POSTs are used to update the value. Note
-that the value can be set to arbitrary JSON. 
+that the value can be set to arbitrary JSON.
 
 
 ## Add nodes
@@ -105,7 +105,7 @@ To add one node, run:
 
 To add two, run:
 
-`curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/addnode 
+`curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/addnode
          -d '["chronicle_1@127.0.0.1", "chronicle_2@127.0.0.1"]'`
 
 Check the configuration from the newly added node:
@@ -140,11 +140,11 @@ server: Cowboy
 
 To remove a node, run:
 
-`curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/removenode 
+`curl -i -H "Content-Type: application/json" 127.0.0.1:8080/config/removenode
          -d '"chronicle_0@127.0.0.1"'`
 
 ## Delete a key
 
-Run: 
+Run:
 
 `curl -i -H "Content-Type: application/json" 127.0.0.1:8081/kv/key -X DELETE`
