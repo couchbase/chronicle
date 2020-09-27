@@ -29,4 +29,3 @@ start_rest_server(Port) ->
 
 stop() ->
     ok = cowboy:stop_listener(http).
-
