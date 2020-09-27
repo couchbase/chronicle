@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import atexit
+import glob
 import os
 from os import path
-import glob
 import subprocess
 import time
 
