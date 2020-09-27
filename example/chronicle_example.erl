@@ -15,22 +15,23 @@
 %%
 -module(chronicle_example).
 
--include("chronicle.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([start/1]).
 
 start([IndexStr]) ->
     net_kernel:start([node(), longnames]),
+    logger:set_primary_config(level, debug),
     Index = list_to_integer(IndexStr),
-    ?DEBUG("starting chronicle"),
+    ?LOG_DEBUG("starting chronicle"),
     ok = application:start(chronicle),
     ok = application:start(asn1),
     ok = application:start(crypto),
     ok = application:start(public_key),
     ok = application:start(ssl),
     ok = application:start(ranch),
-    ?DEBUG("starting cowboy rest server: ~p", [Index]),
+    ?LOG_DEBUG("starting cowboy rest server: ~p", [Index]),
     rest_app:start_rest_server(8080 + Index),
-    ?DEBUG("cookie: ~p", [erlang:get_cookie()]),
-    ?DEBUG("node: ~p, nodes: ~p", [node(), nodes()]),
+    ?LOG_DEBUG("cookie: ~p", [erlang:get_cookie()]),
+    ?LOG_DEBUG("node: ~p, nodes: ~p", [node(), nodes()]),
     ok.

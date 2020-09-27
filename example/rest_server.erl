@@ -16,7 +16,7 @@
 
 -module(rest_server).
 
--include("chronicle.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([init/2, content_types_provided/2, json_api/2, get_options/0,
          content_types_accepted/2, allowed_methods/2, resource_exists/2,
@@ -46,7 +46,7 @@ init(Req, State) ->
     case State of
         #state{domain=kv} ->
             Method = method_to_atom(cowboy_req:method(Req)),
-            ?DEBUG("Method: ~p", [Method]),
+            ?LOG_DEBUG("Method: ~p", [Method]),
             {cowboy_rest, Req, State#state{op = Method}};
         _ ->
             {ok, config_api(Req, State), State}
@@ -69,7 +69,7 @@ content_types_accepted(Req, State) ->
 resource_exists(Req, State) ->
     case get_value(Req) of
         {ok, Value} ->
-            ?DEBUG("Resource exists: ~p", [Value]),
+            ?LOG_DEBUG("Resource exists: ~p", [Value]),
             {true, Req, State};
         _ ->
             {false, Req, State}
@@ -77,7 +77,7 @@ resource_exists(Req, State) ->
 
 delete_resource(Req, State) ->
     Key = cowboy_req:binding(key, Req),
-    ?DEBUG("delete_resource called for key: ~p", [Key]),
+    ?LOG_DEBUG("delete_resource called for key: ~p", [Key]),
     Result = delete_value(Req, any),
     {Result, Req, State}.
 
@@ -87,7 +87,7 @@ allow_missing_post(Req, State) ->
 json_api(Req, #state{domain=kv, op=get}=State) ->
     case get_value(Req) of
         {ok, {Val, {HistoryId, Seqno} = Rev}} ->
-            ?DEBUG("Rev: ~p", [Rev]),
+            ?LOG_DEBUG("Rev: ~p", [Rev]),
             R = {[{<<"rev">>,
                    {[{<<"history_id">>, HistoryId},
                      {<<"seqno">>, Seqno}]}
@@ -113,7 +113,7 @@ config_api(Req, #state{domain=config, op=info}) ->
                       }, jiffy:encode(R), Req);
 config_api(Req, #state{domain=config, op=addnode}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
-    ?DEBUG("read content: ~p", [Body]),
+    ?LOG_DEBUG("read content: ~p", [Body]),
     {Result, Message} = case parse_nodes(Body) of
                             Nodes when is_list(Nodes) ->
                                 add_nodes(Nodes);
@@ -126,7 +126,7 @@ config_api(Req, #state{domain=config, op=addnode}) ->
                       }, Message, Req1);
 config_api(Req, #state{domain=config, op=removenode}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
-    ?DEBUG("read content: ~p", [Body]),
+    ?LOG_DEBUG("read content: ~p", [Body]),
     {Result, Message} = case parse_nodes(Body) of
                             Nodes when is_list(Nodes) ->
                                 remove_nodes(Nodes);
@@ -170,7 +170,7 @@ get_value(Req) ->
     end.
 
 do_get_value(Key) ->
-    ?DEBUG("key: ~p", [Key]),
+    ?LOG_DEBUG("key: ~p", [Key]),
     Result = chronicle_kv:get(kv, Key),
     case Result of
         {ok, Value} ->
@@ -182,22 +182,22 @@ do_get_value(Key) ->
 set_value(Req, ExpectedRevision) ->
     BinKey = cowboy_req:binding(key, Req),
     Key = binary_to_list(BinKey),
-    ?DEBUG("key: ~p", [Key]),
+    ?LOG_DEBUG("key: ~p", [Key]),
     {ok, Body, Req1} = cowboy_req:read_body(Req),
-    ?DEBUG("read content: ~p", [Body]),
+    ?LOG_DEBUG("read content: ~p", [Body]),
     try jiffy:decode(Body) of
         _ ->
             chronicle_kv:set(kv, Key, Body, ExpectedRevision),
             {true, Req1}
     catch _:_ ->
-            ?DEBUG("body not json: ~p", [Body]),
+            ?LOG_DEBUG("body not json: ~p", [Body]),
             {false, Req}
     end.
 
 delete_value(Req, ExpectedRevision) ->
     BinKey = cowboy_req:binding(key, Req),
     Key = binary_to_list(BinKey),
-    ?DEBUG("deleting key: ~p", [Key]),
+    ?LOG_DEBUG("deleting key: ~p", [Key]),
     chronicle_kv:delete(kv, Key, ExpectedRevision),
     true.
 
@@ -222,9 +222,9 @@ add_nodes(Nodes) ->
         _ ->
             case [N || N <- ToAdd, net_kernel:connect_node(N) =:= false] of
                 [] ->
-                    ?DEBUG("nodes ~p", [nodes()]),
+                    ?LOG_DEBUG("nodes ~p", [nodes()]),
                     Result = chronicle:add_voters(ToAdd),
-                    ?DEBUG("Result of voter addition: ~p", [Result]),
+                    ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
                     Message = case Result of
                                   ok ->
                                       <<"nodes added">>;
@@ -233,7 +233,7 @@ add_nodes(Nodes) ->
                               end,
                     {Result, Message};
                 CantConnect ->
-                    ?DEBUG("Can't connect to nodes: ~p", [CantConnect]),
+                    ?LOG_DEBUG("Can't connect to nodes: ~p", [CantConnect]),
                     {false, <<"can't connect to some nodes to be added">>}
             end
     end.
@@ -244,7 +244,7 @@ remove_nodes(Nodes) ->
     case ToRemove of
         Nodes ->
             Result = chronicle:remove_voters(Nodes),
-            ?DEBUG("Result of voter addition: ~p", [Result]),
+            ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
             Message = case Result of
                           ok ->
                               <<"nodes removed">>;
