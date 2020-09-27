@@ -20,7 +20,6 @@
 -export([start/1]).
 
 start([IndexStr]) ->
-    net_kernel:start([node(), longnames]),
     logger:set_primary_config(level, debug),
     Index = list_to_integer(IndexStr),
     ?LOG_DEBUG("starting chronicle"),
