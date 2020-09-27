@@ -12,6 +12,15 @@ DEFAULT_DATA_DIR = path.join(ROOT_DIR, 'cluster')
 DEFAULT_PROFILE = 'default'
 DEFAULT_HOSTNAME = 'localhost@localdomain'
 
+PROFILE_DEFAULT = 'default'
+PROFILE_EXAMPLES = 'examples'
+
+DEFAULT_APP = 'chronicle'
+APPS = {DEFAULT_APP: PROFILE_DEFAULT}
+
+for example_app in glob.glob(path.join(ROOT_DIR, "examples/*")):
+    APPS[path.basename(example_app)] = PROFILE_EXAMPLES
+
 def mkdir(path):
     os.makedirs(path, exist_ok=True)
 
@@ -19,7 +28,7 @@ def get_ebin_path(profile):
     return glob.glob(path.join(ROOT_DIR,
                                "_build/{0}/lib/*/ebin").format(profile))
 
-def start_node(i, hostname, ebin_path, data_dir, profile):
+def start_node(i, hostname, ebin_path, data_dir, app):
     name='chronicle_{0}@{1}'.format(i, hostname)
     node_dir = path.join(data_dir, name)
     mkdir(node_dir)
@@ -36,7 +45,9 @@ def start_node(i, hostname, ebin_path, data_dir, profile):
             '-name', name,
             '-noinput',
             '-chronicle', 'data_dir', '"{}"'.format(node_data_dir),
-            '-run', 'chronicle_{0}'.format(profile), 'start', str(i)]
+            '-{}'.format(app), 'instance', '{}'.format(i),
+            '-eval',
+            '{{ok, _}} = application:ensure_all_started({}).'.format(app)]
     process = subprocess.Popen(args, stdin=None,
                                stdout=log_file, stderr=log_file)
     atexit.register(lambda: kill_node(process))
@@ -50,15 +61,15 @@ def kill_node(process):
         pass
 
 def start_cluster(args):
-    profile = args.profile
-    ebin_path = get_ebin_path(profile)
+    app = args.app
+    ebin_path = get_ebin_path(APPS[app])
     hostname = args.hostname
     data_dir = args.data_dir
     mkdir(data_dir)
 
     nodes = []
     for i in range(args.num_nodes):
-        nodes.append(start_node(i, hostname, ebin_path, data_dir, profile))
+        nodes.append(start_node(i, hostname, ebin_path, data_dir, app))
 
     return nodes
 
@@ -75,7 +86,8 @@ def main():
     parser.add_argument('--num-nodes', type=int,
                         dest='num_nodes', required=True)
     parser.add_argument('--data-dir', dest='data_dir', default=DEFAULT_DATA_DIR)
-    parser.add_argument('--profile', dest='profile', default=DEFAULT_PROFILE)
+    parser.add_argument('--app', dest='app',
+                        default=DEFAULT_APP, choices=APPS.keys())
     parser.add_argument('--hostname', dest='hostname', default=DEFAULT_HOSTNAME)
     args = parser.parse_args()
 

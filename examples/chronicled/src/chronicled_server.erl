@@ -13,16 +13,33 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
-
--module(rest_server).
+-module(chronicled_server).
 
 -include_lib("kernel/include/logger.hrl").
 
--export([init/2, content_types_provided/2, json_api/2, get_options/0,
+-export([start/0, stop/0]).
+-export([init/2, content_types_provided/2, json_api/2,
          content_types_accepted/2, allowed_methods/2, resource_exists/2,
          allow_missing_post/2, delete_resource/2]).
 
 -record(state, {domain, op}).
+
+start() ->
+    Port = get_port(),
+    Opts = get_options(),
+
+    ?LOG_DEBUG("starting cowboy rest server: ~p", [Port]),
+    ?LOG_DEBUG("cookie: ~p", [erlang:get_cookie()]),
+    ?LOG_DEBUG("node: ~p, nodes: ~p", [node(), nodes()]),
+
+    {ok, _} = cowboy:start_clear(http, [{port, Port}], Opts),
+    ignore.
+
+stop() ->
+    ok = cowboy:stop_listener(http).
+
+get_port() ->
+    8080 + application:get_env(chronicled, instance, 0).
 
 get_options() ->
     Dispatch =

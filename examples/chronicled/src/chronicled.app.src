@@ -1,0 +1,17 @@
+{application, chronicled,
+ [{description, "An example on how to use chronicle."},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {chronicled_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    chronicle,
+    ranch
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

@@ -13,10 +13,17 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
--module(chronicle_default).
+-module(chronicled_app).
 
--export([start/1]).
+-behaviour(application).
 
-start(_Args) ->
-    ok = application:start(chronicle).
+-export([start/2, stop/1]).
 
+start(_StartType, _StartArgs) ->
+    logger:set_primary_config(level, debug),
+    chronicled_sup:start_link().
+
+stop(_State) ->
+    ok.
+
+%% internal functions

@@ -13,19 +13,23 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
+-module(chronicled_sup).
 
-%% @private
--module(rest_app).
+-behaviour(supervisor).
 
-%% API.
--export([start_rest_server/1]).
--export([stop/0]).
+-export([start_link/0]).
+-export([init/1]).
 
-%% API.
+-define(SERVER, ?MODULE).
 
-start_rest_server(Port) ->
-    Opts = rest_server:get_options(),
-    {ok, _} = cowboy:start_clear(http, [{port, Port}], Opts).
+start_link() ->
+    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-stop() ->
-    ok = cowboy:stop_listener(http).
+init([]) ->
+    SupFlags = #{strategy => one_for_all,
+                 intensity => 0,
+                 period => 1},
+    ChildSpecs = [#{id => chronicled_server,
+                    start => {chronicled_server, start, []},
+                    type => worker}],
+    {ok, {SupFlags, ChildSpecs}}.

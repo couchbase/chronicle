@@ -6,9 +6,9 @@ REST API server on a collection of nodes that drives a chronicle process.
 
 ## Build
 
-You build the example as follows:
+You build all examples as follows (at the top-level directory):
 
-`rebar3 as example compile`
+`rebar3 as examples compile`
 
 There are instructions to get rebar3 on your system at: https://github.com/erlang/rebar3.
 Given that you'll need Erlang on your system to run chronicle, the easiest
@@ -25,12 +25,12 @@ $ rebar3 local install
 
 Run:
 
-`start_cluster --profile example --num-nodes N --hostname 127.0.0.1`
+`start_cluster --app chronicled --num-nodes N --hostname 127.0.0.1`
 
 This will start a cluster of N example nodes listening on the loopback
-interface. The `--profile example` argument instructs the script to start
-the example server - the script can also be used to nodes running only
-chronicle.
+interface. The `--app chronicled` argument instructs the script to start the
+example application named `chronicled` - the script can also be used to nodes
+running only chronicle.
 
 The i-th node in the cluster is:
 - named `chronicle_i@127.0.0.1`
