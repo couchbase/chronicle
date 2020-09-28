@@ -287,7 +287,7 @@ get_high_seqno(Storage) ->
 get_config(Storage) ->
     Storage#storage.config.
 
-store_meta(Storage, Updates) ->
+store_meta(Updates, Storage) ->
     case store_meta_prepare(Storage, Updates) of
         {ok, DedupedUpdates, NewStorage} ->
             log_append(Storage, [{meta, DedupedUpdates}]),
@@ -322,8 +322,8 @@ truncate(Seqno, #storage{high_seqno = HighSeqno,
     NewStorage = config_index_truncate(Seqno, Storage),
     NewStorage#storage{high_seqno = Seqno}.
 
-append(#storage{high_seqno = HighSeqno} = Storage,
-       StartSeqno, EndSeqno, Entries, Opts) ->
+append(StartSeqno, EndSeqno, Entries, Opts,
+       #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
     {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
     log_append(NewStorage0, DiskEntries),

@@ -1041,7 +1041,7 @@ storage_open() ->
                              pending_branch => undefined},
                 ?INFO("Found empty storage. "
                       "Seeding it with default metadata:~n~p", [SeedMeta]),
-                chronicle_storage:store_meta(Storage0, SeedMeta)
+                chronicle_storage:store_meta(SeedMeta, Storage0)
         end,
 
     %% Sync storage to make sure that whatever state is exposed to the outside
@@ -1057,13 +1057,14 @@ propagate_committed_seqno(Storage) ->
 
 append_entry(Entry, Meta, #state{storage = Storage}) ->
     Seqno = Entry#log_entry.seqno,
-    NewStorage = chronicle_storage:append(Storage, Seqno, Seqno,
-                                          [Entry], #{meta => Meta}),
+    NewStorage = chronicle_storage:append(Seqno, Seqno,
+                                          [Entry], #{meta => Meta},
+                                          Storage),
     chronicle_storage:sync(NewStorage),
     chronicle_storage:publish(propagate_committed_seqno(NewStorage)).
 
 store_meta(Meta, #state{storage = Storage}) ->
-    NewStorage = chronicle_storage:store_meta(Storage, Meta),
+    NewStorage = chronicle_storage:store_meta(Meta, Storage),
     chronicle_storage:sync(NewStorage),
     chronicle_storage:publish(propagate_committed_seqno(NewStorage)).
 
@@ -1087,10 +1088,10 @@ append_entries(StartSeqno, EndSeqno, Entries,
                 Storage
         end,
 
-    NewStorage1 = chronicle_storage:store_meta(NewStorage0, PreMetadata),
-    NewStorage2 = chronicle_storage:append(NewStorage1, StartSeqno,
-                                           EndSeqno, Entries, #{}),
-    NewStorage3 = chronicle_storage:store_meta(NewStorage2, PostMetadata),
+    NewStorage1 = chronicle_storage:store_meta(PreMetadata, NewStorage0),
+    NewStorage2 = chronicle_storage:append(StartSeqno, EndSeqno,
+                                           Entries, #{}, NewStorage1),
+    NewStorage3 = chronicle_storage:store_meta(PostMetadata, NewStorage2),
     chronicle_storage:sync(NewStorage3),
     chronicle_storage:publish(propagate_committed_seqno(NewStorage3)).
 
