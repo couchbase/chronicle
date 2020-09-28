@@ -57,7 +57,7 @@ open() ->
                        log_tab = ets:whereis(?MEM_LOG_TAB),
                        config_index_tab = ets:whereis(?CONFIG_INDEX),
                        persist = Persist,
-                       low_seqno = ?NO_SEQNO,
+                       low_seqno = ?NO_SEQNO + 1,
                        high_seqno = ?NO_SEQNO,
                        committed_seqno = ?NO_SEQNO,
                        meta = #{}},
@@ -89,7 +89,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
 
     InitState = #{meta => #{},
                   config => undefined,
-                  low_seqno => ?NO_SEQNO,
+                  low_seqno => ?NO_SEQNO + 1,
                   high_seqno => ?NO_SEQNO,
                   snapshots => []},
     SealedState =
@@ -138,7 +138,7 @@ set_committed_seqno(Seqno, #storage{
                               high_seqno = HighSeqno,
                               committed_seqno = CommittedSeqno} = Storage) ->
     true = (Seqno >= CommittedSeqno),
-    true = (Seqno >= LowSeqno),
+    true = (Seqno >= LowSeqno - 1),
     true = (Seqno =< HighSeqno),
 
     Storage#storage{committed_seqno = Seqno}.
@@ -215,18 +215,8 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                                      maps:merge(CurrentMeta, KVs)
                              end, State);
         {truncate, Seqno} ->
-            LowSeqno = maps:get(low_seqno, State),
-
-            NewLowSeqno =
-                case LowSeqno > Seqno of
-                    true ->
-                        Seqno;
-                    false ->
-                        LowSeqno
-                end,
             NewConfig = truncate_table(Storage#storage.config_index_tab, Seqno),
             State#{config => NewConfig,
-                   low_seqno => NewLowSeqno,
                    high_seqno => Seqno};
         {snapshot, Seqno, Config} ->
             maps:update_with(snapshots,
@@ -327,7 +317,7 @@ append(StartSeqno, EndSeqno, Entries, Opts,
     true = (StartSeqno =:= HighSeqno + 1),
     {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
     log_append(DiskEntries, NewStorage0),
-    NewStorage1 = mem_log_append(StartSeqno, EndSeqno, Entries, NewStorage0),
+    NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
     config_index_append(Entries, NewStorage1).
 
 append_handle_meta(Storage, Entries, Opts) ->
@@ -439,18 +429,10 @@ truncate_table_loop(Table, Last, Seqno) ->
             end
     end.
 
-mem_log_append(StartSeqno, EndSeqno, Entries,
-               #storage{log_tab = LogTab,
-                        low_seqno = LowSeqno} = Storage) ->
+mem_log_append(EndSeqno, Entries,
+               #storage{log_tab = LogTab} = Storage) ->
     ets:insert(LogTab, Entries),
-    NewLowSeqno =
-        case LowSeqno =:= ?NO_SEQNO of
-            true ->
-                StartSeqno;
-            false ->
-                LowSeqno
-        end,
-    Storage#storage{low_seqno = NewLowSeqno, high_seqno = EndSeqno}.
+    Storage#storage{high_seqno = EndSeqno}.
 
 file_exists(Path, Type) ->
     case chronicle_utils:check_file_exists(Path, Type) of
@@ -602,7 +584,7 @@ validate_state(#storage{low_seqno = LowSeqno,
     LastSnapshotSeqno =
         case ValidSnapshots of
             [] ->
-                ?NO_SEQNO;
+                ?NO_SEQNO + 1;
             [{Seqno, _} | _] ->
                 Seqno
         end,
