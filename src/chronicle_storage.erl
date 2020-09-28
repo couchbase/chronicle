@@ -368,8 +368,8 @@ close(#storage{current_log = Log,
             ok = chronicle_log:close(Log)
     end.
 
-find_logs(Dir) ->
-    LogsDir = logs_dir(Dir),
+find_logs(DataDir) ->
+    LogsDir = logs_dir(DataDir),
     Candidates = filelib:wildcard(filename:join(LogsDir, "*.log")),
     Logs = lists:filtermap(
              fun (Candidate) ->
@@ -388,8 +388,8 @@ find_logs(Dir) ->
 
     lists:sort(Logs).
 
-log_path(Dir, LogIndex) ->
-    filename:join(logs_dir(Dir), integer_to_list(LogIndex) ++ ".log").
+log_path(DataDir, LogIndex) ->
+    filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
 log_append(#storage{current_log = Log, persist = true}, Records) ->
     case chronicle_log:append(Log, Records) of
