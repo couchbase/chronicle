@@ -36,6 +36,7 @@
                    snapshots,
 
                    persist,
+                   data_dir,
 
                    log_info_tab,
                    log_tab,
@@ -67,7 +68,7 @@ open() ->
                 DataDir = chronicle_env:data_dir(),
                 maybe_complete_wipe(DataDir),
                 ensure_dirs(DataDir),
-                validate_state(DataDir, open_logs(DataDir, Storage));
+                validate_state(open_logs(Storage#storage{data_dir = DataDir}));
             false ->
                 Storage
         end
@@ -77,7 +78,7 @@ open() ->
             erlang:raise(T, E, Stack)
     end.
 
-open_logs(DataDir, Storage) ->
+open_logs(#storage{data_dir = DataDir} = Storage) ->
     {Sealed, Current} =
         case find_logs(DataDir) of
             [] ->
@@ -576,8 +577,9 @@ validate_snapshot(DataDir, Seqno, Config) ->
             {error, Errors}
     end.
 
-validate_state(DataDir, #storage{low_seqno = LowSeqno,
-                                 snapshots = Snapshots} = Storage) ->
+validate_state(#storage{low_seqno = LowSeqno,
+                        snapshots = Snapshots,
+                        data_dir = DataDir} = Storage) ->
     {ValidSnapshots0, InvalidSnapshots} =
         lists:foldl(
           fun ({Seqno, Config} = Snapshot, {AccValid, AccInvalid}) ->
