@@ -288,15 +288,15 @@ get_config(Storage) ->
     Storage#storage.config.
 
 store_meta(Updates, Storage) ->
-    case store_meta_prepare(Storage, Updates) of
+    case store_meta_prepare(Updates, Storage) of
         {ok, DedupedUpdates, NewStorage} ->
-            log_append(Storage, [{meta, DedupedUpdates}]),
+            log_append([{meta, DedupedUpdates}], Storage),
             NewStorage;
         not_needed ->
             Storage
     end.
 
-store_meta_prepare(#storage{meta = Meta} = Storage, Updates) ->
+store_meta_prepare(Updates, #storage{meta = Meta} = Storage) ->
     Deduped = maps:filter(
                 fun (Key, Value) ->
                         case maps:find(Key, Meta) of
@@ -318,7 +318,7 @@ truncate(Seqno, #storage{high_seqno = HighSeqno,
     true = (Seqno >= CommittedSeqno),
     true = (Seqno =< HighSeqno),
 
-    log_append(Storage, [{truncate, Seqno}]),
+    log_append([{truncate, Seqno}], Storage),
     NewStorage = config_index_truncate(Seqno, Storage),
     NewStorage#storage{high_seqno = Seqno}.
 
@@ -326,14 +326,14 @@ append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
     {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
-    log_append(NewStorage0, DiskEntries),
-    NewStorage1 = mem_log_append(NewStorage0, StartSeqno, EndSeqno, Entries),
-    config_index_append(NewStorage1, Entries).
+    log_append(DiskEntries, NewStorage0),
+    NewStorage1 = mem_log_append(StartSeqno, EndSeqno, Entries, NewStorage0),
+    config_index_append(Entries, NewStorage1).
 
 append_handle_meta(Storage, Entries, Opts) ->
     case maps:find(meta, Opts) of
         {ok, Meta} ->
-            case store_meta_prepare(Storage, Meta) of
+            case store_meta_prepare(Meta, Storage) of
                 {ok, DedupedMeta, NewStorage} ->
                     NewEntries = [{atomic, [{meta, DedupedMeta} | Entries]}],
                     {NewEntries, NewStorage};
@@ -392,23 +392,22 @@ find_logs(DataDir) ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(#storage{current_log = Log, persist = true}, Records) ->
+log_append(Records, #storage{current_log = Log, persist = true}) ->
     case chronicle_log:append(Log, Records) of
         ok ->
             ok;
         {error, Error} ->
             exit({append_failed, Error})
     end;
-log_append(#storage{persist = false}, _Records) ->
+log_append(_Records, #storage{persist = false}) ->
     ok.
 
 config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
     NewConfig = truncate_table(Tab, Seqno),
     Storage#storage{config = NewConfig}.
 
-config_index_append(#storage{config_index_tab = ConfigIndex,
-                             config = Config} = Storage,
-                    Entries) ->
+config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
+                                      config = Config} = Storage) ->
     ConfigEntries = lists:filter(fun is_config_entry/1, Entries),
     NewConfig =
         case ConfigEntries of
@@ -440,9 +439,9 @@ truncate_table_loop(Table, Last, Seqno) ->
             end
     end.
 
-mem_log_append(#storage{log_tab = LogTab,
-                        low_seqno = LowSeqno} = Storage,
-               StartSeqno, EndSeqno, Entries) ->
+mem_log_append(StartSeqno, EndSeqno, Entries,
+               #storage{log_tab = LogTab,
+                        low_seqno = LowSeqno} = Storage) ->
     ets:insert(LogTab, Entries),
     NewLowSeqno =
         case LowSeqno =:= ?NO_SEQNO of
@@ -502,7 +501,7 @@ get_seqno_range() ->
     {LowSeqno, HighSeqno}.
 
 record_snapshot(Storage, Seqno, Config) ->
-    log_append(Storage, [{snapshot, Seqno, Config}]),
+    log_append([{snapshot, Seqno, Config}], Storage),
     Storage.
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
