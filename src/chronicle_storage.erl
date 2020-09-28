@@ -25,12 +25,15 @@
 
 -define(RANGE_KEY, '$range').
 
+-define(READ_CHUNK_SIZE, 1024 * 1024).
+
 -record(storage, { current_log,
                    low_seqno,
                    high_seqno,
                    committed_seqno,
                    meta,
                    config,
+                   snapshots,
 
                    persist,
 
@@ -64,7 +67,7 @@ open() ->
                 DataDir = chronicle_env:data_dir(),
                 maybe_complete_wipe(DataDir),
                 ensure_dirs(DataDir),
-                open_logs(DataDir, Storage);
+                validate_state(DataDir, open_logs(DataDir, Storage));
             false ->
                 Storage
         end
@@ -86,7 +89,8 @@ open_logs(DataDir, Storage) ->
     InitState = #{meta => #{},
                   config => undefined,
                   low_seqno => ?NO_SEQNO,
-                  high_seqno => ?NO_SEQNO},
+                  high_seqno => ?NO_SEQNO,
+                  snapshots => []},
     SealedState =
         lists:foldl(
           fun (LogIndex, Acc) ->
@@ -108,12 +112,14 @@ open_logs(DataDir, Storage) ->
                             SealedState) of
         {ok, CurrentLog, FinalState} ->
             #{meta := Meta, config := Config,
-              low_seqno := LowSeqno, high_seqno := HighSeqno} = FinalState,
+              low_seqno := LowSeqno, high_seqno := HighSeqno,
+              snapshots := Snapshots} = FinalState,
             Storage#storage{current_log = CurrentLog,
                             low_seqno = LowSeqno,
                             high_seqno = HighSeqno,
                             meta = Meta,
-                            config = Config};
+                            config = Config,
+                            snapshots = Snapshots};
         {error, Error} ->
             ?ERROR("Failed to open log ~p: ~p", [CurrentLogPath, Error]),
             exit({failed_to_open_log, CurrentLogPath, Error})
@@ -148,6 +154,9 @@ logs_dir(DataDir) ->
 
 snapshots_dir(DataDir) ->
     filename:join(chronicle_dir(DataDir), "snapshots").
+
+snapshot_dir(DataDir, Seqno) ->
+    filename:join(snapshots_dir(DataDir), io_lib:format("~16.16.0b", [Seqno])).
 
 wipe() ->
     case chronicle_env:persist() of
@@ -218,6 +227,11 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
             State#{config => NewConfig,
                    low_seqno => NewLowSeqno,
                    high_seqno => Seqno};
+        {snapshot, Seqno, Config} ->
+            maps:update_with(snapshots,
+                             fun (CurrentSnapshots) ->
+                                     [{Seqno, Config} | CurrentSnapshots]
+                             end, State);
         #log_entry{seqno = Seqno} ->
             #{low_seqno := LowSeqno,
               high_seqno := PrevSeqno,
@@ -485,3 +499,120 @@ get_log_entry(Seqno, #storage{log_tab = Tab}) ->
 get_seqno_range() ->
     [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {LowSeqno, HighSeqno}.
+
+record_snapshot(Storage, Seqno, Config) ->
+    log_append(Storage, [{snapshot, Seqno, Config}]),
+    Storage.
+
+rsm_snapshot_path(SnapshotDir, RSM) ->
+    filename:join(SnapshotDir, [RSM, ".snapshot"]).
+
+save_rsm_snapshot(SnapshotDir, RSM, RSMState) ->
+    Path = rsm_snapshot_path(SnapshotDir, RSM),
+    Data = term_to_binary(RSMState, {compressed, 9}),
+    Crc = erlang:crc32(Data),
+
+    %% We don't really care about atomicity that much here. But it also
+    %% doesn't hurt.
+    chronicle_utils:atomic_write_file(
+      Path,
+      fun (File) ->
+              ok = file:write(File, <<Crc:?CRC_BITS>>),
+              ok = file:write(File, Data)
+      end).
+
+validate_rsm_snapshot(SnapshotDir, RSM) ->
+    Path = rsm_snapshot_path(SnapshotDir, RSM),
+    case file:open(Path, [read, raw, binary]) of
+        {ok, File} ->
+            case chronicle_utils:read_full(File, ?CRC_BYTES) of
+                {ok, Crc} ->
+                    validate_rsm_snapshot_loop(Path, File, Crc, 0);
+                eof ->
+                    {error, unexpected_eof};
+                {error, Error} ->
+                    exit({read_failed, Path, Error})
+            end;
+        {error, not_found} ->
+            {error, not_found};
+        {error, Error} ->
+            exit({open_failed, Path, Error})
+    end.
+
+validate_rsm_snapshot_loop(Path, File, Crc, AccCrc) ->
+    case file:read(File, ?READ_CHUNK_SIZE) of
+        {ok, Data} ->
+            validate_rsm_snapshot_loop(Path, File, Crc,
+                                       erlang:crc32(AccCrc, Data));
+        eof ->
+            case Crc =:= AccCrc of
+                true ->
+                    ok;
+                false ->
+                    {error, crc_mismatch}
+            end;
+        {error, Error} ->
+            exit({read_failed, Path, Error})
+    end.
+
+validate_snapshot(DataDir, Seqno, Config) ->
+    SnapshotDir = snapshot_dir(DataDir, Seqno),
+    RSMs = chronicle_utils:config_rsms(Config#log_entry.value),
+    Errors =
+        lists:filtermap(
+          fun (RSM) ->
+                  case validate_rsm_snapshot(SnapshotDir, RSM) of
+                      ok ->
+                          false;
+                      {error, Error} ->
+                          {true, {RSM, Error}}
+                  end
+          end, RSMs),
+
+    case Errors =:= [] of
+        true ->
+            ok;
+        false ->
+            {error, Errors}
+    end.
+
+validate_state(DataDir, #storage{low_seqno = LowSeqno,
+                                 snapshots = Snapshots} = Storage) ->
+    {ValidSnapshots0, InvalidSnapshots} =
+        lists:foldl(
+          fun ({Seqno, Config} = Snapshot, {AccValid, AccInvalid}) ->
+                  case validate_snapshot(DataDir, Seqno, Config) of
+                      ok ->
+                          {[Snapshot | AccValid], AccInvalid};
+                      {error, _} = Error ->
+                          {AccValid, [{Snapshot, Error} | AccInvalid]}
+                  end
+          end, {[], []}, Snapshots),
+
+    case InvalidSnapshots =:= [] of
+        true ->
+            ok;
+        false ->
+            ?WARNING("Found some snapshots to be invalid.~n~p",
+                     [InvalidSnapshots])
+    end,
+
+    ValidSnapshots = lists:reverse(ValidSnapshots0),
+    LastSnapshotSeqno =
+        case ValidSnapshots of
+            [] ->
+                ?NO_SEQNO;
+            [{Seqno, _} | _] ->
+                Seqno
+        end,
+
+    case LastSnapshotSeqno >= LowSeqno of
+        true ->
+            ok;
+        false ->
+            ?ERROR("Last snapshot at seqno ~p is below our low seqno ~p",
+                   [LastSnapshotSeqno, LowSeqno]),
+            exit({missing_snapshot, LastSnapshotSeqno, LowSeqno})
+    end,
+
+    Storage#storage{snapshots = ValidSnapshots}.
