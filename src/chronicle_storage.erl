@@ -223,6 +223,12 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                              fun (CurrentSnapshots) ->
                                      [{Seqno, Config} | CurrentSnapshots]
                              end, State);
+        {install_snapshot, Seqno, Config, Meta} ->
+            CurrentMeta = maps:get(meta, State),
+            State#{low_seqno => Seqno + 1,
+                   high_seqno => Seqno,
+                   config => Config,
+                   meta => maps:merge(CurrentMeta, Meta)};
         #log_entry{seqno = Seqno} ->
             #{low_seqno := LowSeqno,
               high_seqno := PrevSeqno,
@@ -467,6 +473,7 @@ get_log_loop(StartSeqno, EndSeqno, Acc)
   when EndSeqno < StartSeqno ->
     Acc;
 get_log_loop(StartSeqno, EndSeqno, Acc) ->
+    %% TODO: need to handle entries being deleted underneath us
     [Entry] = ets:lookup(?MEM_LOG_TAB, EndSeqno),
     get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]).
 
@@ -482,14 +489,42 @@ get_seqno_range() ->
     [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {LowSeqno, HighSeqno}.
 
-record_snapshot(Storage, Seqno, Config) ->
+record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
+                                        snapshots = Snapshots} = Storage) ->
+    LastSnapshotSeqno = get_last_snapshot_seqno(Storage),
+    true = (Seqno > LastSnapshotSeqno),
+
+    SnapshotsDir = snapshots_dir(DataDir),
+    sync_dir(SnapshotsDir),
+
     log_append([{snapshot, Seqno, Config}], Storage),
-    Storage.
+    Storage#storage{snapshots = [{Seqno, Config} | Snapshots]}.
+
+install_snapshot(Seqno, Config, Meta,
+                 #storage{high_seqno = HighSeqno,
+                          meta = OldMeta} = Storage) ->
+    true = (Seqno > HighSeqno),
+
+    Seqno = get_last_snapshot_seqno(Storage),
+    log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
+
+    %% TODO: The log entries in the ets table need to be cleaned up as
+    %% well. Deal with this as part of compaction.
+    %% TODO: config index also needs to be reset
+    Storage#storage{meta = maps:merge(OldMeta, Meta),
+                    low_seqno = Seqno + 1,
+                    high_seqno = Seqno,
+                    config = Config}.
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
 
-save_rsm_snapshot(SnapshotDir, RSM, RSMState) ->
+save_rsm_snapshot(Seqno, RSM, RSMState,
+                  #storage{data_dir = DataDir, snapshots = Snapshots}) ->
+    %% Make sure we are not overwriting an existing snapshot.
+    false = lists:keymember(Seqno, 1, Snapshots),
+
+    SnapshotDir = snapshot_dir(DataDir, Seqno),
     Path = rsm_snapshot_path(SnapshotDir, RSM),
     Data = term_to_binary(RSMState, {compressed, 9}),
     Crc = erlang:crc32(Data),
@@ -599,3 +634,11 @@ validate_state(#storage{low_seqno = LowSeqno,
     end,
 
     Storage#storage{snapshots = ValidSnapshots}.
+
+get_last_snapshot_seqno(#storage{snapshots = Snapshots}) ->
+    case Snapshots of
+        [] ->
+            ?NO_SEQNO;
+        [{Seqno, _}] ->
+            Seqno
+    end.

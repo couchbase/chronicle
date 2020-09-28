@@ -201,6 +201,14 @@ append(Peer, Opaque, HistoryId, Term, CommittedSeqno, AtSeqno, Entries) ->
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
 
+install_snapshot(Peer, Opaque,
+                 HistoryId, Term,
+                 Seqno, ConfigEntry, RSMSnapshots) ->
+    call_async(?SERVER(Peer), Opaque,
+               {install_snapshot,
+                HistoryId, Term,
+                Seqno, ConfigEntry, RSMSnapshots}).
+
 -spec local_mark_committed(chronicle:history_id(),
                            chronicle:leader_term(),
                            chronicle:seqno()) ->
@@ -256,6 +264,11 @@ handle_call({append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
 handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
             _From, State) ->
     handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State);
+handle_call({install_snapshot,
+             HistoryId, Term, Seqno, ConfigEntry, RSMSnapshotsMeta},
+            _From, State) ->
+    handle_install_snapshot(HistoryId, Term, Seqno,
+                            ConfigEntry, RSMSnapshotsMeta, State);
 handle_call({store_branch, Branch}, _From, State) ->
     handle_store_branch(Branch, State);
 handle_call({undo_branch, BranchId}, _From, State) ->
@@ -811,6 +824,86 @@ check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
                    Error
            end).
 
+handle_install_snapshot(HistoryId, Term,
+                        SnapshotSeqno, ConfigEntry, RSMSnapshots, State) ->
+    case check_install_snapshot(HistoryId, Term, SnapshotSeqno,
+                                ConfigEntry, RSMSnapshots, State) of
+        ok ->
+            WasProvisioned = is_provisioned(State),
+            Peer =
+                case WasProvisioned of
+                    true ->
+                        get_meta(peer, State);
+                    false ->
+                        %% TODO: Not checking peer name against the config
+                        %% entry passed to us. That's because this is just the
+                        %% config as of the snapshot, not necessarily the
+                        %% latest config. So we may not be part of the
+                        %% topology yet. It feels that assigning the peer name
+                        %% (and history?) should be an explicit separate step.
+                        get_peer_name()
+                end,
+
+            Metadata = #{history_id => HistoryId,
+                         term => Term,
+                         term_voted => Term,
+                         pending_branch => undefined,
+                         peer => Peer,
+                         committed_seqno => SnapshotSeqno},
+
+            NewState = install_snapshot(SnapshotSeqno, ConfigEntry,
+                                        RSMSnapshots, Metadata, State),
+
+            case WasProvisioned of
+                true ->
+                    ok;
+                false ->
+                    announce_system_state(provisioned, state2metadata(NewState))
+            end,
+
+            maybe_announce_term_established(Term, State),
+            maybe_announce_new_config(State, NewState),
+            maybe_announce_committed_seqno(State, NewState),
+
+            {reply, ok, NewState};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end.
+
+check_install_snapshot(HistoryId, Term,
+                       SnapshotSeqno, ConfigEntry, RSMSnapshots, State) ->
+    ?CHECK(check_history_id(HistoryId, State),
+           check_not_earlier_term(Term, State),
+           check_snapshot_seqno(SnapshotSeqno, State),
+           check_snapshot_config(ConfigEntry, RSMSnapshots)).
+
+check_snapshot_seqno(SnapshotSeqno, State) ->
+    CommittedSeqno = get_meta(committed_seqno, State),
+
+    case SnapshotSeqno > CommittedSeqno of
+        true ->
+            ok;
+        false ->
+            {error, {snapshot_rejected, state2metadata(State)}}
+    end.
+
+check_snapshot_config(ConfigEntry, RSMSnapshots) ->
+    Config = ConfigEntry#log_entry.value,
+    ConfigRSMs = maps:keys(chronicle_utils:config_rsms(Config)),
+    SnapshotRSMs = maps:keys(RSMSnapshots),
+
+    case ConfigRSMs -- SnapshotRSMs of
+        [] ->
+            ok;
+        MissingRSMs ->
+            ?ERROR("Inconsistent install_snapshot request.~n"
+                   "Config:~n~p"
+                   "Missing snapshots: ~p",
+                   [Config, MissingRSMs]),
+            {error, {protocol_error,
+                     {missing_snapshots, Config, MissingRSMs}}}
+    end.
+
 handle_store_branch(Branch, State) ->
     assert_valid_branch(Branch),
 
@@ -1097,6 +1190,24 @@ append_entries(StartSeqno, EndSeqno, Entries,
     NewStorage3 = chronicle_storage:store_meta(PostMetadata, NewStorage2),
     chronicle_storage:sync(NewStorage3),
     publish_storage(NewStorage3).
+
+save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
+    lists:foreach(
+      fun ({RSM, RSMSnapshotBinary}) ->
+              RSMSnapshot = binary_to_term(RSMSnapshotBinary),
+              chronicle_storage:save_rsm_snapshot(Seqno, RSM,
+                                                  RSMSnapshot, Storage)
+      end, maps:to_list(RSMSnapshots)),
+
+    chronicle_storage:record_snapshot(Seqno, ConfigEntry, Storage).
+
+install_snapshot(Seqno, ConfigEntry, RSMSnapshots, Metadata,
+                 #state{storage = Storage} = State) ->
+    NewStorage0 = save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage),
+    NewStorage1 = chronicle_storage:install_snapshot(Seqno, ConfigEntry,
+                                                     Metadata, NewStorage0),
+    chronicle_storage:sync(NewStorage1),
+    State#state{storage = publish_storage(NewStorage1)}.
 
 get_peer_name() ->
     Peer = ?PEER(),
