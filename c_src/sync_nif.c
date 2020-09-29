@@ -44,7 +44,7 @@ make_errno_error(ErlNifEnv *env, int errnum)
                             make_errno_atom(env, errnum));
 }
 
-ERL_NIF_TERM
+static ERL_NIF_TERM
 do_sync_dir(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     ErlNifBinary path;
