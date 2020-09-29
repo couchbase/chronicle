@@ -69,6 +69,7 @@
                 %% Used when the state is 'proposing'.
                 pending_entries,
                 sync_requests,
+                catchup_pid,
 
                 config_change_reply_to,
                 postponed_config_requests }).
@@ -227,15 +228,33 @@ handle_state_enter(establish_term,
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
 handle_state_enter(proposing, Data) ->
-    NewData0 = preload_pending_entries(Data),
-    NewData1 = maybe_resolve_branch(NewData0),
-    NewData = maybe_complete_config_transition(NewData1),
+    NewData0 = start_catchup_process(Data),
+    NewData1 = preload_pending_entries(NewData0),
+    NewData2 = maybe_resolve_branch(NewData1),
+    NewData = maybe_complete_config_transition(NewData2),
 
     announce_proposer_ready(NewData),
 
     {keep_state, replicate(check_peers(NewData))};
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
+
+start_catchup_process(#data{history_id = HistoryId, term = Term} = Data) ->
+    case chronicle_catchup:start_link(HistoryId, Term) of
+        {ok, Pid} ->
+            Data#data{catchup_pid = Pid};
+        {error, Error} ->
+            exit({failed_to_start_catchup_process, Error})
+    end.
+
+stop_catchup_process(#data{catchup_pid = Pid} = Data) ->
+    case Pid of
+        undefined ->
+            Data;
+        _ ->
+            chronicle_catchup:stop(Pid),
+            Data#data{catchup_pid = undefined}
+    end.
 
 preload_pending_entries(#data{history_id = HistoryId,
                               term = Term,
@@ -1607,19 +1626,23 @@ stop(Reason, ExtraEffects, State,
             reply_request(ConfigReplyTo, {error, {leader_error, leader_lost}})
     end,
 
-    %% Make an attempt to notify local agent about the latest committed seqno,
-    %% so chronicle_rsm-s can reply to clients whose commands got committed.
-    %%
-    %% But this can be and needs to be done only if we've established the term
-    %% on a quorum of nodes (that is, our state is 'proposing').
-    case State =:= proposing of
-        true ->
-            sync_local_agent(Data);
-        false ->
-            ok
-    end,
+    NewData2 =
+        case State =:= proposing of
+            true ->
+                %% Make an attempt to notify local agent about the latest
+                %% committed seqno, so chronicle_rsm-s can reply to clients
+                %% whose commands got committed.
+                %%
+                %% But this can be and needs to be done only if we've
+                %% established the term on a quorum of nodes (that is, our
+                %% state is 'proposing').
+                sync_local_agent(NewData1),
+                stop_catchup_process(NewData1);
+            false ->
+                NewData1
+        end,
 
-    {next_state, {stopped, Reason}, NewData1, Effects ++ ExtraEffects};
+    {next_state, {stopped, Reason}, NewData2, Effects ++ ExtraEffects};
 stop(_Reason, ExtraEffects, {stopped, _}, Data) ->
     {keep_state, Data, ExtraEffects}.
 
