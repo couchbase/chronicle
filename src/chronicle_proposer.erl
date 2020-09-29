@@ -227,17 +227,13 @@ handle_state_enter(establish_term,
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
 handle_state_enter(proposing, Data) ->
-    case preload_pending_entries(Data) of
-        {ok, NewData0} ->
-            NewData1 = maybe_resolve_branch(NewData0),
-            NewData = maybe_complete_config_transition(NewData1),
+    NewData0 = preload_pending_entries(Data),
+    NewData1 = maybe_resolve_branch(NewData0),
+    NewData = maybe_complete_config_transition(NewData1),
 
-            announce_proposer_ready(NewData),
+    announce_proposer_ready(NewData),
 
-            {keep_state, replicate(check_peers(NewData))};
-        {stop, _} = Stop ->
-            Stop
-    end;
+    {keep_state, replicate(check_peers(NewData))};
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
@@ -250,7 +246,7 @@ preload_pending_entries(#data{history_id = HistoryId,
             case chronicle_agent:get_log(HistoryId, Term,
                                          CommittedSeqno + 1, HighSeqno) of
                 {ok, Entries} ->
-                    {ok, Data#data{pending_entries = queue:from_list(Entries)}};
+                    Data#data{pending_entries = queue:from_list(Entries)};
                 {error, Error} ->
                     ?WARNING("Encountered an error while fetching "
                              "uncommitted entries from local agent.~n"
@@ -261,10 +257,10 @@ preload_pending_entries(#data{history_id = HistoryId,
                              "Error: ~p",
                              [HistoryId, Term,
                               CommittedSeqno, HighSeqno, Error]),
-                    {stop, Error}
+                    exit({preload_pending_entries_failed, Error})
             end;
         false ->
-            {ok, Data}
+            Data
     end.
 
 announce_proposer_ready(#data{parent = Parent,
