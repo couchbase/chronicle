@@ -32,8 +32,8 @@
 start_link(HistoryId, Term) ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [HistoryId, Term], []).
 
-catchup_peer(Pid, Opaque, Peer, PeerMetadata) ->
-    call_async(Pid, Opaque, {catchup_peer, Peer, PeerMetadata}).
+catchup_peer(Pid, Opaque, Peer, PeerSeqno) ->
+    call_async(Pid, Opaque, {catchup_peer, Peer, PeerSeqno}).
 
 stop(Pid) ->
     ok = gen_server:call(Pid, stop, 10000),
@@ -46,8 +46,8 @@ init([HistoryId, Term]) ->
                 pids = #{},
                 pending = queue:new()}}.
 
-handle_call({catchup_peer, Peer, PeerMetadata}, From, State) ->
-    handle_catchup_peer(Peer, PeerMetadata, From, State);
+handle_call({catchup_peer, Peer, PeerSeqno}, From, State) ->
+    handle_catchup_peer(Peer, PeerSeqno, From, State);
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_Call, _From, State) ->
@@ -66,13 +66,13 @@ terminate(_Reason, State) ->
     terminate_children(State).
 
 %% internal
-handle_catchup_peer(Peer, PeerMetadata, From,
+handle_catchup_peer(Peer, PeerSeqno, From,
                     #state{pids = Pids, pending = Pending} = State) ->
     case maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS of
         true ->
-            spawn_catchup(Peer, PeerMetadata, From, State);
+            spawn_catchup(Peer, PeerSeqno, From, State);
         false ->
-            NewPending = queue:in({Peer, PeerMetadata, From}, Pending),
+            NewPending = queue:in({Peer, PeerSeqno, From}, Pending),
             State#state{pending = NewPending}
     end.
 
@@ -97,18 +97,18 @@ maybe_spawn_pending(#state{pending = Pending} = State) ->
     case queue:out(Pending) of
         {empty, _} ->
             State;
-        {{value, {Peer, PeerMetadata, From}}, NewPending} ->
+        {{value, {Peer, PeerSeqno, From}}, NewPending} ->
             NewState = State#state{pending = NewPending},
-            spawn_catchup(Peer, PeerMetadata, From, NewState)
+            spawn_catchup(Peer, PeerSeqno, From, NewState)
     end.
 
-spawn_catchup(Peer, PeerMetadata, From, #state{pids = Pids} = State) ->
+spawn_catchup(Peer, PeerSeqno, From, #state{pids = Pids} = State) ->
     true = (maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS),
     {Pid, _MRef} = spawn_monitor(
                      fun () ->
-                             do_catchup(Peer, PeerMetadata, State)
+                             do_catchup(Peer, PeerSeqno, State)
                      end),
     State#state{pids = Pids#{Pid => From}}.
 
-do_catchup(_Peer, _PeerMetadata, _State) ->
-    exit({result, {error, unknown}}).
+do_catchup(_Peer, _PeerSeqno, _State) ->
+    exit({result, ok}).
