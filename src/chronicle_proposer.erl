@@ -78,7 +78,9 @@
                        acked_seqno,
                        acked_commit_seqno,
                        sent_seqno,
-                       sent_commit_seqno }).
+                       sent_commit_seqno,
+
+                       catchup_in_progress = false }).
 
 -record(sync_request, { ref,
                         reply_to,
@@ -387,7 +389,9 @@ handle_agent_response(Peer, peer_position, Result, State, Data) ->
 handle_agent_response(Peer,
                       {sync_quorum, _} = Request,
                       Result, State, Data) ->
-    handle_sync_quorum_result(Peer, Request, Result, State, Data).
+    handle_sync_quorum_result(Peer, Request, Result, State, Data);
+handle_agent_response(Peer, catchup, Result, State, Data) ->
+    handle_catchup_result(Peer, Result, State, Data).
 
 handle_establish_term_result(Peer,
                              {establish_term, HistoryId, Term, Position},
@@ -791,6 +795,26 @@ sync_quorum_reply_not_leader(#data{sync_requests = Tab}) ->
               ets:delete(Tab, Ref)
       end, ets:tab2list(Tab)).
 
+handle_catchup_result(Peer, Result, proposing = State, Data) ->
+    case Result of
+        {ok, Metadata} ->
+            set_peer_status(Peer, Metadata, Data),
+            {keep_state, replicate(Data)};
+        {error, Error} ->
+            case handle_common_error(Peer, Error, Data) of
+                {stop, Reason} ->
+                    stop(Reason, State, Data);
+                ignored ->
+                    ?ERROR("Catchup to peer ~p failed with error: ~p",
+                           [Peer, Error]),
+                    remove_peer_status(Peer, Data),
+                    %% TODO: get rid of this
+                    %%
+                    %% retry immediately so unit tests don't fail
+                    {keep_state, check_peers(Data)}
+            end
+    end.
+
 maybe_complete_config_transition(#data{config = Config} = Data) ->
     case Config of
         #config{} ->
@@ -893,7 +917,7 @@ replicate(Data) ->
         [] ->
             Data;
         Peers ->
-            send_append(Peers, Data)
+            replicate_to_peers(Peers, Data)
     end.
 
 get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
@@ -904,7 +928,8 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
               case get_peer_status(Peer, Data) of
                   {ok, #peer_status{needs_sync = NeedsSync,
                                     sent_seqno = PeerSentSeqno,
-                                    sent_commit_seqno = PeerSentCommitSeqno}} ->
+                                    sent_commit_seqno = PeerSentCommitSeqno,
+                                    catchup_in_progress = false}} ->
                       DoSync =
                           NeedsSync
                           orelse HighSeqno > PeerSentSeqno
@@ -916,9 +941,7 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, #data{peers = Peers} = Data) ->
                           false ->
                               false
                       end;
-                  {ok, requested} ->
-                      false;
-                  not_found ->
+                  _ ->
                       false
               end
       end, LivePeers).
@@ -991,6 +1014,7 @@ handle_down(MRef, Pid, Reason, State, Data) ->
                 establish_term ->
                     establish_term_handle_vote(Peer, failed, State, NewData);
                 proposing ->
+                    maybe_cancel_peer_catchup(Peer, NewData),
                     remove_peer_status(Peer, NewData),
                     {keep_state, NewData}
             end
@@ -1274,6 +1298,13 @@ set_peer_acked_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
                                      acked_commit_seqno = CommittedSeqno}
       end, Data).
 
+set_peer_catchup_in_progress(Peer, Data) ->
+    update_peer_status(
+      Peer,
+      fun (#peer_status{catchup_in_progress = false} = PeerStatus) ->
+              PeerStatus#peer_status{catchup_in_progress = true}
+      end, Data).
+
 remove_peer_status(Peer, Data) ->
     remove_peer_statuses([Peer], Data).
 
@@ -1283,15 +1314,28 @@ remove_peer_statuses(Peers, #data{peer_statuses = Tab}) ->
               ets:delete(Tab, Peer)
       end, Peers).
 
-send_requests(Peers, Request, Data, Fun) ->
+maybe_send_requests(Peers, Request, Data, Fun) ->
     NewData = monitor_agents(Peers, Data),
-    lists:foreach(
-      fun (Peer) ->
-              {ok, Ref} = get_peer_monitor(Peer, NewData),
-              Opaque = {agent_response, Ref, Peer, Request},
-              Fun(Peer, Opaque)
-      end, Peers),
+    NotSent = lists:filter(
+                fun (Peer) ->
+                        {ok, Ref} = get_peer_monitor(Peer, NewData),
+                        Opaque = make_agent_opaque(Ref, Peer, Request),
+                        not Fun(Peer, Opaque)
+                end, Peers),
 
+    {NewData, NotSent}.
+
+make_agent_opaque(Ref, Peer, Request) ->
+    {agent_response, Ref, Peer, Request}.
+
+send_requests(Peers, Request, Data, Fun) ->
+    {NewData, []} =
+        maybe_send_requests(
+          Peers, Request, Data,
+          fun (Peer, Opaque) ->
+                  Fun(Peer, Opaque),
+                  true
+          end),
     NewData.
 
 send_local_establish_term(Metadata,
@@ -1323,36 +1367,78 @@ send_establish_term(Peers, Metadata,
                                              HistoryId, Term, Position)
       end).
 
-send_append(PeersInfo0,
+replicate_to_peers(PeerSeqnos0, Data) ->
+    PeerSeqnos = maps:from_list(PeerSeqnos0),
+    Peers = maps:keys(PeerSeqnos),
+
+    {NewData, CatchupPeers} = send_append(Peers, PeerSeqnos, Data),
+    catchup_peers(CatchupPeers, PeerSeqnos, NewData).
+
+send_append(Peers, PeerSeqnos,
             #data{history_id = HistoryId,
                   term = Term,
                   committed_seqno = CommittedSeqno,
                   high_seqno = HighSeqno} = Data) ->
     Request = {append, HistoryId, Term, CommittedSeqno, HighSeqno},
 
-    PeersInfo = maps:from_list(PeersInfo0),
-    Peers = maps:keys(PeersInfo),
-
-    send_requests(
+    maybe_send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
-              PeerSeqno = maps:get(Peer, PeersInfo),
-              Entries = get_entries(PeerSeqno, Data),
-              set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data),
-              ?DEBUG("Sending append request to peer ~p.~n"
-                     "History Id: ~p~n"
-                     "Term: ~p~n"
-                     "Committed Seqno: ~p~n"
-                     "Entries:~n~p",
-                     [Peer, HistoryId, Term, CommittedSeqno, Entries]),
+              PeerSeqno = maps:get(Peer, PeerSeqnos),
+              case get_entries(Peer, PeerSeqno, Data) of
+                  {ok, Entries} ->
+                      set_peer_sent_seqnos(Peer, HighSeqno,
+                                           CommittedSeqno, Data),
+                      ?DEBUG("Sending append request to peer ~p.~n"
+                             "History Id: ~p~n"
+                             "Term: ~p~n"
+                             "Committed Seqno: ~p~n"
+                             "Entries:~n~p",
+                             [Peer, HistoryId, Term, CommittedSeqno, Entries]),
 
-              chronicle_agent:append(Peer, Opaque,
-                                     HistoryId, Term, CommittedSeqno,
-                                     PeerSeqno, Entries)
+                      chronicle_agent:append(Peer, Opaque,
+                                             HistoryId, Term, CommittedSeqno,
+                                             PeerSeqno, Entries),
+                      true;
+                  need_catchup ->
+                      false
+              end
       end).
 
+catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
+    NewData = monitor_agents(Peers, Data),
+    lists:foreach(
+      fun (Peer) ->
+              set_peer_catchup_in_progress(Peer, NewData),
+
+              {ok, Ref} = get_peer_monitor(Peer, NewData),
+              PeerSeqno = maps:get(Peer, PeerSeqnos),
+              Opaque = make_agent_opaque(Ref, Peer, catchup),
+              chronicle_catchup:catchup_peer(Pid, Opaque, Peer, PeerSeqno)
+      end, Peers),
+
+    NewData.
+
+maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
+    case get_peer_status(Peer, Data) of
+        {ok, #peer_status{catchup_in_progress = true}} ->
+            chronicle_catchup:cancel_catchup(Pid, Peer);
+        _ ->
+            ok
+    end.
+
 %% TODO: think about how to backfill peers properly
-get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
+get_entries(Peer, Seqno, Data) ->
+    %% TODO
+    case Peer =/= ?SELF_PEER andalso rand:uniform() < 0.25 of
+        true ->
+            ?DEBUG("Forcing catchup for peer ~p", [Peer]),
+            need_catchup;
+        false ->
+            do_get_entries(Seqno, Data)
+    end.
+
+do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     LocalCommittedSeqno = get_local_committed_seqno(Data),
 
     BackfillEntries =
@@ -1371,7 +1457,7 @@ get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
                   Entry#log_entry.seqno =< Seqno
           end, PendingEntries),
 
-    BackfillEntries ++ queue:to_list(Entries).
+    {ok, BackfillEntries ++ queue:to_list(Entries)}.
 
 get_local_committed_seqno(Data) ->
     {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),

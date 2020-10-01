@@ -72,19 +72,15 @@ terminate(_Reason, State) ->
 
 %% internal
 handle_catchup_peer(Peer, PeerSeqno, From,
-                    #state{pids = Pids, pending = Pending} = State) ->
-    case maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS of
-        true ->
-            spawn_catchup(Peer, PeerSeqno, From, State);
-        false ->
-            NewPending = queue:in({Peer, PeerSeqno, From}, Pending),
-            State#state{pending = NewPending}
-    end.
+                    #state{pending = Pending} = State) ->
+    NewPending = queue:in({Peer, PeerSeqno, From}, Pending),
+    NewState = State#state{pending = NewPending},
+    {noreply, maybe_spawn_pending(NewState)}.
 
 handle_cancel_catchup(Peer, State) ->
     NewState0 = cancel_pending(Peer, State),
     NewState1 = cancel_active(Peer, NewState0),
-    maybe_spawn_pending(NewState1).
+    {noreply, maybe_spawn_pending(NewState1)}.
 
 handle_down(Pid, Reason, #state{pids = Pids} = State) ->
     {{_, _, From}, NewPids} = maps:take(Pid, Pids),
@@ -128,7 +124,7 @@ spawn_catchup(Peer, PeerSeqno, From, #state{pids = Pids} = State) ->
     State#state{pids = Pids#{Pid => {Peer, MRef, From}}}.
 
 do_catchup(_Peer, _PeerSeqno, _State) ->
-    exit({result, ok}).
+    exit(crash).
 
 cancel_active(Peer, #state{pids = Pids} = State) ->
     NewPids =
