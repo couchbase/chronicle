@@ -640,7 +640,7 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
                                                        EndSeqno, State) of
                                 {ok, FinalCommittedSeqno} ->
                                     case drop_known_entries(
-                                           Entries,
+                                           Entries, EndSeqno,
                                            SafeHighSeqno, OurHighSeqno,
                                            NewTerm, State) of
                                         {ok,
@@ -671,7 +671,8 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
 
     end.
 
-drop_known_entries(Entries, SafeHighSeqno, HighSeqno, NewTerm, State) ->
+drop_known_entries(Entries, EntriesEndSeqno,
+                   SafeHighSeqno, HighSeqno, NewTerm, State) ->
     {SafeEntries, UnsafeEntries} = split_entries(SafeHighSeqno, Entries),
 
     %% All safe entries must match.
@@ -682,7 +683,23 @@ drop_known_entries(Entries, SafeHighSeqno, HighSeqno, NewTerm, State) ->
 
             case check_entries_match(PreHighSeqnoEntries, State) of
                 ok ->
-                    {ok, HighSeqno + 1, false, PostHighSeqnoEntries};
+                    case EntriesEndSeqno < HighSeqno of
+                        true ->
+                            %% The entries sent by the leader match our
+                            %% entries, but our history is longer. This may
+                            %% only happen in a new term. The tail of the log
+                            %% needs to be truncated.
+
+                            true = NewTerm,
+                            [] = PostHighSeqnoEntries,
+
+                            ?DEBUG("Going to drop log tail past ~p",
+                                   [EntriesEndSeqno]),
+
+                            {ok, EntriesEndSeqno + 1, true, []};
+                        false ->
+                            {ok, HighSeqno + 1, false, PostHighSeqnoEntries}
+                    end;
                 {mismatch, MismatchSeqno, _OurEntry, Remaining} ->
                     true = NewTerm,
 
