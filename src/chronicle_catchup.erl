@@ -35,6 +35,9 @@ start_link(HistoryId, Term) ->
 catchup_peer(Pid, Opaque, Peer, PeerSeqno) ->
     call_async(Pid, Opaque, {catchup_peer, Peer, PeerSeqno}).
 
+cancel_catchup(Pid, Peer) ->
+    gen_server:cast(Pid, {cancel_catchup, Peer}).
+
 stop(Pid) ->
     ok = gen_server:call(Pid, stop, 10000),
     ok = chronicle_utils:wait_for_process(Pid, 1000).
@@ -53,6 +56,8 @@ handle_call(stop, _From, State) ->
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
+handle_cast({cancel_catchup, Peer}, State) ->
+    handle_cancel_catchup(Peer, State);
 handle_cast(Cast, _State) ->
     {stop, {unexpected_cast, Cast}}.
 
@@ -76,8 +81,13 @@ handle_catchup_peer(Peer, PeerSeqno, From,
             State#state{pending = NewPending}
     end.
 
+handle_cancel_catchup(Peer, State) ->
+    NewState0 = cancel_pending(Peer, State),
+    NewState1 = cancel_active(Peer, NewState0),
+    maybe_spawn_pending(NewState1).
+
 handle_down(Pid, Reason, #state{pids = Pids} = State) ->
-    {From, NewPids} = maps:take(Pid, Pids),
+    {{_, _, From}, NewPids} = maps:take(Pid, Pids),
     Reply = case Reason of
                 {result, Result} ->
                     Result;
@@ -93,22 +103,53 @@ terminate_children(#state{pids = Pids}) ->
               chronicle_utils:terminate_and_wait(Pid, kill)
       end, maps:keys(Pids)).
 
-maybe_spawn_pending(#state{pending = Pending} = State) ->
-    case queue:out(Pending) of
-        {empty, _} ->
-            State;
-        {{value, {Peer, PeerSeqno, From}}, NewPending} ->
-            NewState = State#state{pending = NewPending},
-            spawn_catchup(Peer, PeerSeqno, From, NewState)
+maybe_spawn_pending(#state{pids = Pids,
+                           pending = Pending} = State) ->
+    case maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS of
+        true ->
+            case queue:out(Pending) of
+                {empty, _} ->
+                    State;
+                {{value, {Peer, PeerSeqno, From}}, NewPending} ->
+                    NewState = State#state{pending = NewPending},
+                    maybe_spawn_pending(
+                      spawn_catchup(Peer, PeerSeqno, From, NewState))
+            end;
+        false ->
+            State
     end.
 
 spawn_catchup(Peer, PeerSeqno, From, #state{pids = Pids} = State) ->
     true = (maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS),
-    {Pid, _MRef} = spawn_monitor(
-                     fun () ->
-                             do_catchup(Peer, PeerSeqno, State)
-                     end),
-    State#state{pids = Pids#{Pid => From}}.
+    {Pid, MRef} = spawn_monitor(
+                    fun () ->
+                            do_catchup(Peer, PeerSeqno, State)
+                    end),
+    State#state{pids = Pids#{Pid => {Peer, MRef, From}}}.
 
 do_catchup(_Peer, _PeerSeqno, _State) ->
     exit({result, ok}).
+
+cancel_active(Peer, #state{pids = Pids} = State) ->
+    NewPids =
+        maps:filter(
+          fun (Pid, {OtherPeer, MRef, _From}) ->
+                  case Peer =:= OtherPeer of
+                      true ->
+                          chronicle_utils:terminate_and_wait(Pid, kill),
+                          erlang:demonitor(MRef, [flush]),
+                          false;
+                      false ->
+                          true
+                  end
+          end, Pids),
+
+    State#state{pids = NewPids}.
+
+cancel_pending(Peer, #state{pending = Pending} = State) ->
+    NewPending =
+        queue:filter(
+          fun ({OtherPeer, _, _}) ->
+                  OtherPeer =/= Peer
+          end, Pending),
+    State#state{pending = NewPending}.
