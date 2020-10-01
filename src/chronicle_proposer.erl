@@ -400,6 +400,7 @@ handle_establish_term_result(Peer,
             init_peer_status(Peer, Metadata, Data),
             establish_term_handle_vote(Peer, {ok, CommittedSeqno}, State, Data);
         {error, Error} ->
+            remove_peer_status(Peer, Data),
             case handle_common_error(Peer, Error, Data) of
                 {stop, Reason} ->
                     stop(Reason, State, Data);
@@ -1200,13 +1201,7 @@ mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
 
 init_peer_status(Peer, Metadata, Data) ->
     %% We should never overwrite an existing peer status.
-    case get_peer_status(Peer, Data) of
-        {ok, requested} ->
-            ok;
-        not_found ->
-            ok
-    end,
-
+    {ok, requested} = get_peer_status(Peer, Data),
     set_peer_status(Peer, Metadata, Data).
 
 set_peer_status(Peer, Metadata, #data{term = OurTerm, peer_statuses = Tab}) ->
@@ -1301,16 +1296,19 @@ send_requests(Peers, Request, Data, Fun) ->
 
 send_local_establish_term(Metadata,
                           #data{history_id = HistoryId, term = Term} = Data) ->
+    Peers = [?SELF_PEER],
+    mark_status_requested(Peers, Data),
     Position = get_position(Metadata),
 
     send_requests(
-      [?SELF_PEER], {establish_term, HistoryId, Term, Position}, Data,
+      Peers, {establish_term, HistoryId, Term, Position}, Data,
       fun (_Peer, Opaque) ->
               self() ! {Opaque, {ok, Metadata}}
       end).
 
 send_establish_term(Peers, Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
+    mark_status_requested(Peers, Data),
     Position = get_position(Metadata),
     Request = {establish_term, HistoryId, Term, Position},
     send_requests(
