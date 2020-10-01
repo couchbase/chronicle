@@ -1198,8 +1198,18 @@ update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
 mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
     true = ets:insert_new(Tab, [{Peer, requested} || Peer <- Peers]).
 
-init_peer_status(Peer, Metadata, #data{term = OurTerm,
-                                       peer_statuses = Tab} = Data) ->
+init_peer_status(Peer, Metadata, Data) ->
+    %% We should never overwrite an existing peer status.
+    case get_peer_status(Peer, Data) of
+        {ok, requested} ->
+            ok;
+        not_found ->
+            ok
+    end,
+
+    set_peer_status(Peer, Metadata, Data).
+
+set_peer_status(Peer, Metadata, #data{term = OurTerm, peer_statuses = Tab}) ->
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
               high_seqno = PeerHighSeqno} = Metadata,
@@ -1234,14 +1244,6 @@ init_peer_status(Peer, Metadata, #data{term = OurTerm,
                 %% call. But I'll leave for later.
                 {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
         end,
-
-    %% We should never overwrite an existing peer status.
-    case get_peer_status(Peer, Data) of
-        {ok, requested} ->
-            ok;
-        not_found ->
-            ok
-    end,
 
     PeerStatus = #peer_status{needs_sync = NeedsSync,
                               acked_seqno = HighSeqno,
