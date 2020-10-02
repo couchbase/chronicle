@@ -1010,12 +1010,13 @@ handle_down(MRef, Pid, Reason, State, Data) ->
                    [Pid, Reason]),
             stop({agent_terminated, Reason}, State, Data);
         false ->
+            maybe_cancel_peer_catchup(Peer, NewData),
+            remove_peer_status(Peer, NewData),
+
             case State of
                 establish_term ->
                     establish_term_handle_vote(Peer, failed, State, NewData);
                 proposing ->
-                    maybe_cancel_peer_catchup(Peer, NewData),
-                    remove_peer_status(Peer, NewData),
                     {keep_state, NewData}
             end
     end.
