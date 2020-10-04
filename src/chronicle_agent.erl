@@ -853,19 +853,23 @@ check_not_earlier_term(Term, State) ->
 handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
     case check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) of
         ok ->
-            HighSeqno = get_high_seqno(State),
+            OurCommittedSeqno = get_meta(committed_seqno, State),
+            NewState =
+                case OurCommittedSeqno =:= CommittedSeqno of
+                    true ->
+                        State;
+                    false ->
+                        NewStorage =
+                            store_meta(
+                              #{committed_seqno => CommittedSeqno}, State),
 
-            complete_append(HistoryId, Term,
-                            #{entries => [],
-                              start_seqno => HighSeqno + 1,
-                              end_seqno => HighSeqno,
-                              committed_seqno => CommittedSeqno,
+                        announce_committed_seqno(CommittedSeqno),
 
-                              %% This call is only performed by the local
-                              %% leader, so there should never be a need to
-                              %% truncate the uncommitted tail.
-                              truncate => false},
-                            State);
+                        ?DEBUG("Marked ~p seqno committed", [CommittedSeqno]),
+                        State#state{storage = NewStorage}
+                end,
+
+            {reply, ok, NewState};
         {error, _} = Error ->
             {reply, Error, State}
     end.
