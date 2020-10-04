@@ -260,12 +260,12 @@ stop_catchup_process(#data{catchup_pid = Pid} = Data) ->
 
 preload_pending_entries(#data{history_id = HistoryId,
                               term = Term,
-                              high_seqno = HighSeqno,
-                              committed_seqno = CommittedSeqno} = Data) ->
-    case HighSeqno > CommittedSeqno of
+                              high_seqno = HighSeqno} = Data) ->
+    LocalCommittedSeqno = get_local_committed_seqno(Data),
+    case HighSeqno > LocalCommittedSeqno of
         true ->
             case chronicle_agent:get_log(HistoryId, Term,
-                                         CommittedSeqno + 1, HighSeqno) of
+                                         LocalCommittedSeqno + 1, HighSeqno) of
                 {ok, Entries} ->
                     Data#data{pending_entries = queue:from_list(Entries)};
                 {error, Error} ->
@@ -277,7 +277,7 @@ preload_pending_entries(#data{history_id = HistoryId,
                              "High seqno: ~p~n"
                              "Error: ~p",
                              [HistoryId, Term,
-                              CommittedSeqno, HighSeqno, Error]),
+                              LocalCommittedSeqno, HighSeqno, Error]),
                     exit({preload_pending_entries_failed, Error})
             end;
         false ->
