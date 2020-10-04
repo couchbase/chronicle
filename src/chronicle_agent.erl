@@ -590,10 +590,47 @@ complete_append(HistoryId, Term, Info, State) ->
     {reply, ok, NewState}.
 
 check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State) ->
-    ?CHECK(check_history_id(HistoryId, State),
+    ?CHECK(check_append_history_id(HistoryId, Entries, State),
            check_not_earlier_term(Term, State),
            check_append_obsessive(Term, CommittedSeqno,
                                   AtSeqno, Entries, State)).
+
+check_append_history_id(HistoryId, Entries, State) ->
+    case check_history_id(HistoryId, State) of
+        ok ->
+            OldHistoryId = get_meta(history_id, State),
+            case HistoryId =:= OldHistoryId of
+                true ->
+                    ok;
+                false ->
+                    NewHistoryEntries =
+                        lists:dropwhile(
+                          fun (#log_entry{history_id = EntryHistoryId}) ->
+                                  EntryHistoryId =:= OldHistoryId
+                          end, Entries),
+
+                    %% The first entry in any history must be a config entry
+                    %% committing that history.
+                    case NewHistoryEntries of
+                        [#log_entry{history_id = HistoryId,
+                                    value = #config{}} | _] ->
+                            ok;
+                        _ ->
+                            %% TODO: sanitize entries
+                            ?ERROR("Malformed entries in an append "
+                                   "request starting a new history.~n"
+                                   "Old history id: ~p~n"
+                                   "New history id: ~p~n"
+                                   "Entries:~n~p",
+                                   [OldHistoryId, HistoryId, Entries]),
+                            {error, {protocol_error,
+                                     {missing_config_starting_history,
+                                      OldHistoryId, HistoryId, Entries}}}
+                    end
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
     case get_entries_seqnos(AtSeqno, Entries) of
