@@ -871,9 +871,11 @@ handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
     end.
 
 check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
+    HighSeqno = get_high_seqno(State),
+
     ?CHECK(check_history_id(HistoryId, State),
            check_same_term(Term, State),
-           case check_committed_seqno_rollback(Term, CommittedSeqno, State) of
+           case check_committed_seqno(Term, CommittedSeqno, HighSeqno, State) of
                {ok, FinalCommittedSeqno} ->
                    %% This is only ever called by the local leader, so there
                    %% never should be a possibility of rollback.
