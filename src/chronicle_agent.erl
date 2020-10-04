@@ -348,14 +348,12 @@ handle_reprovision(State) ->
 
             ?DEBUG("Reprovisioning peer with config:~n~p", [ConfigEntry]),
 
-            NewStorage = append_entry(ConfigEntry,
-                                      #{peer => Peer,
-                                        term => NewTerm,
-                                        term_voted => NewTerm,
-                                        committed_seqno => Seqno},
-                                      State),
-
-            NewState = State#state{storage = NewStorage},
+            NewState = append_entry(ConfigEntry,
+                                    #{peer => Peer,
+                                      term => NewTerm,
+                                      term_voted => NewTerm,
+                                      committed_seqno => Seqno},
+                                    State),
 
             announce_system_reprovisioned(NewState),
             announce_new_config(NewState),
@@ -408,15 +406,13 @@ handle_provision(Machines0, State) ->
             ?DEBUG("Provisioning with history ~p. Config:~n~p",
                    [HistoryId, Config]),
 
-            NewStorage = append_entry(ConfigEntry,
-                                      #{peer => Peer,
-                                        history_id => HistoryId,
-                                        term => Term,
-                                        term_voted => Term,
-                                        committed_seqno => Seqno},
-                                      State),
-
-            NewState = State#state{storage = NewStorage},
+            NewState = append_entry(ConfigEntry,
+                                    #{peer => Peer,
+                                      history_id => HistoryId,
+                                      term => Term,
+                                      term_voted => Term,
+                                      committed_seqno => Seqno},
+                                    State),
 
             announce_system_provisioned(NewState),
             announce_new_config(NewState),
@@ -459,8 +455,7 @@ handle_establish_term(HistoryId, Term, Position, State) ->
 
     case check_establish_term(HistoryId, Term, Position, State) of
         ok ->
-            NewStorage = store_meta(#{term => Term}, State),
-            NewState = State#state{storage = NewStorage},
+            NewState = store_meta(#{term => Term}, State),
             announce_term_established(Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
             {reply, {ok, state2metadata(State)}, NewState};
@@ -564,11 +559,8 @@ complete_append(HistoryId, Term, Info, State) ->
     %% When resolving a branch, we must never delete the branch record without
     %% also logging a new config. Therefore the update needs to be atomic.
     Atomic = (get_meta(pending_branch, State) =/= undefined),
-    NewStorage = append_entries(StartSeqno, EndSeqno, Entries,
-                                PreMetadata, PostMetadata,
-                                Truncate, Atomic, State),
-
-    NewState = State#state{storage = NewStorage},
+    NewState = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
+                              PostMetadata, Truncate, Atomic, State),
 
     case WasProvisioned of
         true ->
@@ -859,14 +851,14 @@ handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
                     true ->
                         State;
                     false ->
-                        NewStorage =
-                            store_meta(
-                              #{committed_seqno => CommittedSeqno}, State),
+                        NewState0 =
+                            store_meta(#{committed_seqno =>
+                                             CommittedSeqno}, State),
 
                         announce_committed_seqno(CommittedSeqno),
 
                         ?DEBUG("Marked ~p seqno committed", [CommittedSeqno]),
-                        State#state{storage = NewStorage}
+                        NewState0
                 end,
 
             {reply, ok, NewState};
@@ -976,8 +968,7 @@ handle_store_branch(Branch, State) ->
                 check_branch_compatible(Branch, State),
                 check_branch_coordinator(Branch, State)) of
         {ok, FinalBranch} ->
-            NewStorage = store_meta(#{pending_branch => FinalBranch}, State),
-            NewState = State#state{storage = NewStorage},
+            NewState = store_meta(#{pending_branch => FinalBranch}, State),
 
             case get_meta(pending_branch, State) of
                 undefined ->
@@ -1034,8 +1025,7 @@ handle_undo_branch(BranchId, State) ->
     assert_valid_history_id(BranchId),
     case check_branch_id(BranchId, State) of
         ok ->
-            NewStorage = store_meta(#{pending_branch => undefined}, State),
-            NewState = State#state{storage = NewStorage},
+            NewState = store_meta(#{pending_branch => undefined}, State),
             announce_new_history(NewState),
 
             ?DEBUG("Undid branch ~p", [BranchId]),
@@ -1216,22 +1206,22 @@ propagate_committed_seqno(Storage) ->
     #{committed_seqno := CommittedSeqno} = chronicle_storage:get_meta(Storage),
     chronicle_storage:set_committed_seqno(CommittedSeqno, Storage).
 
-append_entry(Entry, Meta, #state{storage = Storage}) ->
+append_entry(Entry, Meta, #state{storage = Storage} = State) ->
     Seqno = Entry#log_entry.seqno,
     NewStorage = chronicle_storage:append(Seqno, Seqno,
                                           [Entry], #{meta => Meta},
                                           Storage),
     chronicle_storage:sync(NewStorage),
-    publish_storage(NewStorage).
+    State#state{storage = publish_storage(NewStorage)}.
 
-store_meta(Meta, #state{storage = Storage}) ->
+store_meta(Meta, #state{storage = Storage} = State) ->
     NewStorage = chronicle_storage:store_meta(Meta, Storage),
     chronicle_storage:sync(NewStorage),
-    publish_storage(NewStorage).
+    State#state{storage = publish_storage(NewStorage)}.
 
 append_entries(StartSeqno, EndSeqno, Entries,
                PreMetadata, PostMetadata, Truncate, Atomic,
-               #state{storage = Storage}) ->
+               #state{storage = Storage} = State) ->
     NewStorage0 =
         case Truncate of
             true ->
@@ -1265,7 +1255,7 @@ append_entries(StartSeqno, EndSeqno, Entries,
         end,
 
     chronicle_storage:sync(NewStorage),
-    publish_storage(NewStorage).
+    State#state{storage = publish_storage(NewStorage)}.
 
 save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
     lists:foreach(
