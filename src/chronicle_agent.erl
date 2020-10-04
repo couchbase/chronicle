@@ -560,9 +560,13 @@ complete_append(HistoryId, Term, Info, State) ->
           pending_branch => undefined,
           peer => Peer},
     PostMetadata = #{committed_seqno => NewCommittedSeqno},
+
+    %% When resolving a branch, we must never delete the branch record without
+    %% also logging a new config. Therefore the update needs to be atomic.
+    Atomic = (get_meta(pending_branch, State) =/= undefined),
     NewStorage = append_entries(StartSeqno, EndSeqno, Entries,
                                 PreMetadata, PostMetadata,
-                                Truncate, State),
+                                Truncate, Atomic, State),
 
     NewState = State#state{storage = NewStorage},
 
@@ -1218,7 +1222,7 @@ store_meta(Meta, #state{storage = Storage}) ->
     publish_storage(NewStorage).
 
 append_entries(StartSeqno, EndSeqno, Entries,
-               PreMetadata, PostMetadata, Truncate,
+               PreMetadata, PostMetadata, Truncate, Atomic,
                #state{storage = Storage}) ->
     NewStorage0 =
         case Truncate of
@@ -1237,12 +1241,23 @@ append_entries(StartSeqno, EndSeqno, Entries,
                 Storage
         end,
 
-    NewStorage1 = chronicle_storage:store_meta(PreMetadata, NewStorage0),
-    NewStorage2 = chronicle_storage:append(StartSeqno, EndSeqno,
-                                           Entries, #{}, NewStorage1),
-    NewStorage3 = chronicle_storage:store_meta(PostMetadata, NewStorage2),
-    chronicle_storage:sync(NewStorage3),
-    publish_storage(NewStorage3).
+    NewStorage  =
+        %% TODO: simply make everything atomic?
+        case Atomic of
+            true ->
+                Metadata = maps:merge(PreMetadata, PostMetadata),
+                chronicle_storage:append(StartSeqno, EndSeqno,
+                                         Entries,
+                                         #{meta => Metadata}, NewStorage0);
+            false ->
+                S0 = chronicle_storage:store_meta(PreMetadata, NewStorage0),
+                S1 = chronicle_storage:append(StartSeqno, EndSeqno,
+                                              Entries, #{}, S0),
+                chronicle_storage:store_meta(PostMetadata, S1)
+        end,
+
+    chronicle_storage:sync(NewStorage),
+    publish_storage(NewStorage).
 
 save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
     lists:foreach(
