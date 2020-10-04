@@ -459,8 +459,7 @@ handle_establish_term(HistoryId, Term, Position, State) ->
 
     case check_establish_term(HistoryId, Term, Position, State) of
         ok ->
-            NewStorage =
-                store_meta(#{history_id => HistoryId, term => Term}, State),
+            NewStorage = store_meta(#{term => Term}, State),
             NewState = State#state{storage = NewStorage},
             announce_term_established(Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
