@@ -1444,13 +1444,21 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
 %% TODO: think about how to backfill peers properly
 get_entries(Peer, Seqno, Data) ->
     %% TODO
-    case Peer =/= ?SELF_PEER andalso rand:uniform() < 0.25 of
+    case trigger_catchup(Peer) of
         true ->
             ?DEBUG("Forcing catchup for peer ~p", [Peer]),
             need_catchup;
         false ->
             do_get_entries(Seqno, Data)
     end.
+
+-ifdef(TEST).
+trigger_catchup(Peer) ->
+    Peer =/= ?SELF_PEER andalso rand:uniform() < 0.25.
+-else.
+trigger_catchup(_Peer) ->
+    false.
+-endif.
 
 do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     LocalCommittedSeqno = get_local_committed_seqno(Data),
