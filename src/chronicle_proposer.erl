@@ -1394,8 +1394,10 @@ send_append(Peers, PeerSeqnos,
                              "History Id: ~p~n"
                              "Term: ~p~n"
                              "Committed Seqno: ~p~n"
+                             "Peer Seqno: ~p~n"
                              "Entries:~n~p",
-                             [Peer, HistoryId, Term, CommittedSeqno, Entries]),
+                             [Peer, HistoryId, Term,
+                              CommittedSeqno, PeerSeqno, Entries]),
 
                       chronicle_agent:append(Peer, Opaque,
                                              HistoryId, Term, CommittedSeqno,
