@@ -557,7 +557,15 @@ maybe_resolve_branch(#data{branch = undefined} = Data) ->
 maybe_resolve_branch(#data{high_seqno = HighSeqno,
                            committed_seqno = CommittedSeqno,
                            branch = Branch,
-                           config = Config} = Data) ->
+                           config = Config,
+                           pending_entries = PendingEntries} = Data) ->
+    %% Some of the pending entries may actually be committed, but our local
+    %% agent doesn't know yet. So those need to be preserved.
+    NewPendingEntries =
+        queue_takewhile(
+          fun (#log_entry{seqno = Seqno}) ->
+                  Seqno =< CommittedSeqno
+          end, PendingEntries),
     NewData = Data#data{branch = undefined,
                         %% Note, that this essintially truncates any
                         %% uncommitted entries. This is acceptable/safe to do
@@ -573,7 +581,7 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
                         %%  other words, we won't truncate something that was
                         %%  known to have been committed.
                         high_seqno = CommittedSeqno,
-                        pending_entries = queue:new()},
+                        pending_entries = NewPendingEntries},
 
     %% Note, that the new config may be based on an uncommitted config that
     %% will get truncated from the history. This can be confusing and it's
@@ -1523,6 +1531,29 @@ queue_takefold_test() ->
     Test(0, lists:seq(1,10), 0),
     Test(15, lists:seq(6,10), 5),
     Test(55, [], 42).
+-endif.
+
+queue_takewhile(Pred, Queue) ->
+    {Result, _} =
+        queue_takefold(
+          fun (Value, Acc) ->
+                  case Pred(Value) of
+                      true ->
+                          {true, queue:in(Value, Acc)};
+                      false ->
+                          false
+                  end
+          end, queue:new(), Queue),
+    Result.
+
+-ifdef(TEST).
+queue_takewhile_test() ->
+    Q = queue:from_list(lists:seq(1, 10)),
+    ?assertEqual(lists:seq(1, 5),
+                 queue:to_list(queue_takewhile(
+                                 fun (V) ->
+                                         V =< 5
+                                 end, Q))).
 -endif.
 
 queue_dropwhile(Pred, Queue) ->
