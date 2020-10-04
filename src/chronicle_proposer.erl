@@ -1417,7 +1417,10 @@ send_append(Peers, PeerSeqnos,
       end).
 
 catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
-    NewData = monitor_agents(Peers, Data),
+    %% TODO: demonitor_agents() is needed to make sure that if there are any
+    %% outstanding requests to the peers, we'll ignore their responses if we
+    %% wind up receiving them. Consider doing something cleaner than this.
+    NewData = monitor_agents(Peers, demonitor_agents(Peers, Data)),
     lists:foreach(
       fun (Peer) ->
               set_peer_catchup_in_progress(Peer, NewData),
