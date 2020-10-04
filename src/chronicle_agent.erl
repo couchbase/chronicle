@@ -696,7 +696,9 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
                                                truncate => Truncate}};
                                         {error, _} = Error ->
                                             Error
-                                    end
+                                    end;
+                                {error, _} = Error ->
+                                    Error
                             end
                     end
             end;
