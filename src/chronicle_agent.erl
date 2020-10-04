@@ -709,7 +709,7 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
                    "All entries:~n~p",
                    [Term, Entry, Entries]),
             {error, {protocol_error,
-                     {malformed_append, Entry, Entries}}}
+                     {malformed_append, Entry, AtSeqno, Entries}}}
 
     end.
 
