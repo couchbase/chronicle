@@ -138,6 +138,9 @@ note_term_established(Pid, HistoryId, Term, Seqno) ->
 note_term_finished(Pid, HistoryId, Term) ->
     gen_statem:cast(Pid, {term_finished, HistoryId, Term}).
 
+note_seqno_committed(Pid, Seqno) ->
+    gen_statem:cast(Pid, {seqno_committed, Seqno}).
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -146,15 +149,9 @@ init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
             Self = self(),
-            chronicle_events:subscribe(
-              fun (Event) ->
-                      case is_interesting_event(Event) of
-                          true ->
-                              Self ! {?RSM_TAG, chronicle_event, Event};
-                          false ->
-                              ok
-                      end
-              end),
+
+            {ok, Info} = chronicle_agent:register_rsm(Name, Self),
+            #{committed_seqno := CommittedSeqno} = Info,
 
             Effects =
                 case chronicle_server:register_rsm(Name, self()) of
@@ -176,7 +173,7 @@ init([Name, Mod, ModArgs]) ->
                           mod_data = ModData},
 
             State = #follower{},
-            Data = read_log(State, Data0),
+            Data = read_log(CommittedSeqno, State, Data0),
 
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
             publish_local_revision(Data),
@@ -203,8 +200,8 @@ handle_event(cast, {term_established, HistoryId, Term, Seqno}, State, Data) ->
     handle_term_established(HistoryId, Term, Seqno, State, Data);
 handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
     handle_term_finished(HistoryId, Term, State, Data);
-handle_event(info, {?RSM_TAG, chronicle_event, Event}, State, Data) ->
-    handle_chronicle_event(Event, State, Data);
+handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
+    handle_seqno_committed(Seqno, State, Data);
 handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
     handle_command_result(Ref, Result, State, Data);
 handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, State, Data) ->
@@ -542,14 +539,6 @@ handle_command_result(Ref, Result, State,
 
     {keep_state, Data#data{pending_clients = NewRequests}}.
 
-is_interesting_event({committed_seqno, _}) ->
-    true;
-is_interesting_event(_) ->
-    false.
-
-handle_chronicle_event({committed_seqno, CommittedSeqno}, State, Data) ->
-    handle_new_committed_seqno(CommittedSeqno, State, Data).
-
 handle_term_established(HistoryId, Term, Seqno, #follower{}, Data) ->
     Status =
         case Data#data.applied_seqno >= Seqno of
@@ -576,64 +565,54 @@ handle_term_finished(HistoryId, Term, State, Data) ->
             true = (HistoryId =:= State#leader.history_id),
             true = (Term =:= State#leader.term),
 
-            %% Synchronize with the log, so we respond to all requests that
-            %% got committed.
-            NewData = read_log(State, Data),
-
+            %% By the time chronicle_rsm receives the notification that the
+            %% term has terminated, it must have already processed all
+            %% notifications from chronicle_agent about commands that are
+            %% known to have been committed by the outgoing leader. So there's
+            %% not a need to synchronize with chronicle_agent as it was done
+            %% previously.
             {next_state,
              #follower{},
 
              %% We only respond to accepted commands here. Other in flight
              %% requests will get a propoer response from chronicle_server.
              flush_accepted_commands({error, {leader_error, leader_lost}},
-                                     NewData)};
+                                     Data)};
         #follower{} ->
             keep_state_and_data
     end.
 
-handle_new_committed_seqno(CommittedSeqno, State,
-                           #data{read_seqno = ReadSeqno} = Data) ->
-    case CommittedSeqno > ReadSeqno of
-        true ->
-            NewData = read_log(State, Data),
-            {next_state,
-             maybe_mark_leader_established(State, NewData),
-             NewData};
-        false ->
-            keep_state_and_data
-    end.
+handle_seqno_committed(CommittedSeqno, State,
+                       #data{read_seqno = ReadSeqno} = Data) ->
+    true = (CommittedSeqno > ReadSeqno),
+    NewData = read_log(CommittedSeqno, State, Data),
+    {next_state, maybe_mark_leader_established(State, NewData), NewData}.
 
-read_log(State, Data) ->
-    {HighSeqno, Entries} = get_log(Data),
-    NewData = apply_entries(HighSeqno, Entries, State, Data),
+read_log(EndSeqno, State, Data) ->
+    Entries = get_log(EndSeqno, Data),
+    NewData = apply_entries(EndSeqno, Entries, State, Data),
     publish_local_revision(NewData),
     NewData.
 
-get_log(#data{name = Name, read_seqno = ReadSeqno}) ->
-    {ok, Metadata} = chronicle_agent:get_metadata(),
-    AvailableSeqno = Metadata#metadata.committed_seqno,
-
+get_log(EndSeqno, #data{name = Name, read_seqno = ReadSeqno}) ->
     %% TODO: replace this with a dedicated call
     {ok, Log} = chronicle_agent:get_log(),
-    Entries =
-        lists:filter(
-          fun (#log_entry{seqno = Seqno, value = Value}) ->
-                  case Seqno > ReadSeqno andalso Seqno =< AvailableSeqno of
-                      true ->
-                          case Value of
-                              #rsm_command{rsm_name = Name} ->
-                                  true;
-                              #config{} ->
-                                  true;
-                              _ ->
-                                  false
-                          end;
-                      false ->
-                          false
-                  end
-          end, Log),
-
-    {AvailableSeqno, Entries}.
+    lists:filter(
+      fun (#log_entry{seqno = Seqno, value = Value}) ->
+              case Seqno > ReadSeqno andalso Seqno =< EndSeqno of
+                  true ->
+                      case Value of
+                          #rsm_command{rsm_name = Name} ->
+                              true;
+                          #config{} ->
+                              true;
+                          _ ->
+                              false
+                      end;
+                  false ->
+                      false
+              end
+      end, Log).
 
 submit_command(Command, From,
                #leader{history_id = HistoryId, term = Term},

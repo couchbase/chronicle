@@ -53,7 +53,9 @@
 -type peer() :: ?SELF_PEER | chronicle:peer().
 
 %% TODO: get rid of the duplication between #state{} and #metadata{}.
--record(state, { storage }).
+-record(state, { storage,
+                 rsms_by_name,
+                 rsms_by_mref }).
 
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -79,6 +81,9 @@ get_system_state() ->
 -spec get_metadata() -> get_metadata_result().
 get_metadata() ->
     gen_server:call(?SERVER, get_metadata).
+
+register_rsm(Name, Pid) ->
+    gen_server:call(?SERVER, {register_rsm, Name, Pid}, 10000).
 
 get_log() ->
     gen_server:call(?SERVER, get_log).
@@ -235,7 +240,7 @@ undo_branch(Peer, BranchId) ->
 
 %% gen_server callbacks
 init([]) ->
-    {ok, restore_state()}.
+    {ok, init_state()}.
 
 handle_call(get_metadata, _From, State) ->
     handle_get_metadata(State);
@@ -244,6 +249,8 @@ handle_call(get_log, _From, State) ->
     {reply, {ok, chronicle_storage:get_log()}, State};
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno}, _From, State) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State);
+handle_call({register_rsm, Name, Pid}, _From, State) ->
+    handle_register_rsm(Name, Pid, State);
 handle_call({provision, Machines}, _From, State) ->
     handle_provision(Machines, State);
 handle_call(reprovision, _From, State) ->
@@ -279,6 +286,12 @@ handle_call(_Call, _From, State) ->
 handle_cast(Cast, State) ->
     ?WARNING("Unexpected cast ~p.~nState:~n~p",
              [Cast, State]),
+    {noreply, State}.
+
+handle_info({'DOWN', MRef, process, Pid, Reason}, State) ->
+    handle_down(MRef, Pid, Reason, State);
+handle_info(Msg, State) ->
+    ?WARNING("Unexpected message ~p", [Msg]),
     {noreply, State}.
 
 %% internal
@@ -331,6 +344,46 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State) ->
            check_same_term(Term, State),
            check_log_range(StartSeqno, EndSeqno, State)).
 
+handle_register_rsm(Name, Pid, #state{rsms_by_name = RSMs,
+                                      rsms_by_mref = MRefs} = State) ->
+    case maps:find(Name, RSMs) of
+        {ok, {OtherPid, _}} ->
+            {reply, {error, {already_registered, Name, OtherPid}}, State};
+        error ->
+            ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
+
+            MRef = erlang:monitor(process, Pid),
+            NewRSMs = RSMs#{Name => {MRef, Pid}},
+            NewMRefs = MRefs#{MRef => Name},
+
+            CommittedSeqno = get_meta(committed_seqno, State),
+            Info = #{committed_seqno => CommittedSeqno},
+
+            {reply, {ok, Info},
+             State#state{rsms_by_name = NewRSMs,
+                         rsms_by_mref = NewMRefs}}
+    end.
+
+handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
+                                      rsms_by_mref = MRefs} = State) ->
+    case maps:take(MRef, MRefs) of
+        error ->
+            {stop, {unexpected_process_down, MRef, Pid, Reason}};
+        {Name, NewMRefs} ->
+            ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
+
+            NewRSMs = maps:remove(Name, RSMs),
+            {noreply, State#state{rsms_by_name = NewRSMs,
+                                  rsms_by_mref = NewMRefs}}
+    end.
+
+foreach_rsm(Fun, #state{rsms_by_name = RSMs}) ->
+    maps:fold(
+      fun (Name, {_, Pid}, _Acc) ->
+              Fun(Name, Pid)
+      end, unused, RSMs),
+    ok.
+
 handle_reprovision(State) ->
     case check_reprovision(State) of
         {ok, Config} ->
@@ -357,7 +410,7 @@ handle_reprovision(State) ->
 
             announce_system_reprovisioned(NewState),
             announce_new_config(NewState),
-            announce_committed_seqno(Seqno),
+            announce_committed_seqno(Seqno, NewState),
 
             {reply, ok, NewState};
         {error, _} = Error ->
@@ -416,7 +469,7 @@ handle_provision(Machines0, State) ->
 
             announce_system_provisioned(NewState),
             announce_new_config(NewState),
-            announce_committed_seqno(Seqno),
+            announce_committed_seqno(Seqno, NewState),
 
             {reply, ok, NewState};
         {error, _} = Error ->
@@ -447,7 +500,7 @@ handle_wipe(#state{storage = Storage}) ->
     chronicle_storage:wipe(),
     announce_system_state(unprovisioned),
     ?DEBUG("Wiped successfully", []),
-    {reply, ok, restore_state()}.
+    {reply, ok, init_state()}.
 
 handle_establish_term(HistoryId, Term, Position, State) ->
     assert_valid_history_id(HistoryId),
@@ -855,7 +908,7 @@ handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
                             store_meta(#{committed_seqno =>
                                              CommittedSeqno}, State),
 
-                        announce_committed_seqno(CommittedSeqno),
+                        announce_committed_seqno(CommittedSeqno, NewState0),
 
                         ?DEBUG("Marked ~p seqno committed", [CommittedSeqno]),
                         NewState0
@@ -1089,8 +1142,10 @@ check_log_range(StartSeqno, EndSeqno, State) ->
             ok
     end.
 
-restore_state() ->
-    #state{storage = storage_open()}.
+init_state() ->
+    #state{storage = storage_open(),
+           rsms_by_name = #{},
+           rsms_by_mref = #{}}.
 
 get_state_path() ->
     case application:get_env(chronicle, data_dir) of
@@ -1154,11 +1209,14 @@ maybe_announce_committed_seqno(OldState, NewState) ->
         true ->
             ok;
         false ->
-            announce_committed_seqno(NewCommittedSeqno)
+            announce_committed_seqno(NewCommittedSeqno, NewState)
     end.
 
-announce_committed_seqno(CommittedSeqno) ->
-    chronicle_events:notify({committed_seqno, CommittedSeqno}).
+announce_committed_seqno(CommittedSeqno, State) ->
+    foreach_rsm(
+      fun (_Name, Pid) ->
+              chronicle_rsm:note_seqno_committed(Pid, CommittedSeqno)
+      end, State).
 
 announce_system_state(SystemState) ->
     announce_system_state(SystemState, no_extra).
