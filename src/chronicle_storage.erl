@@ -283,6 +283,15 @@ get_high_seqno(Storage) ->
 get_config(Storage) ->
     Storage#storage.config.
 
+get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
+    case ets:prev(Tab, Seqno + 1) of
+        '$end_of_table' ->
+            exit({no_config_for_seqno, Seqno});
+        ConfigSeqno ->
+            [Config] = ets:lookup(Tab, ConfigSeqno),
+            Config
+    end.
+
 store_meta(Updates, Storage) ->
     case store_meta_prepare(Updates, Storage) of
         {ok, DedupedUpdates, NewStorage} ->
