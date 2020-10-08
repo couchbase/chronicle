@@ -64,8 +64,8 @@ handle_cast({cancel_catchup, Peer}, State) ->
 handle_cast(Cast, _State) ->
     {stop, {unexpected_cast, Cast}}.
 
-handle_info({'DOWN', _MRef, process, Pid, Reason}, State) ->
-    handle_down(Pid, Reason, State);
+handle_info({catchup_result, Pid, Result}, State) ->
+    handle_catchup_result(Pid, Result, State);
 handle_info(Msg, State) ->
     ?WARNING("Unexpected message ~p", [Msg]),
     {noreply, State}.
@@ -85,15 +85,9 @@ handle_cancel_catchup(Peer, State) ->
     NewState1 = cancel_active(Peer, NewState0),
     {noreply, maybe_spawn_pending(NewState1)}.
 
-handle_down(Pid, Reason, #state{pids = Pids} = State) ->
-    {{_, _, Opaque}, NewPids} = maps:take(Pid, Pids),
-    Reply = case Reason of
-                {result, Result} ->
-                    Result;
-                _ ->
-                    {error, {catchup_failed, Reason}}
-            end,
-    reply_to_parent(Opaque, Reply, State),
+handle_catchup_result(Pid, Result, #state{pids = Pids} = State) ->
+    {{_, Opaque}, NewPids} = maps:take(Pid, Pids),
+    reply_to_parent(Opaque, Result, State),
     {noreply, maybe_spawn_pending(State#state{pids = NewPids})}.
 
 reply_to_parent(Opaque, Reply, #state{parent = Parent}) ->
@@ -102,8 +96,12 @@ reply_to_parent(Opaque, Reply, #state{parent = Parent}) ->
 terminate_children(#state{pids = Pids}) ->
     lists:foreach(
       fun (Pid) ->
-              chronicle_utils:terminate_and_wait(Pid, kill)
+              terminate_child(Pid)
       end, maps:keys(Pids)).
+
+terminate_child(Pid) ->
+    chronicle_utils:terminate_linked_process(Pid, kill),
+    ?FLUSH({catchup_result, Pid, _}).
 
 maybe_spawn_pending(#state{pids = Pids,
                            pending = Pending} = State) ->
@@ -123,11 +121,24 @@ maybe_spawn_pending(#state{pids = Pids,
 
 spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
     true = (maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS),
-    {Pid, MRef} = spawn_monitor(
-                    fun () ->
-                            do_catchup(Peer, PeerSeqno, State)
-                    end),
-    State#state{pids = Pids#{Pid => {Peer, MRef, Opaque}}}.
+    Parent = self(),
+    Pid = proc_lib:spawn_link(
+            fun () ->
+                    Result =
+                        try do_catchup(Peer, PeerSeqno, State) of
+                            R ->
+                                R
+                        catch
+                            T:E:Stacktrace ->
+                                ?ERROR("Catchup to peer ~p failed: ~p~n"
+                                       "Stacktrace:~n~p",
+                                       [Peer, {T, E}, Stacktrace]),
+                                {error, {catchup_failed, {T, E}}}
+                        end,
+
+                    Parent ! {catchup_result, self(), Result}
+            end),
+    State#state{pids = Pids#{Pid => {Peer, Opaque}}}.
 
 do_catchup(_Peer, _PeerSeqno, _State) ->
     exit(crash).
@@ -135,11 +146,10 @@ do_catchup(_Peer, _PeerSeqno, _State) ->
 cancel_active(Peer, #state{pids = Pids} = State) ->
     NewPids =
         maps:filter(
-          fun (Pid, {OtherPeer, MRef, _Opaque}) ->
+          fun (Pid, {OtherPeer, _Opaque}) ->
                   case Peer =:= OtherPeer of
                       true ->
-                          chronicle_utils:terminate_and_wait(Pid, kill),
-                          erlang:demonitor(MRef, [flush]),
+                          terminate_child(Pid),
                           false;
                       false ->
                           true
