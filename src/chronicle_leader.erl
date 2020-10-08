@@ -631,12 +631,12 @@ maybe_reply_to_leader_waiters(LeaderInfo, Data) ->
     end.
 
 reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
-    maps:fold(
-      fun (TRef, From, _) ->
+    chronicle_utils:maps_foreach(
+      fun (TRef, From) ->
               gen_statem:reply(From, Reply),
               erlang:cancel_timer(TRef),
               ?FLUSH({timeout, TRef, _})
-      end, unused, Waiters),
+      end, Waiters),
 
     Data#data{leader_waiters = #{}}.
 
@@ -862,10 +862,10 @@ cancel_state_timer_tref(TRef, Name) ->
     end.
 
 cancel_all_state_timers(#data{state_timers = StateTimers} = Data) ->
-    maps:fold(
-      fun (Name, TRef, _) ->
+    chronicle_utils:maps_foreach(
+      fun (Name, TRef) ->
               cancel_state_timer_tref(TRef, Name)
-      end, unused, StateTimers),
+      end, StateTimers),
     Data#data{state_timers = #{}}.
 
 state_leader(State) ->

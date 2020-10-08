@@ -378,11 +378,10 @@ handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
     end.
 
 foreach_rsm(Fun, #state{rsms_by_name = RSMs}) ->
-    maps:fold(
-      fun (Name, {_, Pid}, _Acc) ->
+    chronicle_utils:maps_foreach(
+      fun (Name, {_, Pid}) ->
               Fun(Name, Pid)
-      end, unused, RSMs),
-    ok.
+      end, RSMs).
 
 handle_reprovision(State) ->
     case check_reprovision(State) of

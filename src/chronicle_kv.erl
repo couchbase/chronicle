@@ -255,10 +255,10 @@ apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, _OldState,
                      kv_table = OldKvTable,
                      initialized = Initialized} = Data) ->
     KvTable = create_kv_table(Name),
-    maps:fold(
-      fun (Key, ValueRev, _) ->
+    chronicle_utils:maps_foreach(
+      fun (Key, ValueRev) ->
               true = ets:insert_new(KvTable, {Key, ValueRev})
-      end, unused, SnapshotState),
+      end, SnapshotState),
 
     case Initialized of
         true ->

@@ -437,10 +437,10 @@ announce_term_finished(#leader{history_id = HistoryId, term = Term}, Data) ->
     chronicle_leader:note_term_finished(HistoryId, Term).
 
 foreach_rsm(Fun, #data{rsms = RSMs}) ->
-    maps:fold(
-      fun (_MRef, {_Name, Pid}, _) ->
+    chronicle_utils:maps_foreach(
+      fun (_MRef, {_Name, Pid}) ->
               Fun(Pid)
-      end, unused, RSMs).
+      end, RSMs).
 
 -ifdef(TEST).
 

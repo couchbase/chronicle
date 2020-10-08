@@ -83,8 +83,8 @@ check_not_registered(Pid, Writers) ->
 
 check_key_conflicts(Keys, Writers) ->
     try
-        maps:fold(
-          fun (Pid, PidKeys, _) ->
+        chronicle_utils:maps_foreach(
+          fun (Pid, PidKeys) ->
                   Intersection = sets:intersection(Keys, PidKeys),
                   case sets:size(Intersection) > 0 of
                       true ->
@@ -93,7 +93,7 @@ check_key_conflicts(Keys, Writers) ->
                       false ->
                           ok
                   end
-          end, unused, Writers),
+          end, Writers),
 
         ok
     catch

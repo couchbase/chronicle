@@ -672,3 +672,28 @@ read_full(Fd, Size) ->
         Other ->
             Other
     end.
+
+maps_foreach(Fun, Map) ->
+    maps_foreach_loop(Fun, maps:iterator(Map)).
+
+maps_foreach_loop(Fun, MapIter) ->
+    case maps:next(MapIter) of
+        none ->
+            ok;
+        {Key, Value, NewMapIter} ->
+            Fun(Key, Value),
+            maps_foreach_loop(Fun, NewMapIter)
+    end.
+
+-ifdef(TEST).
+maps_foreach_test() ->
+    Map = #{1 => 2, 3 => 4, 5 => 6},
+    Ref = make_ref(),
+    erlang:put(Ref, []),
+    maps_foreach(
+      fun (Key, Value) ->
+              erlang:put(Ref, [{Key, Value} | erlang:get(Ref)])
+      end, Map),
+    Elems = erlang:erase(Ref),
+    ?assertEqual(lists:sort(maps:to_list(Map)), lists:sort(Elems)).
+-endif.
