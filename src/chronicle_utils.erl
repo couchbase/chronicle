@@ -146,9 +146,41 @@ terminate_and_wait(Pid, Reason) when is_pid(Pid) ->
     wait_for_process(Pid, infinity).
 
 terminate_linked_process(Pid, Reason) when is_pid(Pid) ->
-    terminate(Pid, Reason),
+    with_trap_exit(
+      fun () ->
+              terminate(Pid, Reason),
+              unlink(Pid),
+              ?FLUSH({'EXIT', Pid, _})
+      end),
+
+    wait_for_process(Pid, infinity).
+
+with_trap_exit(Fun) ->
+    Old = process_flag(trap_exit, true),
+    try
+        Fun()
+    after
+        case Old of
+            true ->
+                ok;
+            false ->
+                process_flag(trap_exit, false),
+                with_trap_exit_maybe_exit()
+        end
+    end.
+
+with_trap_exit_maybe_exit() ->
     receive
-        {'EXIT', Pid, _} ->
+        {'EXIT', _Pid, normal} = Exit ->
+            ?DEBUG("Ignoring exit message with reason normal: ~p", [Exit]),
+            with_trap_exit_maybe_exit();
+        {'EXIT', _Pid, Reason} = Exit ->
+            ?DEBUG("Terminating due to exit message ~p", [Exit]),
+            %% exit/2 is used instead of exit/1, so it can't be caught by a
+            %% try..catch block.
+            exit(self(), Reason)
+    after
+        0 ->
             ok
     end.
 
