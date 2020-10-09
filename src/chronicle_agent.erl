@@ -45,6 +45,11 @@
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 -define(STORE_BRANCH_TIMEOUT, 15000).
 
+-define(SNAPSHOT_TIMEOUT, 60000).
+-define(SNAPSHOT_RETRIES, 5).
+-define(SNAPSHOT_RETRY_AFTER, 10000).
+-define(SNAPSHOT_INTERVAL, 4096).
+
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is
 %% _ReplyType. This is entirely useless for dializer, but is usefull for
@@ -52,10 +57,22 @@
 -type replies(Tag, _ReplyType) :: Tag.
 -type peer() :: ?SELF_PEER | chronicle:peer().
 
+-record(snapshot_state, { tref,
+                          seqno,
+                          config,
+
+                          remaining_rsms,
+                          savers }).
+
 %% TODO: get rid of the duplication between #state{} and #metadata{}.
 -record(state, { storage,
                  rsms_by_name,
-                 rsms_by_mref }).
+                 rsms_by_mref,
+
+                 snapshot_attempts = 0,
+                 snapshot_state :: undefined
+                                 | {retry, reference()}
+                                 | #snapshot_state{}}).
 
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -84,6 +101,16 @@ get_metadata() ->
 
 register_rsm(Name, Pid) ->
     gen_server:call(?SERVER, {register_rsm, Name, Pid}, 10000).
+
+save_rsm_snapshot(Name, Pid, Seqno, Snapshot) ->
+    case gen_server:call(?SERVER,
+                         {get_rsm_snapshot_saver, Name, Pid, Seqno}, 10000) of
+        {ok, SaverPid} ->
+            SaverPid ! {snapshot, Snapshot};
+        {error, rejected} ->
+            ?INFO("Snapshot for RSM ~p at "
+                  "sequence number ~p got rejected.", [Name, Seqno])
+    end.
 
 get_log() ->
     gen_server:call(?SERVER, get_log).
@@ -280,6 +307,8 @@ handle_call({store_branch, Branch}, _From, State) ->
     handle_store_branch(Branch, State);
 handle_call({undo_branch, BranchId}, _From, State) ->
     handle_undo_branch(BranchId, State);
+handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, _From, State) ->
+    handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, State);
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -290,9 +319,18 @@ handle_cast(Cast, State) ->
 
 handle_info({'DOWN', MRef, process, Pid, Reason}, State) ->
     handle_down(MRef, Pid, Reason, State);
+handle_info({snapshot_result, Pid, RSM, Result}, State) ->
+    handle_snapshot_result(RSM, Pid, Result, State);
+handle_info(snapshot_timeout, State) ->
+    handle_snapshot_timeout(State);
+handle_info(retry_snapshot, State) ->
+    handle_retry_snapshot(State);
 handle_info(Msg, State) ->
     ?WARNING("Unexpected message ~p", [Msg]),
     {noreply, State}.
+
+terminate(_Reason, State) ->
+    maybe_cancel_snapshot(State).
 
 %% internal
 handle_get_metadata(State) ->
@@ -357,9 +395,15 @@ handle_register_rsm(Name, Pid, #state{rsms_by_name = RSMs,
             NewMRefs = MRefs#{MRef => Name},
 
             CommittedSeqno = get_meta(committed_seqno, State),
-            Info = #{committed_seqno => CommittedSeqno},
+            Info0 = #{committed_seqno => CommittedSeqno},
+            Info1 = case need_rsm_snapshot(Name, State) of
+                        {true, NeedSnapshotSeqno} ->
+                            Info0#{need_snapshot_seqno => NeedSnapshotSeqno};
+                        false ->
+                            Info0
+                    end,
 
-            {reply, {ok, Info},
+            {reply, {ok, Info1},
              State#state{rsms_by_name = NewRSMs,
                          rsms_by_mref = NewMRefs}}
     end.
@@ -376,6 +420,65 @@ handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
             {noreply, State#state{rsms_by_name = NewRSMs,
                                   rsms_by_mref = NewMRefs}}
     end.
+
+handle_snapshot_result(RSM, Pid, Result, State) ->
+    case Result of
+        ok ->
+            handle_snapshot_ok(RSM, Pid, State);
+        failed ->
+            handle_snapshot_failed(State)
+    end.
+
+handle_snapshot_ok(RSM, Pid, #state{snapshot_state = SnapshotState} = State) ->
+    #snapshot_state{tref = TRef,
+                    seqno = Seqno,
+                    config = Config,
+                    savers = Savers} = SnapshotState,
+    NewSavers = maps:remove(Pid, Savers),
+
+    ?DEBUG("Saved a snapshot for RSM ~p at seqno ~p", [RSM, Seqno]),
+
+    case maps:size(NewSavers) =:= 0 of
+        true ->
+            ?DEBUG("All RSM snapshots at seqno ~p saved. "
+                   "Recording the snapshot.~n"
+                   "Config:~n~p",
+                   [Seqno, Config]),
+
+            cancel_snapshot_timer(TRef),
+            NewState = State#state{snapshot_state = undefined},
+            {noreply, record_snapshot(Seqno, Config, NewState)};
+        false ->
+            NewSnapshotState = SnapshotState#snapshot_state{savers = NewSavers},
+            {noreply, State#state{snapshot_state = NewSnapshotState}}
+    end.
+
+handle_snapshot_failed(#state{snapshot_state = SnapshotState,
+                              snapshot_attempts = Attempts} = State) ->
+    #snapshot_state{seqno = Seqno} = SnapshotState,
+
+    NewAttempts = Attempts + 1,
+    AttemptsRemaining = ?SNAPSHOT_RETRIES - NewAttempts,
+
+    ?ERROR("Failed to take snapshot at seqno ~p. "
+           "~p attempts remaining.~nSnapshot state:~n~p",
+           [Seqno, AttemptsRemaining, SnapshotState]),
+    NewState = State#state{snapshot_attempts = NewAttempts},
+    case AttemptsRemaining > 0 of
+        true ->
+            {noreply, schedule_retry_snapshot(NewState)};
+        false ->
+            {stop, {snapshot_failed, SnapshotState}, NewState}
+    end.
+
+handle_snapshot_timeout(#state{snapshot_state = SnapshotState}) ->
+    ?ERROR("Timeout while taking snapshot.~n"
+           "Snapshot state:~n~p", [SnapshotState]),
+    {stop, {snapshot_timeout, SnapshotState}}.
+
+handle_retry_snapshot(State) ->
+    {retry, _} = State#state.snapshot_state,
+    {noreply, initiate_snapshot(State#state{snapshot_state = undefined})}.
 
 foreach_rsm(Fun, #state{rsms_by_name = RSMs}) ->
     chronicle_utils:maps_foreach(
@@ -635,7 +738,10 @@ complete_append(HistoryId, Term, Info, State) ->
            [HistoryId, Term, EndSeqno,
             NewCommittedSeqno, Entries, get_config(NewState)]),
 
-    {reply, ok, NewState}.
+    %% TODO: in-progress snapshots might need to be canceled if any of the
+    %% state machines get deleted.
+
+    {reply, ok, maybe_initiate_snapshot(NewState)}.
 
 check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State) ->
     ?CHECK(check_append_history_id(HistoryId, Entries, State),
@@ -996,9 +1102,8 @@ check_snapshot_seqno(SnapshotSeqno, State) ->
             {error, {snapshot_rejected, state2metadata(State)}}
     end.
 
-check_snapshot_config(ConfigEntry, RSMSnapshots) ->
-    Config = ConfigEntry#log_entry.value,
-    ConfigRSMs = maps:keys(chronicle_utils:config_rsms(Config)),
+check_snapshot_config(Config, RSMSnapshots) ->
+    ConfigRSMs = maps:keys(get_rsms(Config)),
     SnapshotRSMs = maps:keys(RSMSnapshots),
 
     case ConfigRSMs -- SnapshotRSMs of
@@ -1084,6 +1189,86 @@ handle_undo_branch(BranchId, State) ->
             {reply, ok, NewState};
         {error, _} = Error ->
             {reply, Error, State}
+    end.
+
+handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, State) ->
+    case need_rsm_snapshot(RSM, Seqno, State) of
+        true ->
+            {Pid, NewState} =
+                spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno, State),
+            {reply, {ok, Pid}, NewState};
+        false ->
+            {reply, {error, rejected}, State}
+    end.
+
+spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno,
+                         #state{snapshot_state = SnapshotState,
+                                storage = Storage} = State) ->
+    #snapshot_state{savers = Savers,
+                    remaining_rsms = RemainingRSMs} = SnapshotState,
+
+    Parent = self(),
+    Pid = proc_lib:spawn_link(
+            fun () ->
+                    Result =
+                        try rsm_snapshot_saver(RSM, RSMPid, Seqno, Storage) of
+                            R ->
+                                R
+                        catch
+                            T:E:Stacktrace ->
+                                ?ERROR("Exception while taking "
+                                       "snapshot for RSM ~p~p at seqno ~p: ~p~n"
+                                       "Stacktrace:~n~p",
+                                       [RSM, RSMPid,
+                                        Seqno, {T, E}, Stacktrace]),
+                                failed
+                        end,
+
+                    Parent ! {snapshot_result, self(), RSM, Result}
+            end),
+
+    NewSnapshotState =
+        SnapshotState#snapshot_state{
+          savers = Savers#{Pid => RSM},
+          remaining_rsms = sets:del_element(RSM, RemainingRSMs)},
+
+    {Pid, State#state{snapshot_state = NewSnapshotState}}.
+
+rsm_snapshot_saver(RSM, RSMPid, Seqno, Storage) ->
+    MRef = erlang:monitor(process, RSMPid),
+
+    receive
+        {snapshot, Snapshot} ->
+            chronicle_storage:save_rsm_snapshot(Seqno, RSM, Snapshot, Storage);
+        {'DOWN', MRef, process, RSMPid, Reason} ->
+            ?ERROR("RSM ~p~p died with reason ~p "
+                   "before passing a snapshot for seqno ~p.",
+                   [RSM, RSMPid, Reason, Seqno]),
+            failed
+    end.
+
+need_rsm_snapshot(RSM, #state{snapshot_state = SnapshotState}) ->
+    case SnapshotState of
+        undefined ->
+            false;
+        {retry, _} ->
+            false;
+        #snapshot_state{seqno = SnapshotSeqno,
+                        remaining_rsms = RemainingRSMs} ->
+            case sets:is_element(RSM, RemainingRSMs) of
+                true ->
+                    {true, SnapshotSeqno};
+                false ->
+                    false
+            end
+    end.
+
+need_rsm_snapshot(RSM, Seqno, State) ->
+    case need_rsm_snapshot(RSM, State) of
+        {true, NeedSnapshotSeqno} ->
+            NeedSnapshotSeqno =:= Seqno;
+        false ->
+            false
     end.
 
 check_branch_id(BranchId, State) ->
@@ -1314,6 +1499,11 @@ append_entries(StartSeqno, EndSeqno, Entries,
     chronicle_storage:sync(NewStorage),
     State#state{storage = publish_storage(NewStorage)}.
 
+record_snapshot(Seqno, ConfigEntry, #state{storage = Storage} = State) ->
+    NewStorage = chronicle_storage:record_snapshot(Seqno, ConfigEntry, Storage),
+    chronicle_storage:sync(NewStorage),
+    State#state{storage = NewStorage}.
+
 save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
     lists:foreach(
       fun ({RSM, RSMSnapshotBinary}) ->
@@ -1353,5 +1543,107 @@ get_high_seqno(#state{storage = Storage}) ->
 get_config(#state{storage = Storage}) ->
     chronicle_storage:get_config(Storage).
 
+get_config_for_seqno(Seqno, #state{storage = Storage}) ->
+    chronicle_storage:get_config_for_seqno(Seqno, Storage).
+
+get_last_snapshot_seqno(#state{storage = Storage}) ->
+    chronicle_storage:get_last_snapshot_seqno(Storage).
+
 get_log_entry(Seqno, #state{storage = Storage}) ->
     chronicle_storage:get_log_entry(Seqno, Storage).
+
+maybe_initiate_snapshot(#state{snapshot_state = #snapshot_state{}} = State) ->
+    State;
+maybe_initiate_snapshot(#state{snapshot_state = {retry, _}} = State) ->
+    State;
+maybe_initiate_snapshot(State) ->
+    LastSnapshotSeqno = get_last_snapshot_seqno(State),
+    CommittedSeqno = get_meta(committed_seqno, State),
+
+    case CommittedSeqno - LastSnapshotSeqno >= ?SNAPSHOT_INTERVAL of
+        true ->
+            initiate_snapshot(State);
+        false ->
+            State
+    end.
+
+initiate_snapshot(State) ->
+    undefined = State#state.snapshot_state,
+
+    CommittedSeqno = get_meta(committed_seqno, State),
+    CommittedConfig = get_config_for_seqno(CommittedSeqno, State),
+    CurrentConfig = get_config(State),
+
+    CommittedRSMs = get_rsms(CommittedConfig),
+    CurrentRSMs = get_rsms(CurrentConfig),
+
+    %% TODO: depending on specifics of how RSM deletions are handled,
+    %% it may not be safe when there's an uncommitted config deleting
+    %% an RSM. Deal with this once RSM deletions are supported. For
+    %% now we are asserting that the set of RSMs is the same in both
+    %% configs.
+    true = (CommittedRSMs =:= CurrentRSMs),
+
+    TRef = start_snapshot_timer(),
+
+    RSMs = sets:from_list(maps:keys(CommittedRSMs)),
+    SnapshotState = #snapshot_state{tref = TRef,
+                                    seqno = CommittedSeqno,
+                                    config = CommittedConfig,
+                                    remaining_rsms = RSMs,
+                                    savers = #{}},
+
+    foreach_rsm(
+      fun (_Name, Pid) ->
+              chronicle_rsm:take_snapshot(Pid, CommittedSeqno)
+      end, State),
+
+    ?INFO("Taking snapshot at seqno ~p.~n"
+          "Config:~n~p",
+          [CommittedSeqno, CommittedConfig]),
+
+    State#state{snapshot_state = SnapshotState}.
+
+start_snapshot_timer() ->
+    erlang:send_after(?SNAPSHOT_TIMEOUT, self(), snapshot_timeout).
+
+cancel_snapshot_timer(TRef) ->
+    erlang:cancel_timer(TRef),
+    ?FLUSH(snapshot_timeout).
+
+schedule_retry_snapshot(State) ->
+    NewState = cancel_snapshot(State),
+    TRef = erlang:send_after(?SNAPSHOT_RETRY_AFTER, self(), retry_snapshot),
+    NewState#state{snapshot_state = {retry, TRef}}.
+
+cancel_snapshot_retry(State) ->
+    {retry, TRef} = State#state.snapshot_state,
+
+    erlang:cancel_timer(TRef),
+    ?FLUSH(retry_snapshot),
+    State#state{snapshot_state = undefined}.
+
+maybe_cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
+    case SnapshotState of
+        undefined ->
+            State;
+        {retry, _TRef} ->
+            cancel_snapshot_retry(State);
+        #snapshot_state{} ->
+            cancel_snapshot(State)
+    end.
+
+cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
+    #snapshot_state{tref = TRef, savers = Savers} = SnapshotState,
+
+    cancel_snapshot_timer(TRef),
+    chronicle_utils:maps_foreach(
+      fun (Pid, _RSM) ->
+              chronicle_utils:terminate_linked_process(Pid, kill)
+      end, Savers),
+
+    %% TODO: cleanup leftover files
+    State#state{snapshot_state = undefined}.
+
+get_rsms(#log_entry{value = Config}) ->
+    chronicle_utils:config_rsms(Config).

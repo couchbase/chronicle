@@ -141,6 +141,9 @@ note_term_finished(Pid, HistoryId, Term) ->
 note_seqno_committed(Pid, Seqno) ->
     gen_statem:cast(Pid, {seqno_committed, Seqno}).
 
+take_snapshot(Pid, Seqno) ->
+    gen_statem:cast(Pid, {take_snapshot, Seqno}).
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -158,7 +161,6 @@ init([Name, Mod, ModArgs]) ->
                           mod = Mod,
                           mod_state = ModState,
                           mod_data = ModData},
-
 
             Data = register_with_agent(State, Data0),
             Effects =
@@ -197,6 +199,8 @@ handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
     handle_term_finished(HistoryId, Term, State, Data);
 handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
     handle_seqno_committed(Seqno, State, Data);
+handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
+    handle_take_snapshot(Seqno, State, Data);
 handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
     handle_command_result(Ref, Result, State, Data);
 handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, State, Data) ->
@@ -583,6 +587,16 @@ handle_seqno_committed(CommittedSeqno, State,
     NewData = read_log(CommittedSeqno, State, Data),
     {next_state, maybe_mark_leader_established(State, NewData), NewData}.
 
+handle_take_snapshot(Seqno, _State, Data) ->
+    save_snapshot(Seqno, Data),
+    keep_state_and_data.
+
+save_snapshot(Seqno, #data{name = Name,
+                           read_seqno = ReadSeqno,
+                           mod_state = ModState}) ->
+    true = (Seqno =:= ReadSeqno),
+    chronicle_agent:save_rsm_snapshot(Name, self(), Seqno, ModState).
+
 read_log(EndSeqno, State, Data) ->
     Entries = get_log(EndSeqno, Data),
     NewData = apply_entries(EndSeqno, Entries, State, Data),
@@ -666,4 +680,17 @@ publish_local_revision(#data{name = Name,
 register_with_agent(State, #data{name = Name} = Data) ->
     {ok, Info} = chronicle_agent:register_rsm(Name, self()),
     #{committed_seqno := CommittedSeqno} = Info,
-    read_log(CommittedSeqno, State, Data).
+
+    NewData =
+        case maps:find(need_snapshot_seqno, Info) of
+            {ok, SnapshotSeqno} ->
+                true = (SnapshotSeqno =< CommittedSeqno),
+
+                Data1 = read_log(SnapshotSeqno, State, Data),
+                save_snapshot(SnapshotSeqno, Data1),
+                Data1;
+            error ->
+                Data
+        end,
+
+    read_log(CommittedSeqno, State, NewData).
