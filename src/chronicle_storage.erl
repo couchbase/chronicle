@@ -542,12 +542,19 @@ save_rsm_snapshot(Seqno, RSM, RSMState,
 
     %% We don't really care about atomicity that much here. But it also
     %% doesn't hurt.
-    chronicle_utils:atomic_write_file(
-      Path,
-      fun (File) ->
-              ok = file:write(File, <<Crc:?CRC_BITS>>),
-              ok = file:write(File, Data)
-      end).
+    Result = chronicle_utils:atomic_write_file(
+               Path,
+               fun (File) ->
+                       ok = file:write(File, <<Crc:?CRC_BITS>>),
+                       ok = file:write(File, Data)
+               end),
+
+    case Result of
+        ok ->
+            ok;
+        {error, Error} ->
+            exit({snapshot_failed, Path, Error})
+    end.
 
 validate_rsm_snapshot(SnapshotDir, RSM) ->
     Path = rsm_snapshot_path(SnapshotDir, RSM),
