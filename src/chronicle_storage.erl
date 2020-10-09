@@ -657,6 +657,6 @@ get_last_snapshot_seqno(#storage{snapshots = Snapshots}) ->
     case Snapshots of
         [] ->
             ?NO_SEQNO;
-        [{Seqno, _}] ->
+        [{Seqno, _} | _] ->
             Seqno
     end.
