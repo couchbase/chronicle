@@ -537,7 +537,7 @@ save_rsm_snapshot(Seqno, RSM, RSMState,
     ok = chronicle_utils:mkdir_p(SnapshotDir),
 
     Path = rsm_snapshot_path(SnapshotDir, RSM),
-    Data = term_to_binary(RSMState, {compressed, 9}),
+    Data = term_to_binary(RSMState, [{compressed, 9}]),
     Crc = erlang:crc32(Data),
 
     %% We don't really care about atomicity that much here. But it also
