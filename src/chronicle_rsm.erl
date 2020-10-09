@@ -148,20 +148,7 @@ callback_mode() ->
 init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
-            Self = self(),
-
-            {ok, Info} = chronicle_agent:register_rsm(Name, Self),
-            #{committed_seqno := CommittedSeqno} = Info,
-
-            Effects =
-                case chronicle_server:register_rsm(Name, self()) of
-                    {ok, HistoryId, Term, Seqno} ->
-                        {next_event, cast,
-                         {term_established, HistoryId, Term, Seqno}};
-                    no_term ->
-                        []
-                end,
-
+            State = #follower{},
             Data0 = #data{name = Name,
                           applied_history_id = ?NO_HISTORY,
                           applied_seqno = ?NO_SEQNO,
@@ -172,8 +159,16 @@ init([Name, Mod, ModArgs]) ->
                           mod_state = ModState,
                           mod_data = ModData},
 
-            State = #follower{},
-            Data = read_log(CommittedSeqno, State, Data0),
+
+            Data = register_with_agent(State, Data0),
+            Effects =
+                case chronicle_server:register_rsm(Name, self()) of
+                    {ok, HistoryId, Term, Seqno} ->
+                        {next_event, cast,
+                         {term_established, HistoryId, Term, Seqno}};
+                    no_term ->
+                        []
+                end,
 
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
             publish_local_revision(Data),
@@ -667,3 +662,8 @@ publish_local_revision(#data{name = Name,
                              applied_seqno = AppliedSeqno}) ->
     Revision = {AppliedHistoryId, AppliedSeqno},
     chronicle_ets:put(?LOCAL_REVISION_KEY(Name), Revision).
+
+register_with_agent(State, #data{name = Name} = Data) ->
+    {ok, Info} = chronicle_agent:register_rsm(Name, self()),
+    #{committed_seqno := CommittedSeqno} = Info,
+    read_log(CommittedSeqno, State, Data).
