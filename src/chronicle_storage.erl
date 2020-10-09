@@ -534,6 +534,8 @@ save_rsm_snapshot(Seqno, RSM, RSMState,
     false = lists:keymember(Seqno, 1, Snapshots),
 
     SnapshotDir = snapshot_dir(DataDir, Seqno),
+    ok = chronicle_utils:mkdir_p(SnapshotDir),
+
     Path = rsm_snapshot_path(SnapshotDir, RSM),
     Data = term_to_binary(RSMState, {compressed, 9}),
     Crc = erlang:crc32(Data),
