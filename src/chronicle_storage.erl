@@ -602,7 +602,7 @@ validate_snapshot(DataDir, Seqno, Config) ->
                       {error, Error} ->
                           {true, {RSM, Error}}
                   end
-          end, RSMs),
+          end, maps:keys(RSMs)),
 
     case Errors =:= [] of
         true ->
