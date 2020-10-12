@@ -595,7 +595,7 @@ save_snapshot(Seqno, #data{name = Name,
                            read_seqno = ReadSeqno,
                            mod_state = ModState}) ->
     true = (Seqno =:= ReadSeqno),
-    chronicle_agent:save_rsm_snapshot(Name, self(), Seqno, ModState).
+    chronicle_agent:save_rsm_snapshot(Name, Seqno, ModState).
 
 read_log(EndSeqno, State, Data) ->
     Entries = get_log(EndSeqno, Data),

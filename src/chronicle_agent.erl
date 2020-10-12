@@ -102,7 +102,8 @@ get_metadata() ->
 register_rsm(Name, Pid) ->
     gen_server:call(?SERVER, {register_rsm, Name, Pid}, 10000).
 
-save_rsm_snapshot(Name, Pid, Seqno, Snapshot) ->
+save_rsm_snapshot(Name, Seqno, Snapshot) ->
+    Pid = self(),
     case gen_server:call(?SERVER,
                          {get_rsm_snapshot_saver, Name, Pid, Seqno}, 10000) of
         {ok, SaverPid} ->
