@@ -561,7 +561,7 @@ validate_rsm_snapshot(SnapshotDir, RSM) ->
     case file:open(Path, [read, raw, binary]) of
         {ok, File} ->
             case chronicle_utils:read_full(File, ?CRC_BYTES) of
-                {ok, Crc} ->
+                {ok, <<Crc:?CRC_BITS>>} ->
                     validate_rsm_snapshot_loop(Path, File, Crc, 0);
                 eof ->
                     {error, unexpected_eof};
