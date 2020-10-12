@@ -1546,8 +1546,8 @@ get_config(#state{storage = Storage}) ->
 get_config_for_seqno(Seqno, #state{storage = Storage}) ->
     chronicle_storage:get_config_for_seqno(Seqno, Storage).
 
-get_last_snapshot_seqno(#state{storage = Storage}) ->
-    chronicle_storage:get_last_snapshot_seqno(Storage).
+get_latest_snapshot_seqno(#state{storage = Storage}) ->
+    chronicle_storage:get_latest_snapshot_seqno(Storage).
 
 get_log_entry(Seqno, #state{storage = Storage}) ->
     chronicle_storage:get_log_entry(Seqno, Storage).
@@ -1557,10 +1557,10 @@ maybe_initiate_snapshot(#state{snapshot_state = #snapshot_state{}} = State) ->
 maybe_initiate_snapshot(#state{snapshot_state = {retry, _}} = State) ->
     State;
 maybe_initiate_snapshot(State) ->
-    LastSnapshotSeqno = get_last_snapshot_seqno(State),
+    LatestSnapshotSeqno = get_latest_snapshot_seqno(State),
     CommittedSeqno = get_meta(committed_seqno, State),
 
-    case CommittedSeqno - LastSnapshotSeqno >= ?SNAPSHOT_INTERVAL of
+    case CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL of
         true ->
             initiate_snapshot(State);
         false ->

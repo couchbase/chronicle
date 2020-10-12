@@ -500,8 +500,8 @@ get_seqno_range() ->
 
 record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
                                         snapshots = Snapshots} = Storage) ->
-    LastSnapshotSeqno = get_last_snapshot_seqno(Storage),
-    true = (Seqno > LastSnapshotSeqno),
+    LatestSnapshotSeqno = get_latest_snapshot_seqno(Storage),
+    true = (Seqno > LatestSnapshotSeqno),
 
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
@@ -514,7 +514,7 @@ install_snapshot(Seqno, Config, Meta,
                           meta = OldMeta} = Storage) ->
     true = (Seqno > HighSeqno),
 
-    Seqno = get_last_snapshot_seqno(Storage),
+    Seqno = get_latest_snapshot_seqno(Storage),
     log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
 
     %% TODO: The log entries in the ets table need to be cleaned up as
@@ -653,7 +653,7 @@ validate_state(#storage{low_seqno = LowSeqno,
 
     Storage#storage{snapshots = ValidSnapshots}.
 
-get_last_snapshot_seqno(#storage{snapshots = Snapshots}) ->
+get_latest_snapshot_seqno(#storage{snapshots = Snapshots}) ->
     case Snapshots of
         [] ->
             ?NO_SEQNO;
