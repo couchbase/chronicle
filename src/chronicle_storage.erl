@@ -25,8 +25,6 @@
 
 -define(RANGE_KEY, '$range').
 
--define(READ_CHUNK_SIZE, 1024 * 1024).
-
 -record(storage, { current_log,
                    low_seqno,
                    high_seqno,
@@ -558,36 +556,33 @@ save_rsm_snapshot(Seqno, RSM, RSMState,
 
 validate_rsm_snapshot(SnapshotDir, RSM) ->
     Path = rsm_snapshot_path(SnapshotDir, RSM),
-    case file:open(Path, [read, raw, binary]) of
-        {ok, File} ->
-            case chronicle_utils:read_full(File, ?CRC_BYTES) of
-                {ok, <<Crc:?CRC_BITS>>} ->
-                    validate_rsm_snapshot_loop(Path, File, Crc, 0);
-                eof ->
-                    {error, unexpected_eof};
-                {error, Error} ->
-                    exit({read_failed, Path, Error})
-            end;
-        {error, not_found} ->
-            {error, not_found};
-        {error, Error} ->
-            exit({open_failed, Path, Error})
+    case read_rsm_snapshot_data(SnapshotDir, RSM) of
+        {ok, _Data} ->
+            ok;
+        {error, {invalid_snapshot, _Reason}} = Error ->
+            Error;
+        {error, Reason} ->
+            exit({snapshot_read_failed, Path, Reason})
     end.
 
-validate_rsm_snapshot_loop(Path, File, Crc, AccCrc) ->
-    case file:read(File, ?READ_CHUNK_SIZE) of
-        {ok, Data} ->
-            validate_rsm_snapshot_loop(Path, File, Crc,
-                                       erlang:crc32(AccCrc, Data));
-        eof ->
-            case Crc =:= AccCrc of
-                true ->
-                    ok;
-                false ->
-                    {error, crc_mismatch}
+read_rsm_snapshot_data(SnapshotDir, RSM) ->
+    Path = rsm_snapshot_path(SnapshotDir, RSM),
+    case file:read_file(Path) of
+        {ok, Binary} ->
+            case Binary of
+                <<Crc:?CRC_BITS, Data/binary>> ->
+                    DataCrc = erlang:crc32(Data),
+                    case Crc =:= DataCrc of
+                        true ->
+                            {ok, Data};
+                        false ->
+                            {error, {invalid_snapshot, crc_mismatch}}
+                    end;
+                _ ->
+                    {error, {invalid_snapshot, unexpected_eof}}
             end;
-        {error, Error} ->
-            exit({read_failed, Path, Error})
+        {error, _} = Error ->
+            Error
     end.
 
 validate_snapshot(DataDir, Seqno, Config) ->
