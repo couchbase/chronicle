@@ -1080,7 +1080,7 @@ handle_install_snapshot(HistoryId, Term,
             maybe_announce_new_config(State, NewState),
             maybe_announce_committed_seqno(State, NewState),
 
-            {reply, ok, NewState};
+            {reply, ok, maybe_cancel_snapshot(NewState)};
         {error, _} = Error ->
             {reply, Error, State}
     end.
