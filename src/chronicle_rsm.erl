@@ -47,6 +47,10 @@
                   term :: chronicle:leader_term(),
                   status :: leader_status() }).
 
+-record(snapshot, { applied_history_id :: chronicle:history_id(),
+                    applied_seqno :: chronicle:seqno(),
+                    mod_state :: any() }).
+
 -record(data, { name :: atom(),
 
                 applied_history_id :: chronicle:history_id(),
@@ -592,10 +596,16 @@ handle_take_snapshot(Seqno, _State, Data) ->
     keep_state_and_data.
 
 save_snapshot(Seqno, #data{name = Name,
+                           applied_history_id = AppliedHistoryId,
+                           applied_seqno = AppliedSeqno,
                            read_seqno = ReadSeqno,
                            mod_state = ModState}) ->
     true = (Seqno =:= ReadSeqno),
-    chronicle_agent:save_rsm_snapshot(Name, Seqno, ModState).
+
+    Snapshot = #snapshot{applied_history_id = AppliedHistoryId,
+                         applied_seqno = AppliedSeqno,
+                         mod_state = ModState},
+    chronicle_agent:save_rsm_snapshot(Name, Seqno, Snapshot).
 
 read_log(EndSeqno, State, Data) ->
     Entries = get_log(EndSeqno, Data),
