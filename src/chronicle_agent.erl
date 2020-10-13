@@ -125,12 +125,8 @@ get_rsm_snapshot(Name, Seqno, Config, Storage) ->
     RSMs = get_rsms(Config),
     case maps:is_key(Name, RSMs) of
         true ->
-            case chronicle_storage:read_rsm_snapshot(Name, Seqno, Storage) of
-                {ok, Snapshot} ->
-                    {ok, Seqno, Snapshot};
-                {error, Error} ->
-                    exit({get_rsm_snapshot_failed, Name, Seqno, Config, Error})
-            end;
+            Snapshot = read_rsm_snapshot(Name, Seqno, Storage),
+            {ok, Seqno, Snapshot};
         false ->
             {no_snapshot, Seqno}
     end.
@@ -1714,3 +1710,11 @@ cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
 
 get_rsms(#log_entry{value = Config}) ->
     chronicle_utils:config_rsms(Config).
+
+read_rsm_snapshot(Name, Seqno, Storage) ->
+    case chronicle_storage:read_rsm_snapshot(Name, Seqno, Storage) of
+        {ok, Snapshot} ->
+            Snapshot;
+        {error, Error} ->
+            exit({get_rsm_snapshot_failed, Name, Seqno, Error})
+    end.
