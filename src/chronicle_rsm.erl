@@ -19,7 +19,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call/3, read_timeout/1,
+-import(chronicle_utils, [call/2, call/3, read_timeout/1,
                           with_leader/2, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
@@ -101,22 +101,27 @@ get_applied_revision(Leader, Name, Type, Timeout) ->
     call(?SERVER(Leader, Name), {get_applied_revision, Type}, Timeout).
 
 get_local_revision(Name) ->
-    case chronicle_ets:get(?LOCAL_REVISION_KEY(Name)) of
+    case get_local_revision_fast(Name) of
         {ok, Revision} ->
             Revision;
-        not_found ->
-            exit(not_running)
+        use_slow_path ->
+            %% The process might still be initializing. So fall back to a call.
+            call(?SERVER(Name), get_local_revision)
     end.
 
-sync_revision(Name, {RevHistoryId, RevSeqno} = Revision, Timeout0) ->
-    {LocalHistoryId, LocalSeqno} = get_local_revision(Name),
-    AlreadySynced =
-        (LocalHistoryId =:= RevHistoryId andalso LocalSeqno >= RevSeqno),
+get_local_revision_fast(Name) ->
+    case chronicle_ets:get(?LOCAL_REVISION_KEY(Name)) of
+        {ok, _Revision} = Ok->
+            Ok;
+        not_found ->
+            use_slow_path
+    end.
 
-    case AlreadySynced of
-        true ->
+sync_revision(Name, Revision, Timeout0) ->
+    case sync_revision_fast(Name, Revision) of
+        ok ->
             ok;
-        false ->
+        use_slow_path ->
             Timeout = read_timeout(Timeout0),
             Request = {sync_revision, Revision, Timeout},
             case call(?SERVER(Name), Request, infinity) of
@@ -125,6 +130,15 @@ sync_revision(Name, {RevHistoryId, RevSeqno} = Revision, Timeout0) ->
                 {error, timeout} ->
                     exit({timeout, {sync_revision, Name, Revision, Timeout}})
             end
+    end.
+
+sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
+    case get_local_revision_fast(Name) of
+        {LocalHistoryId, LocalSeqno}
+          when LocalHistoryId =:= RevHistoryId andalso LocalSeqno >= RevSeqno ->
+            ok;
+        _ ->
+            use_slow_path
     end.
 
 sync(Name, Type, Timeout) ->
@@ -193,6 +207,8 @@ handle_event({call, From}, {command, Command}, State, Data) ->
     handle_command(Command, From, State, Data);
 handle_event({call, From}, {query, Query}, State, Data) ->
     handle_query(Query, From, State, Data);
+handle_event({call, From}, get_local_revision, State, Data) ->
+    handle_get_local_revision(From, State, Data);
 handle_event({call, From}, {sync_revision, Revision, Timeout}, State, Data) ->
     handle_sync_revision(Revision, Timeout, From, State, Data);
 handle_event({call, From}, {get_applied_revision, Type}, State, Data) ->
@@ -249,6 +265,10 @@ handle_command_leader(Command, From, State, Data) ->
 handle_query(Query, From, _State, Data) ->
     {reply, Reply, NewModData} = call_callback(handle_query, [Query], Data),
     {keep_state, set_mod_data(NewModData, Data), {reply, From, Reply}}.
+
+handle_get_local_revision(From, _State, Data) ->
+    {keep_state_and_data,
+     {reply, From, local_revision(Data)}}.
 
 handle_sync_revision({HistoryId, Seqno}, Timeout, From,
                      _State,
@@ -681,11 +701,12 @@ call_callback(Callback, Args, #data{mod = Mod,
     AppliedRevision = {AppliedHistoryId, AppliedSeqno},
     erlang:apply(Mod, Callback, Args ++ [AppliedRevision, ModState, ModData]).
 
-publish_local_revision(#data{name = Name,
-                             applied_history_id = AppliedHistoryId,
-                             applied_seqno = AppliedSeqno}) ->
-    Revision = {AppliedHistoryId, AppliedSeqno},
-    chronicle_ets:put(?LOCAL_REVISION_KEY(Name), Revision).
+publish_local_revision(#data{name = Name} = Data) ->
+    chronicle_ets:put(?LOCAL_REVISION_KEY(Name), local_revision(Data)).
+
+local_revision(#data{applied_history_id = AppliedHistoryId,
+                     applied_seqno = AppliedSeqno}) ->
+    {AppliedHistoryId, AppliedSeqno}.
 
 register_with_agent(State, #data{name = Name} = Data0) ->
     {ok, Info} = chronicle_agent:register_rsm(Name, self()),
