@@ -131,6 +131,21 @@ get_rsm_snapshot(Name, Seqno, Config, Storage) ->
             {no_snapshot, Seqno}
     end.
 
+get_full_snapshot() ->
+    with_latest_snapshot(
+      fun (Seqno, Config, Storage) ->
+              get_full_snapshot(Seqno, Config, Storage)
+      end).
+
+get_full_snapshot(Seqno, Config, Storage) ->
+    RSMs = get_rsms(Config),
+    RSMSnapshots =
+        maps:map(
+          fun (Name, _) ->
+                  read_rsm_snapshot(Name, Seqno, Storage)
+          end, RSMs),
+    {ok, Seqno, Config, RSMSnapshots}.
+
 with_latest_snapshot(Fun) ->
     case gen_server:call(?SERVER, {get_latest_snapshot, self()}, 10000) of
         {ok, Ref, Seqno, Config, Storage} ->
