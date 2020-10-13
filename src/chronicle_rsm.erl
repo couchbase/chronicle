@@ -687,9 +687,12 @@ publish_local_revision(#data{name = Name,
     Revision = {AppliedHistoryId, AppliedSeqno},
     chronicle_ets:put(?LOCAL_REVISION_KEY(Name), Revision).
 
-register_with_agent(State, #data{name = Name} = Data) ->
+register_with_agent(State, #data{name = Name} = Data0) ->
     {ok, Info} = chronicle_agent:register_rsm(Name, self()),
     #{committed_seqno := CommittedSeqno} = Info,
+
+    Data = maybe_restore_snapshot(Data0),
+    true = (Data#data.read_seqno =< CommittedSeqno),
 
     NewData =
         case maps:find(need_snapshot_seqno, Info) of
@@ -704,3 +707,23 @@ register_with_agent(State, #data{name = Name} = Data) ->
         end,
 
     read_log(CommittedSeqno, State, NewData).
+
+maybe_restore_snapshot(#data{name = Name} = Data) ->
+    case chronicle_agent:get_rsm_snapshot(Name) of
+        {ok, SnapshotSeqno, Snapshot} ->
+            apply_snapshot(SnapshotSeqno, Snapshot, Data);
+        {no_snapshot, SnapshotSeqno} ->
+            Data#data{read_seqno = SnapshotSeqno}
+    end.
+
+apply_snapshot(Seqno, Snapshot, Data) ->
+    #snapshot{applied_history_id = AppliedHistoryId,
+              applied_seqno = AppliedSeqno,
+              mod_state = ModState} = Snapshot,
+    Revision = {AppliedHistoryId, AppliedSeqno},
+    {ok, ModData} = call_callback(apply_snapshot, [Revision, ModState], Data),
+    Data#data{applied_history_id = AppliedHistoryId,
+              applied_seqno = AppliedSeqno,
+              read_seqno = Seqno,
+              mod_state = ModState,
+              mod_data = ModData}.
