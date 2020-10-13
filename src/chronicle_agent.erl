@@ -45,6 +45,8 @@
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 -define(STORE_BRANCH_TIMEOUT, 15000).
 
+-define(INSTALL_SNAPSHOT_TIMEOUT, 120000).
+
 -define(SNAPSHOT_TIMEOUT, 60000).
 -define(SNAPSHOT_RETRIES, 5).
 -define(SNAPSHOT_RETRY_AFTER, 10000).
@@ -279,13 +281,11 @@ append(Peer, Opaque, HistoryId, Term, CommittedSeqno, AtSeqno, Entries) ->
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
 
-install_snapshot(Peer, Opaque,
-                 HistoryId, Term,
-                 Seqno, ConfigEntry, RSMSnapshots) ->
-    call_async(?SERVER(Peer), Opaque,
-               {install_snapshot,
-                HistoryId, Term,
-                Seqno, ConfigEntry, RSMSnapshots}).
+install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
+    gen_server:call(?SERVER(Peer),
+                    {install_snapshot,
+                     HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots},
+                    ?INSTALL_SNAPSHOT_TIMEOUT).
 
 -spec local_mark_committed(chronicle:history_id(),
                            chronicle:leader_term(),
