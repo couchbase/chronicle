@@ -368,20 +368,20 @@ handle_sync_revision_timeout(Request, _State,
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
-%% Mark the leader established when applied seqno catches up with the high
-%% seqno as of when the term was established.
-maybe_mark_leader_established(State, Data) ->
+handle_seqno_committed_next_state(CommittedSeqno, State, Data) ->
     case State of
         #follower{} ->
-            State;
+            {keep_state, Data};
         #leader{status = established} ->
-            State;
+            {keep_state, Data};
         #leader{status = {wait_for_seqno, Seqno}} ->
-            case Data#data.applied_seqno >= Seqno of
+            %% Mark the leader established when applied seqno catches up with
+            %% the high seqno as of when the term was established.
+            case CommittedSeqno >= Seqno of
                 true ->
-                    State#leader{status = established};
+                    {next_state, State#leader{status = established}, Data};
                 false ->
-                    State
+                    {keep_state, Data}
             end
     end.
 
@@ -609,7 +609,8 @@ handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
     true = (CommittedSeqno > ReadSeqno),
     NewData = read_log(CommittedSeqno, State, Data),
-    {next_state, maybe_mark_leader_established(State, NewData), NewData}.
+
+    handle_seqno_committed_next_state(CommittedSeqno, State, NewData).
 
 handle_take_snapshot(Seqno, _State, Data) ->
     save_snapshot(Seqno, Data),
