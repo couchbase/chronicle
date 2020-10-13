@@ -69,6 +69,8 @@
                  rsms_by_name,
                  rsms_by_mref,
 
+                 snapshot_readers,
+
                  snapshot_attempts = 0,
                  snapshot_state :: undefined
                                  | {retry, reference()}
@@ -111,6 +113,38 @@ save_rsm_snapshot(Name, Seqno, Snapshot) ->
         {error, rejected} ->
             ?INFO("Snapshot for RSM ~p at "
                   "sequence number ~p got rejected.", [Name, Seqno])
+    end.
+
+get_rsm_snapshot(Name) ->
+    with_latest_snapshot(
+      fun (Seqno, Config, Storage) ->
+              get_rsm_snapshot(Name, Seqno, Config, Storage)
+      end).
+
+get_rsm_snapshot(Name, Seqno, Config, Storage) ->
+    RSMs = get_rsms(Config),
+    case maps:is_key(Name, RSMs) of
+        true ->
+            case chronicle_storage:read_rsm_snapshot(Name, Seqno, Storage) of
+                {ok, Snapshot} ->
+                    {ok, Seqno, Snapshot};
+                {error, Error} ->
+                    exit({get_rsm_snapshot_failed, Name, Seqno, Config, Error})
+            end;
+        false ->
+            {no_snapshot, Seqno}
+    end.
+
+with_latest_snapshot(Fun) ->
+    case gen_server:call(?SERVER, {get_latest_snapshot, self()}, 10000) of
+        {ok, Ref, Seqno, Config, Storage} ->
+            try
+                Fun(Seqno, Config, Storage)
+            after
+                gen_server:cast(?SERVER, {release_snapshot, Ref})
+            end;
+        {error, no_snapshot} ->
+            {no_snapshot, ?NO_SEQNO}
     end.
 
 get_log() ->
@@ -279,6 +313,8 @@ handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno}, _From, State) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State);
 handle_call({register_rsm, Name, Pid}, _From, State) ->
     handle_register_rsm(Name, Pid, State);
+handle_call({get_latest_snapshot, Pid}, _From, State) ->
+    handle_get_latest_snapshot(Pid, State);
 handle_call({provision, Machines}, _From, State) ->
     handle_provision(Machines, State);
 handle_call(reprovision, _From, State) ->
@@ -313,6 +349,8 @@ handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, _From, State) ->
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
+handle_cast({release_snapshot, Ref}, State) ->
+    handle_release_snapshot(Ref, State);
 handle_cast(Cast, State) ->
     ?WARNING("Unexpected cast ~p.~nState:~n~p",
              [Cast, State]),
@@ -409,11 +447,35 @@ handle_register_rsm(Name, Pid, #state{rsms_by_name = RSMs,
                          rsms_by_mref = NewMRefs}}
     end.
 
+handle_get_latest_snapshot(Pid, #state{snapshot_readers = Readers,
+                                       storage = Storage} = State) ->
+    case get_latest_snapshot(State) of
+        {Seqno, Config} ->
+            MRef = erlang:monitor(process, Pid),
+            NewReaders = Readers#{MRef => Seqno},
+            {reply, {ok, MRef, Seqno, Config, Storage},
+             State#state{snapshot_readers = NewReaders}};
+        no_snapshot ->
+            {reply, {error, no_snapshot}, State}
+    end.
+
+handle_release_snapshot(MRef, #state{snapshot_readers = Readers} = State) ->
+    {_, NewReaders} = maps:take(MRef, Readers),
+    erlang:demonitor(MRef, [flush]),
+    {noreply, State#state{snapshot_readers = NewReaders}}.
+
 handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
-                                      rsms_by_mref = MRefs} = State) ->
+                                      rsms_by_mref = MRefs,
+
+                                      snapshot_readers = Readers} = State) ->
     case maps:take(MRef, MRefs) of
         error ->
-            {stop, {unexpected_process_down, MRef, Pid, Reason}};
+            case maps:is_key(MRef, Readers) of
+                true ->
+                    handle_release_snapshot(MRef, State);
+                false ->
+                    {stop, {unexpected_process_down, MRef, Pid, Reason}}
+            end;
         {Name, NewMRefs} ->
             ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
 
@@ -1330,7 +1392,8 @@ check_log_range(StartSeqno, EndSeqno, State) ->
 init_state() ->
     #state{storage = storage_open(),
            rsms_by_name = #{},
-           rsms_by_mref = #{}}.
+           rsms_by_mref = #{},
+           snapshot_readers = #{}}.
 
 get_state_path() ->
     case application:get_env(chronicle, data_dir) of
@@ -1549,6 +1612,9 @@ get_config_for_seqno(Seqno, #state{storage = Storage}) ->
 
 get_latest_snapshot_seqno(#state{storage = Storage}) ->
     chronicle_storage:get_latest_snapshot_seqno(Storage).
+
+get_latest_snapshot(#state{storage = Storage}) ->
+    chronicle_storage:get_latest_snapshot(Storage).
 
 get_log_entry(Seqno, #state{storage = Storage}) ->
     chronicle_storage:get_log_entry(Seqno, Storage).

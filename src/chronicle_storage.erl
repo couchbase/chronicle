@@ -585,6 +585,15 @@ read_rsm_snapshot_data(SnapshotDir, RSM) ->
             Error
     end.
 
+read_rsm_snapshot(RSM, Seqno, #storage{data_dir = DataDir}) ->
+    SnapshotDir = snapshot_dir(DataDir, Seqno),
+    case read_rsm_snapshot_data(SnapshotDir, RSM) of
+        {ok, Data} ->
+            {ok, binary_to_term(Data)};
+        {error, _} = Error ->
+            Error
+    end.
+
 validate_snapshot(DataDir, Seqno, Config) ->
     SnapshotDir = snapshot_dir(DataDir, Seqno),
     RSMs = chronicle_utils:config_rsms(Config#log_entry.value),
@@ -648,10 +657,18 @@ validate_state(#storage{low_seqno = LowSeqno,
 
     Storage#storage{snapshots = ValidSnapshots}.
 
-get_latest_snapshot_seqno(#storage{snapshots = Snapshots}) ->
+get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
         [] ->
+            no_snapshot;
+        [{_, _} = Snapshot| _] ->
+            Snapshot
+    end.
+
+get_latest_snapshot_seqno(Storage) ->
+    case get_latest_snapshot(Storage) of
+        no_snapshot ->
             ?NO_SEQNO;
-        [{Seqno, _} | _] ->
+        {Seqno, _Config} ->
             Seqno
     end.
