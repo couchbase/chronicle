@@ -248,8 +248,9 @@ handle_event(info, Msg, _State, Data) ->
         {stop, _} = Stop ->
             Stop
     end;
-handle_event(Type, Event, _State, _Data) ->
-    ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
+handle_event(Type, Event, State, _Data) ->
+    ?WARNING("Unexpected event of type ~p: ~p.~n"
+             "Current state: ~p", [Type, Event, State]),
     keep_state_and_data.
 
 terminate(Reason, _State, Data) ->
