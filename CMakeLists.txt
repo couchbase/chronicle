@@ -10,5 +10,10 @@ ENDIF ()
 
 REBAR (TARGET chronicle CLEAN_HOOK ns_realclean)
 
+SET(INSTALL_DIR "${INST_LIBDIR}/chronicle")
+
 # This assumes that rebar2 is used.
-INSTALL (DIRECTORY ebin priv DESTINATION "${INST_LIBDIR}/chronicle")
+INSTALL (DIRECTORY ebin DESTINATION "${INSTALL_DIR}")
+
+# priv/ only exists on Linux currently, so make this OPTIONAL
+INSTALL (DIRECTORY priv OPTIONAL DESTINATION "${INSTALL_DIR}")
