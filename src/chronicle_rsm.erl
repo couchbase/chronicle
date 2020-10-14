@@ -42,6 +42,7 @@
 
 -type leader_status() :: {wait_for_seqno, chronicle:seqno()} | established.
 
+-record(init, { wait_for_seqno }).
 -record(follower, {}).
 -record(leader, { history_id :: chronicle:history_id(),
                   term :: chronicle:leader_term(),
@@ -169,7 +170,8 @@ callback_mode() ->
 init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
-            State = #follower{},
+            ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
+
             Data0 = #data{name = Name,
                           applied_history_id = ?NO_HISTORY,
                           applied_seqno = ?NO_SEQNO,
@@ -179,32 +181,38 @@ init([Name, Mod, ModArgs]) ->
                           mod = Mod,
                           mod_state = ModState,
                           mod_data = ModData},
+            Data = maybe_restore_snapshot(Data0),
+            {State, Effects} = register_with_agent(Data0),
+            {ok, State, Data, Effects};
+        {stop, _} = Stop ->
+            Stop
+    end.
 
-            Data = register_with_agent(State, Data0),
-            Effects =
-                case chronicle_server:register_rsm(Name, self()) of
-                    {ok, HistoryId, Term, Seqno} ->
-                        {next_event, cast,
-                         {term_established, HistoryId, Term, Seqno}};
-                    no_term ->
-                        []
-                end,
+complete_init(#init{}, #data{name = Name} = Data) ->
+    publish_local_revision(Data),
+    Effects =
+        case chronicle_server:register_rsm(Name, self()) of
+            {ok, HistoryId, Term, Seqno} ->
+                {next_event, cast,
+                 {term_established, HistoryId, Term, Seqno}};
+            no_term ->
+                []
+        end,
 
-            ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
-            publish_local_revision(Data),
-
-            case call_callback(post_init, Data) of
-                {ok, NewModData} ->
-                    {ok, State, set_mod_data(NewModData, Data), Effects};
-                {stop, _} = Stop ->
-                    Stop
-            end;
+    case call_callback(post_init, Data) of
+        {ok, NewModData} ->
+            {next_state, #follower{}, set_mod_data(NewModData, Data), Effects};
         {stop, _} = Stop ->
             Stop
     end.
 
 handle_event({call, From}, Call, State, Data) ->
-    handle_call(Call, From, State, Data);
+    case State of
+        #init{} ->
+            {keep_state_and_data, postpone};
+        _ ->
+            handle_call(Call, From, State, Data)
+    end;
 handle_event(cast, {term_established, HistoryId, Term, Seqno}, State, Data) ->
     handle_term_established(HistoryId, Term, Seqno, State, Data);
 handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
@@ -377,6 +385,13 @@ handle_seqno_committed_next_state(CommittedSeqno, State, Data) ->
             {keep_state, Data};
         #leader{status = established} ->
             {keep_state, Data};
+        #init{wait_for_seqno = Seqno} ->
+            case CommittedSeqno >= Seqno of
+                true ->
+                    complete_init(State, Data);
+                false ->
+                    {keep_state, Data}
+            end;
         #leader{status = {wait_for_seqno, Seqno}} ->
             %% Mark the leader established when applied seqno catches up with
             %% the high seqno as of when the term was established.
@@ -456,8 +471,6 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies} = Acc,
             end
     end.
 
-pending_commands_reply(_Replies, #follower{}, Data) ->
-    Data;
 pending_commands_reply(Replies,
                        #leader{term = OurTerm},
                        #data{pending_clients = Clients} = Data) ->
@@ -467,7 +480,9 @@ pending_commands_reply(Replies,
                   pending_command_reply(Term, Seqno, Reply, OurTerm, Acc)
           end, Clients, Replies),
 
-    Data#data{pending_clients = NewClients}.
+    Data#data{pending_clients = NewClients};
+pending_commands_reply(_Replies, _State, Data) ->
+    Data.
 
 pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
     %% Since chronicle_agent doesn't terminate all leader activities in a lock
@@ -610,13 +625,25 @@ handle_term_finished(HistoryId, Term, State, Data) ->
 
 handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
-    true = (CommittedSeqno > ReadSeqno),
-    NewData = read_log(CommittedSeqno, State, Data),
+    case CommittedSeqno >= ReadSeqno of
+        true ->
+            NewData = read_log(CommittedSeqno, State, Data),
+            handle_seqno_committed_next_state(CommittedSeqno, State, NewData);
+        false ->
+            ?DEBUG("Ignoring seqno_committed ~p "
+                   "when read seqno is ~p", [CommittedSeqno, ReadSeqno]),
+            keep_state_and_data
+    end.
 
-    handle_seqno_committed_next_state(CommittedSeqno, State, NewData).
+handle_take_snapshot(Seqno, _State, #data{read_seqno = ReadSeqno} = Data) ->
+    case Seqno < ReadSeqno of
+        true ->
+            ?DEBUG("Ignoring stale take_snapshot "
+                   "at ~p when read seqno is ~p", [Seqno, ReadSeqno]);
+        false ->
+            save_snapshot(Seqno, Data)
+    end,
 
-handle_take_snapshot(Seqno, _State, Data) ->
-    save_snapshot(Seqno, Data),
     keep_state_and_data.
 
 save_snapshot(Seqno, #data{name = Name,
@@ -634,7 +661,7 @@ save_snapshot(Seqno, #data{name = Name,
 read_log(EndSeqno, State, Data) ->
     Entries = get_log(EndSeqno, Data),
     NewData = apply_entries(EndSeqno, Entries, State, Data),
-    publish_local_revision(NewData),
+    maybe_publish_local_revision(State, NewData),
     NewData.
 
 get_log(EndSeqno, #data{name = Name, read_seqno = ReadSeqno}) ->
@@ -705,6 +732,12 @@ call_callback(Callback, Args, #data{mod = Mod,
     AppliedRevision = {AppliedHistoryId, AppliedSeqno},
     erlang:apply(Mod, Callback, Args ++ [AppliedRevision, ModState, ModData]).
 
+maybe_publish_local_revision(#init{}, _Data) ->
+    %% Don't expose the revision while we're still initializing
+    ok;
+maybe_publish_local_revision(_, Data) ->
+    publish_local_revision(Data).
+
 publish_local_revision(#data{name = Name} = Data) ->
     chronicle_ets:put(?LOCAL_REVISION_KEY(Name), local_revision(Data)).
 
@@ -712,26 +745,25 @@ local_revision(#data{applied_history_id = AppliedHistoryId,
                      applied_seqno = AppliedSeqno}) ->
     {AppliedHistoryId, AppliedSeqno}.
 
-register_with_agent(State, #data{name = Name} = Data0) ->
+register_with_agent(#data{name = Name} = Data) ->
     {ok, Info} = chronicle_agent:register_rsm(Name, self()),
     #{committed_seqno := CommittedSeqno} = Info,
 
-    Data = maybe_restore_snapshot(Data0),
     true = (Data#data.read_seqno =< CommittedSeqno),
 
-    NewData =
+    Effects0 = [{next_event, cast, {seqno_committed, CommittedSeqno}}],
+    Effects1 =
         case maps:find(need_snapshot_seqno, Info) of
             {ok, SnapshotSeqno} ->
                 true = (SnapshotSeqno =< CommittedSeqno),
-
-                Data1 = read_log(SnapshotSeqno, State, Data),
-                save_snapshot(SnapshotSeqno, Data1),
-                Data1;
+                [{next_event, cast, {seqno_committed, SnapshotSeqno}},
+                 {next_event, cast, {take_snapshot, SnapshotSeqno}} |
+                 Effects0];
             error ->
-                Data
+                Effects0
         end,
 
-    read_log(CommittedSeqno, State, NewData).
+    {#init{wait_for_seqno = CommittedSeqno}, Effects1}.
 
 maybe_restore_snapshot(#data{name = Name} = Data) ->
     case chronicle_agent:get_rsm_snapshot(Name) of
