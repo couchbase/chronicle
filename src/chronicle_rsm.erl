@@ -203,16 +203,8 @@ init([Name, Mod, ModArgs]) ->
             Stop
     end.
 
-handle_event({call, From}, {command, Command}, State, Data) ->
-    handle_command(Command, From, State, Data);
-handle_event({call, From}, {query, Query}, State, Data) ->
-    handle_query(Query, From, State, Data);
-handle_event({call, From}, get_local_revision, State, Data) ->
-    handle_get_local_revision(From, State, Data);
-handle_event({call, From}, {sync_revision, Revision, Timeout}, State, Data) ->
-    handle_sync_revision(Revision, Timeout, From, State, Data);
-handle_event({call, From}, {get_applied_revision, Type}, State, Data) ->
-    handle_get_applied_revision(Type, From, State, Data);
+handle_event({call, From}, Call, State, Data) ->
+    handle_call(Call, From, State, Data);
 handle_event(cast, {term_established, HistoryId, Term, Seqno}, State, Data) ->
     handle_term_established(HistoryId, Term, Seqno, State, Data);
 handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
@@ -234,9 +226,6 @@ handle_event(info, Msg, _State, Data) ->
         {stop, _} = Stop ->
             Stop
     end;
-handle_event({call, From}, Call, _State, _Data) ->
-    ?WARNING("Unexpected call ~p", [Call]),
-    {keep_state_and_data, [{reply, From, nack}]};
 handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
@@ -245,6 +234,20 @@ terminate(Reason, _State, Data) ->
     call_callback(terminate, [Reason], Data).
 
 %% internal
+handle_call({command, Command}, From, State, Data) ->
+    handle_command(Command, From, State, Data);
+handle_call({query, Query}, From, State, Data) ->
+    handle_query(Query, From, State, Data);
+handle_call(get_local_revision, From, State, Data) ->
+    handle_get_local_revision(From, State, Data);
+handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
+    handle_sync_revision(Revision, Timeout, From, State, Data);
+handle_call({get_applied_revision, Type}, From, State, Data) ->
+    handle_get_applied_revision(Type, From, State, Data);
+handle_call(Call, From, _State, _Data) ->
+    ?WARNING("Unexpected call ~p", [Call]),
+    {keep_state_and_data, [{reply, From, nack}]}.
+
 handle_command(_Command, From, #follower{}, _Data) ->
     {keep_state_and_data,
      {reply, From, {error, {leader_error, not_leader}}}};
