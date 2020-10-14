@@ -17,6 +17,10 @@
 -module(chronicle_rsm).
 -compile(export_all).
 
+%% If it takes longer than this time to initialize, then we probably hit some
+%% bug.
+-define(INIT_TIMEOUT, 60000).
+
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, read_timeout/1,
@@ -183,7 +187,9 @@ init([Name, Mod, ModArgs]) ->
                           mod_data = ModData},
             Data = maybe_restore_snapshot(Data0),
             {State, Effects} = register_with_agent(Data0),
-            {ok, State, Data, Effects};
+
+            {ok, State, Data,
+             [{state_timeout, ?INIT_TIMEOUT, init_timeout} | Effects]};
         {stop, _} = Stop ->
             Stop
     end.
@@ -206,6 +212,14 @@ complete_init(#init{}, #data{name = Name} = Data) ->
             Stop
     end.
 
+handle_event(state_timeout, init_timeout,
+             #init{wait_for_seqno = WaitedSeqno},
+             #data{read_seqno = ReadSeqno}) ->
+    ?ERROR("Couldn't initialize in ~pms.~n"
+           "Seqno we're waiting for: ~p~n"
+           "Read seqno: ~p",
+           [?INIT_TIMEOUT, WaitedSeqno, ReadSeqno]),
+    {stop, init_timeout};
 handle_event({call, From}, Call, State, Data) ->
     case State of
         #init{} ->
