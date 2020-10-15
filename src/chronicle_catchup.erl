@@ -61,8 +61,8 @@ handle_cast({catchup_peer, Opaque, Peer, PeerSeqno}, State) ->
     handle_catchup_peer(Peer, PeerSeqno, Opaque, State);
 handle_cast({cancel_catchup, Peer}, State) ->
     handle_cancel_catchup(Peer, State);
-handle_cast(Cast, _State) ->
-    {stop, {unexpected_cast, Cast}}.
+handle_cast(Cast, State) ->
+    {stop, {unexpected_cast, Cast}, State}.
 
 handle_info({catchup_result, Pid, Result}, State) ->
     handle_catchup_result(Pid, Result, State);

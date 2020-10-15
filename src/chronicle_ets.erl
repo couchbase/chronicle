@@ -55,8 +55,8 @@ init([]) ->
 handle_call({register_writer, Pid, Keys}, _From, State) ->
     handle_register_writer(Pid, Keys, State).
 
-handle_cast(Cast, _State) ->
-    {stop, {unexpected_cast, Cast}}.
+handle_cast(Cast, State) ->
+    {stop, {unexpected_cast, Cast}, State}.
 
 handle_info({'DOWN', _MRef, process, Pid, _Reason}, State) ->
     handle_down(Pid, State).

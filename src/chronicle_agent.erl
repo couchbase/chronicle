@@ -509,7 +509,7 @@ handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
                 true ->
                     handle_release_snapshot(MRef, State);
                 false ->
-                    {stop, {unexpected_process_down, MRef, Pid, Reason}}
+                    {stop, {unexpected_process_down, MRef, Pid, Reason}, State}
             end;
         {Name, NewMRefs} ->
             ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
@@ -569,10 +569,10 @@ handle_snapshot_failed(#state{snapshot_state = SnapshotState,
             {stop, {snapshot_failed, SnapshotState}, NewState}
     end.
 
-handle_snapshot_timeout(#state{snapshot_state = SnapshotState}) ->
+handle_snapshot_timeout(#state{snapshot_state = SnapshotState} = State) ->
     ?ERROR("Timeout while taking snapshot.~n"
            "Snapshot state:~n~p", [SnapshotState]),
-    {stop, {snapshot_timeout, SnapshotState}}.
+    {stop, {snapshot_timeout, SnapshotState}, State}.
 
 handle_retry_snapshot(State) ->
     {retry, _} = State#state.snapshot_state,

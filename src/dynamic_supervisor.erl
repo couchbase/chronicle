@@ -82,14 +82,14 @@ handle_cast({event, Event}, #state{mod = Module,
     case Module:handle_event(Event, ModState) of
         {noreply, NewModState} ->
             {noreply, handle_mod_state(NewModState, State)};
-        {stop, _Reason} = Stop ->
-            Stop
+        {stop, Reason} = Stop ->
+            {stop, Reason, State}
     end.
 
 handle_info({'EXIT', Pid, Reason}, #state{supervisor = Pid} = State) ->
     {stop, Reason, State#state{supervisor = undefined}};
-handle_info({'EXIT', _Pid, Reason}, _State) ->
-    {stop, Reason};
+handle_info({'EXIT', _Pid, Reason}, State) ->
+    {stop, Reason, State};
 handle_info(Msg, State) ->
     ?WARNING("Ignored an unexpected message: ~p", [Msg]),
     {noreply, State}.
