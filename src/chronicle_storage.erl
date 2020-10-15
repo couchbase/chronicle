@@ -466,23 +466,78 @@ sync_dir(Dir) ->
     end.
 
 get_log() ->
-    {LogLowSeqno, LogHighSeqno} = get_seqno_range(),
-    get_log_loop(LogLowSeqno, LogHighSeqno, []).
+    {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
+    get_log(LogLowSeqno, LogHighSeqno).
 
 get_log(StartSeqno, EndSeqno) ->
-    {LogLowSeqno, LogHighSeqno} = get_seqno_range(),
+    {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
     true = (StartSeqno >= LogLowSeqno),
     true = (EndSeqno =< LogHighSeqno),
 
-    get_log_loop(StartSeqno, EndSeqno, []).
+    case get_log_loop(StartSeqno, EndSeqno, []) of
+        {ok, Entries} ->
+            Entries;
+        {missing_entry, MissingSeqno} ->
+            %% This function is only supposed to be called in a synchronized
+            %% fashion, so there should be no possibility of intervening
+            %% compaction.
+            exit({missing_entry,
+                  MissingSeqno, StartSeqno, EndSeqno,
+                  LogLowSeqno, LogHighSeqno})
+    end.
+
+get_log_committed(StartSeqno, EndSeqno) ->
+    true = (StartSeqno =< EndSeqno),
+    {LogLowSeqno, LogHighSeqno, LogCommittedSeqno} = get_seqno_range(),
+    case EndSeqno > LogCommittedSeqno of
+        true ->
+            {error, {uncommitted, StartSeqno, EndSeqno, LogCommittedSeqno}};
+        false ->
+            case in_range(StartSeqno, EndSeqno, LogLowSeqno, LogHighSeqno) of
+                true ->
+                    do_get_log_committed(StartSeqno, EndSeqno);
+                false ->
+                    {error, compacted}
+            end
+    end.
+
+do_get_log_committed(StartSeqno, EndSeqno) ->
+    case get_log_loop(StartSeqno, EndSeqno, []) of
+        {ok, _} = Ok ->
+            Ok;
+        {missing_entry, MissingSeqno} ->
+            {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
+
+            %% Compaction must have happened while we were reading the
+            %% entries. So start and end seqnos must now be out of range. If
+            %% they are still in range, there must be a bug somewhere.
+            case in_range(StartSeqno, EndSeqno, LogLowSeqno, LogHighSeqno) of
+                true ->
+                    exit({missing_entry,
+                          MissingSeqno, StartSeqno, EndSeqno,
+                          LogLowSeqno, LogHighSeqno});
+                false ->
+                    {error, compacted}
+            end
+    end.
+
+in_range(StartSeqno, EndSeqno, LowSeqno, HighSeqno) ->
+    seqno_in_range(StartSeqno, LowSeqno, HighSeqno)
+        andalso seqno_in_range(EndSeqno, LowSeqno, HighSeqno).
+
+seqno_in_range(Seqno, LowSeqno, HighSeqno) ->
+    Seqno >= LowSeqno andalso Seqno =< HighSeqno.
 
 get_log_loop(StartSeqno, EndSeqno, Acc)
   when EndSeqno < StartSeqno ->
-    Acc;
+    {ok, Acc};
 get_log_loop(StartSeqno, EndSeqno, Acc) ->
-    %% TODO: need to handle entries being deleted underneath us
-    [Entry] = ets:lookup(?MEM_LOG_TAB, EndSeqno),
-    get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]).
+    case ets:lookup(?MEM_LOG_TAB, EndSeqno) of
+        [Entry] ->
+            get_log_loop(StartSeqno, EndSeqno - 1, [Entry | Acc]);
+        [] ->
+            {missing_entry, EndSeqno}
+    end.
 
 get_log_entry(Seqno, #storage{log_tab = Tab}) ->
     case ets:lookup(Tab, Seqno) of
@@ -493,8 +548,9 @@ get_log_entry(Seqno, #storage{log_tab = Tab}) ->
     end.
 
 get_seqno_range() ->
-    [{_, LowSeqno, HighSeqno, _}] = ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
-    {LowSeqno, HighSeqno}.
+    [{_, LowSeqno, HighSeqno, CommittedSeqno}] =
+        ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
+    {LowSeqno, HighSeqno, CommittedSeqno}.
 
 record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
                                         snapshots = Snapshots} = Storage) ->

@@ -1462,34 +1462,31 @@ trigger_catchup(_Peer) ->
 
 do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     LocalCommittedSeqno = get_local_committed_seqno(Data),
-
-    BackfillEntries =
-        case Seqno < LocalCommittedSeqno of
-            true ->
-                get_local_log(Seqno + 1, LocalCommittedSeqno, Data);
-            false ->
-                []
-        end,
-
-    %% TODO: consider storing pending entries more effitiently, so we don't
-    %% have to traverse them here
-    Entries =
-        queue_dropwhile(
-          fun (Entry) ->
-                  Entry#log_entry.seqno =< Seqno
-          end, PendingEntries),
-
-    {ok, BackfillEntries ++ queue:to_list(Entries)}.
+    case Seqno < LocalCommittedSeqno of
+        true ->
+            %% TODO: consider triggerring catchup even if we've got all the
+            %% entries to send, but there more than some configured number of
+            %% them.
+            case get_local_log(Seqno + 1, LocalCommittedSeqno) of
+                {ok, BackfillEntries} ->
+                    {ok, BackfillEntries ++ queue:to_list(PendingEntries)};
+                {error, compacted} ->
+                    need_catchup
+            end;
+        false ->
+            Entries = queue_dropwhile(
+                        fun (Entry) ->
+                                Entry#log_entry.seqno =< Seqno
+                        end, PendingEntries),
+            {ok, queue:to_list(Entries)}
+    end.
 
 get_local_committed_seqno(Data) ->
     {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),
     PeerStatus#peer_status.acked_commit_seqno.
 
-get_local_log(StartSeqno, EndSeqno,
-              #data{history_id = HistoryId, term = Term}) ->
-    %% TODO: handle errors better
-    {ok, Log} = chronicle_agent:get_log(HistoryId, Term, StartSeqno, EndSeqno),
-    Log.
+get_local_log(StartSeqno, EndSeqno) ->
+    chronicle_agent:get_log_committed(StartSeqno, EndSeqno).
 
 send_ensure_term(Peers, Request,
                  #data{history_id = HistoryId, term = Term} = Data) ->

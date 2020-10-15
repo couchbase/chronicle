@@ -163,6 +163,9 @@ with_latest_snapshot(Fun) ->
 get_log() ->
     gen_server:call(?SERVER, get_log).
 
+get_log_committed(StartSeqno, EndSeqno) ->
+    chronicle_storage:get_log_committed(StartSeqno, EndSeqno).
+
 -spec get_log(chronicle:history_id(),
               chronicle:leader_term(),
               chronicle:seqno(),
