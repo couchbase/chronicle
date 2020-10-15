@@ -503,9 +503,9 @@ setup_vnet(Nodes) ->
       fun (N) ->
               ok = rpc_node(
                      N, fun () ->
-                                application:set_env(chronicle, persist, false),
-                                application:set_env(chronicle, logger_function,
-                                                    {?MODULE, debug_log}),
+                                chronicle_env:set_env(persist, false),
+                                chronicle_env:set_env(logger_function,
+                                                      {?MODULE, debug_log}),
                                 ok = chronicle_env:setup(),
 
                                 {ok, P} = chronicle_sup:start_link(),

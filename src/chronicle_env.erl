@@ -20,8 +20,12 @@
 -export([data_dir/0, persist/0]).
 -export([setup/0]).
 
+-ifdef(TEST).
+-export([set_env/2]).
+-endif.
+
 data_dir() ->
-    case application:get_env(chronicle, data_dir) of
+    case get_env(data_dir) of
         {ok, Dir} ->
             Dir;
         undefined ->
@@ -29,7 +33,7 @@ data_dir() ->
     end.
 
 persist() ->
-    application:get_env(chronicle, persist, true).
+    get_env(persist, true).
 
 setup() ->
     case check_data_dir() of
@@ -54,7 +58,7 @@ check_data_dir() ->
     end.
 
 get_logger_function() ->
-    case application:get_env(chronicle, logger_function) of
+    case get_env(logger_function) of
         {ok, ModFun} ->
             case validate_logger_function(ModFun) of
                 {true, LoggerFun} ->
@@ -83,3 +87,26 @@ setup_logger() ->
         {error, _} = Error ->
             Error
     end.
+
+get_env(Parameter, Default) ->
+    case get_env(Parameter) of
+        {ok, Value} ->
+            Value;
+        undefined ->
+            Default
+    end.
+
+-ifndef(TEST).
+
+get_env(Parameter) ->
+    application:get_env(chronicle, Parameter).
+
+-else.
+
+get_env(Parameter) ->
+    application:get_env(chronicle, {?PEER(), Parameter}).
+
+set_env(Parameter, Value) ->
+    application:set_env(chronicle, {?PEER(), Parameter}, Value).
+
+-endif.
