@@ -140,8 +140,24 @@ spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
             end),
     State#state{pids = Pids#{Pid => {Peer, Opaque}}}.
 
-do_catchup(_Peer, _PeerSeqno, _State) ->
-    exit(crash).
+do_catchup(Peer, PeerSeqno, State) ->
+    Snapshot = get_full_snapshot(PeerSeqno),
+    install_snapshot(Peer, Snapshot, State).
+
+get_full_snapshot(PeerSeqno) ->
+    case chronicle_agent:get_full_snapshot() of
+        {ok, Seqno, Config, RSMSnapshots}
+          when Seqno > PeerSeqno ->
+            {Seqno, Config, RSMSnapshots};
+        _ ->
+            exit(no_snapshot)
+    end.
+
+install_snapshot(Peer,
+                 {Seqno, Config, RSMSnapshots},
+                 #state{history_id = HistoryId, term = Term}) ->
+    chronicle_agent:install_snapshot(Peer, HistoryId, Term,
+                                     Seqno, Config, RSMSnapshots).
 
 cancel_active(Peer, #state{pids = Pids} = State) ->
     NewPids =
