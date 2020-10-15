@@ -391,8 +391,13 @@ terminate_proposer(#data{proposer = Proposer} = Data) ->
             Data;
         false ->
             ok = chronicle_proposer:stop(Proposer),
-            unlink(Proposer),
-            ?FLUSH({'EXIT', Proposer, _}),
+            receive
+                {'EXIT', Proposer, _} ->
+                    ok
+            after
+                5000 ->
+                    exit({proposer_failed_to_terminate, Proposer})
+            end,
 
             ?INFO("Proposer ~p stopped", [Proposer]),
             Data#data{proposer = undefined}
