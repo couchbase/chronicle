@@ -661,7 +661,7 @@ leader_transfer_test_() ->
     {setup,
      fun () -> setup_vnet(Nodes) end,
      fun teardown_vnet/1,
-     {timeout, 10, fun () -> leader_transfer_test__(Nodes) end}}.
+     {timeout, 20, fun () -> leader_transfer_test__(Nodes) end}}.
 
 leader_transfer_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
@@ -704,7 +704,7 @@ reprovision_test_() ->
     {setup,
      fun () -> setup_vnet(Nodes) end,
      fun teardown_vnet/1,
-     {timeout, 10, fun reprovision_test__/0}}.
+     {timeout, 20, fun reprovision_test__/0}}.
 
 reprovision_test__() ->
     Machines = [{kv, chronicle_kv, []}],
@@ -756,7 +756,7 @@ partition_test_() ->
      %% we have to rely on check_peers() logic in chronicle_proposer to
      %% attempt to reestablish connection to the partitioned node. But that
      %% only happens at 5 second intervals.
-     {timeout, 10, fun partition_test__/0}}.
+     {timeout, 20, fun partition_test__/0}}.
 
 partition_test__() ->
     Machines = [{kv, chronicle_kv, []}],
