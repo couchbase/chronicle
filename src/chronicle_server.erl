@@ -503,7 +503,7 @@ setup_vnet(Nodes) ->
       fun (N) ->
               ok = rpc_node(
                      N, fun () ->
-                                chronicle_env:set_env(persist, false),
+                                prepare_vnode_dir(),
                                 chronicle_env:set_env(logger_function,
                                                       {?MODULE, debug_log}),
                                 ok = chronicle_env:setup(),
@@ -513,6 +513,26 @@ setup_vnet(Nodes) ->
                                 ok
                         end)
       end, Nodes).
+
+get_tmp_dir() ->
+    {ok, BaseDir} = file:get_cwd(),
+    filename:join(BaseDir, "tmp").
+
+get_vnode_dir() ->
+    Node = ?PEER(),
+    filename:join(get_tmp_dir(), Node).
+
+prepare_vnode_dir() ->
+    Dir = get_vnode_dir(),
+    case chronicle_utils:delete_recursive(Dir) of
+        ok ->
+            ok;
+        {error, enoent} ->
+            ok
+    end,
+
+    chronicle_utils:mkdir_p(Dir),
+    chronicle_env:set_env(data_dir, Dir).
 
 teardown_vnet(_) ->
     vnet:stop().
