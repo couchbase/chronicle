@@ -680,24 +680,17 @@ read_log(EndSeqno, State, Data) ->
     NewData.
 
 get_log(EndSeqno, #data{name = Name, read_seqno = ReadSeqno}) ->
-    %% TODO: replace this with a dedicated call
-    {ok, Log} = chronicle_agent:get_log(),
-    lists:filter(
-      fun (#log_entry{seqno = Seqno, value = Value}) ->
-              case Seqno > ReadSeqno andalso Seqno =< EndSeqno of
-                  true ->
-                      case Value of
-                          #rsm_command{rsm_name = Name} ->
-                              true;
-                          #config{} ->
-                              true;
-                          _ ->
-                              false
-                      end;
-                  false ->
-                      false
-              end
-      end, Log).
+    case ReadSeqno =:= EndSeqno of
+        true ->
+            [];
+        false ->
+            true = (ReadSeqno < EndSeqno),
+
+            %% TODO: deal with compaction
+            {ok, Log} =
+                chronicle_agent:get_log_for_rsm(Name, ReadSeqno + 1, EndSeqno),
+            Log
+    end.
 
 submit_command(Command, From,
                #leader{history_id = HistoryId, term = Term},

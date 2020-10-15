@@ -166,6 +166,27 @@ get_log() ->
 get_log_committed(StartSeqno, EndSeqno) ->
     chronicle_storage:get_log_committed(StartSeqno, EndSeqno).
 
+get_log_for_rsm(Name, StartSeqno, EndSeqno) ->
+    %% TODO: avoid O(NumberOfStateMachines * NumberOfEntries) complexity.
+    case get_log_committed(StartSeqno, EndSeqno) of
+        {ok, Entries} ->
+            RSMEntries =
+                lists:filter(
+                  fun (#log_entry{value = Value}) ->
+                          case Value of
+                              #rsm_command{rsm_name = Name} ->
+                                  true;
+                              #config{} ->
+                                  true;
+                              _ ->
+                                  false
+                          end
+                  end, Entries),
+            {ok, RSMEntries};
+        {error, _} = Error ->
+            Error
+    end.
+
 -spec get_log(chronicle:history_id(),
               chronicle:leader_term(),
               chronicle:seqno(),
