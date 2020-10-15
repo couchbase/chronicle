@@ -277,18 +277,18 @@ append(Peer, Opaque, HistoryId, Term, CommittedSeqno, AtSeqno, Entries) ->
     call_async(?SERVER(Peer), Opaque,
                {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries}).
 
+install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
+    gen_server:call(?SERVER(Peer),
+                    {install_snapshot,
+                     HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots},
+                    ?INSTALL_SNAPSHOT_TIMEOUT).
+
 -type local_mark_committed_result() ::
         ok | {error, local_mark_committed_error()}.
 -type local_mark_committed_error() ::
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
-
-install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
-    gen_server:call(?SERVER(Peer),
-                    {install_snapshot,
-                     HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots},
-                    ?INSTALL_SNAPSHOT_TIMEOUT).
 
 -spec local_mark_committed(chronicle:history_id(),
                            chronicle:leader_term(),
