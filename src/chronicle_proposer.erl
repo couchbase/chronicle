@@ -484,7 +484,7 @@ handle_common_error(Peer, Error,
 establish_term_handle_vote(Peer, Status, proposing, Data) ->
     case Status of
         {ok, _} ->
-            {keep_state, Data};
+            {keep_state, replicate(Data)};
         failed ->
             %% This is not exactly clean. But the intention is the
             %% following. We got some error that we chose to ignore. But since
