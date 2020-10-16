@@ -617,6 +617,12 @@ validate_rsm_snapshot(SnapshotDir, RSM) ->
             ok;
         {error, {invalid_snapshot, _Reason}} = Error ->
             Error;
+        {error, enoent} = Error ->
+            %% While we shouldn't see this error under any normal
+            %% circumstances, it's benign enough to allow. It also allows
+            %% deleting snapshot files by hand without causing everything to
+            %% crash.
+            Error;
         {error, Reason} ->
             exit({snapshot_read_failed, Path, Reason})
     end.
