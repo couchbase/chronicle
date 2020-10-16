@@ -33,7 +33,6 @@
                    config,
                    snapshots,
 
-                   persist,
                    data_dir,
 
                    log_info_tab,
@@ -42,8 +41,6 @@
                   }).
 
 open() ->
-    Persist = chronicle_env:persist(),
-
     ets:new(?MEM_LOG_INFO_TAB,
             [protected, set, named_table, {read_concurrency, true}]),
     ets:new(?MEM_LOG_TAB,
@@ -54,22 +51,16 @@ open() ->
     Storage = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
                        log_tab = ets:whereis(?MEM_LOG_TAB),
                        config_index_tab = ets:whereis(?CONFIG_INDEX),
-                       persist = Persist,
                        low_seqno = ?NO_SEQNO + 1,
                        high_seqno = ?NO_SEQNO,
                        committed_seqno = ?NO_SEQNO,
                        meta = #{}},
 
     try
-        case Persist of
-            true ->
-                DataDir = chronicle_env:data_dir(),
-                maybe_complete_wipe(DataDir),
-                ensure_dirs(DataDir),
-                validate_state(open_logs(Storage#storage{data_dir = DataDir}));
-            false ->
-                Storage
-        end
+        DataDir = chronicle_env:data_dir(),
+        maybe_complete_wipe(DataDir),
+        ensure_dirs(DataDir),
+        validate_state(open_logs(Storage#storage{data_dir = DataDir}))
     catch
         T:E:Stack ->
             close(Storage),
@@ -158,17 +149,12 @@ snapshot_dir(DataDir, Seqno) ->
     filename:join(snapshots_dir(DataDir), io_lib:format("~16.16.0b", [Seqno])).
 
 wipe() ->
-    case chronicle_env:persist() of
+    DataDir = chronicle_env:data_dir(),
+    ChronicleDir = chronicle_dir(DataDir),
+    case file_exists(ChronicleDir, directory) of
         true ->
-            DataDir = chronicle_env:data_dir(),
-            ChronicleDir = chronicle_dir(DataDir),
-            case file_exists(ChronicleDir, directory) of
-                true ->
-                    ok = chronicle_utils:create_marker(wipe_marker(DataDir)),
-                    complete_wipe(DataDir);
-                false ->
-                    ok
-            end;
+            ok = chronicle_utils:create_marker(wipe_marker(DataDir)),
+            complete_wipe(DataDir);
         false ->
             ok
     end.
@@ -347,15 +333,13 @@ append_handle_meta(Storage, Entries, Opts) ->
             {Entries, Storage}
     end.
 
-sync(#storage{current_log = Log, persist = true}) ->
+sync(#storage{current_log = Log}) ->
     case chronicle_log:sync(Log) of
         ok ->
             ok;
         {error, Error} ->
             exit({sync_failed, Error})
-    end;
-sync(#storage{persist = false}) ->
-    ok.
+    end.
 
 close(#storage{current_log = Log,
                log_tab = LogTab,
@@ -395,15 +379,13 @@ find_logs(DataDir) ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Records, #storage{current_log = Log, persist = true}) ->
+log_append(Records, #storage{current_log = Log}) ->
     case chronicle_log:append(Log, Records) of
         ok ->
             ok;
         {error, Error} ->
             exit({append_failed, Error})
-    end;
-log_append(_Records, #storage{persist = false}) ->
-    ok.
+    end.
 
 config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
     NewConfig = truncate_table(Tab, Seqno),

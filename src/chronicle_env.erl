@@ -17,7 +17,7 @@
 
 -include("chronicle.hrl").
 
--export([data_dir/0, persist/0]).
+-export([data_dir/0]).
 -export([setup/0]).
 
 -ifdef(TEST).
@@ -32,9 +32,6 @@ data_dir() ->
             exit(no_data_dir)
     end.
 
-persist() ->
-    get_env(persist, true).
-
 setup() ->
     case check_data_dir() of
         ok ->
@@ -44,17 +41,12 @@ setup() ->
     end.
 
 check_data_dir() ->
-    case persist() of
-        true ->
-            try data_dir() of
-                _Dir ->
-                    ok
-            catch
-                exit:no_data_dir ->
-                    {error, {missing_parameter, data_dir}}
-            end;
-        false ->
+    try data_dir() of
+        _Dir ->
             ok
+    catch
+        exit:no_data_dir ->
+            {error, {missing_parameter, data_dir}}
     end.
 
 get_logger_function() ->
@@ -86,14 +78,6 @@ setup_logger() ->
             persistent_term:put(?CHRONICLE_LOGGER, Fun);
         {error, _} = Error ->
             Error
-    end.
-
-get_env(Parameter, Default) ->
-    case get_env(Parameter) of
-        {ok, Value} ->
-            Value;
-        undefined ->
-            Default
     end.
 
 -ifndef(TEST).
