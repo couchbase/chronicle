@@ -27,7 +27,7 @@ get_live_peers() ->
     lists:sort(nodes([this, visible])).
 
 monitor() ->
-    net_kernel:monitor_nodes(true, [nodedown_reason]).
+    ok = net_kernel:monitor_nodes(true, [nodedown_reason]).
 
 -else.                                          % -ifndef(TEST)
 
