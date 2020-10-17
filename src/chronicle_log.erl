@@ -40,11 +40,11 @@ open(Path, Fun, State) ->
                 {ok, NewState} ->
                     {ok, Log, NewState};
                 {error, _} = Error ->
-                    close(Log),
+                    ok = close(Log),
                     Error
             catch
                 T:E:Stack ->
-                    close(Log),
+                    ok = close(Log),
                     erlang:raise(T, E, Stack)
             end;
         {error, _} = Error ->
