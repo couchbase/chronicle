@@ -167,7 +167,8 @@ update_branch_status(Branch, Result) ->
             ok;
         NewStatus ->
             NewBranch = Branch#branch{status = NewStatus},
-            {ok, _} = store_branch(NewBranch)
+            {ok, _} = store_branch(NewBranch),
+            ok
     end.
 
 branch_status_from_result(Result) ->
