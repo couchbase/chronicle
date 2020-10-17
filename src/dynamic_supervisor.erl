@@ -82,7 +82,7 @@ handle_cast({event, Event}, #state{mod = Module,
     case Module:handle_event(Event, ModState) of
         {noreply, NewModState} ->
             {noreply, handle_mod_state(NewModState, State)};
-        {stop, Reason} = Stop ->
+        {stop, Reason} ->
             {stop, Reason, State}
     end.
 
