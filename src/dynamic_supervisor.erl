@@ -157,7 +157,7 @@ stop_child_loop(Pid, Id, Retries) ->
                         0 ->
                             {error, exceeded_retries};
                         _ ->
-                            stop_child_loop(Pid, Id, Retries)
+                            stop_child_loop(Pid, Id, Retries - 1)
                     end;
                 {error, _} = Error ->
                     Error
