@@ -91,7 +91,8 @@ handle_catchup_result(Pid, Result, #state{pids = Pids} = State) ->
     {noreply, maybe_spawn_pending(State#state{pids = NewPids})}.
 
 reply_to_parent(Opaque, Reply, #state{parent = Parent}) ->
-    Parent ! {Opaque, Reply}.
+    Parent ! {Opaque, Reply},
+    ok.
 
 terminate_children(#state{pids = Pids}) ->
     lists:foreach(
