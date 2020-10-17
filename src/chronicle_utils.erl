@@ -297,33 +297,33 @@ assert_is_test() ->
     error(not_test).
 -endif.
 
--record(batch, { name :: atom(),
+-record(batch, { id :: any(),
                  reqs :: list(),
                  timer :: undefined | reference(),
                  max_age :: non_neg_integer() }).
 
 -type batch() :: #batch{}.
 
-make_batch(Name, MaxAge) ->
-    #batch{name = Name,
+make_batch(Id, MaxAge) ->
+    #batch{id = Id,
            reqs = [],
            max_age = MaxAge}.
 
-batch_enq(Req, #batch{name = Name,
+batch_enq(Req, #batch{id = Id,
                       reqs = Reqs,
                       timer = Timer,
                       max_age = MaxAge} = Batch) ->
     NewTimer =
         case Timer of
             undefined ->
-                erlang:send_after(MaxAge, self(), {batch_ready, Name});
+                erlang:send_after(MaxAge, self(), {batch_ready, Id});
             _ when is_reference(Timer) ->
                 Timer
         end,
 
     Batch#batch{reqs = [Req | Reqs], timer = NewTimer}.
 
-batch_flush(#batch{name = Name,
+batch_flush(#batch{id = Id,
                    reqs = Reqs,
                    timer = Timer} = Batch) ->
     case Timer of
@@ -331,7 +331,7 @@ batch_flush(#batch{name = Name,
             ok;
         _ when is_reference(Timer) ->
             _ = erlang:cancel_timer(Timer),
-            ?FLUSH({batch_ready, Name}),
+            ?FLUSH({batch_ready, Id}),
             ok
     end,
     {lists:reverse(Reqs),
