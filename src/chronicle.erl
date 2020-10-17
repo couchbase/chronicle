@@ -33,7 +33,7 @@
 -type history_id() :: binary().
 
 -type leader_term() :: {pos_integer(), peer()}.
--type seqno() :: pos_integer().
+-type seqno() :: non_neg_integer().
 -type peer_position() :: {TermVoted :: leader_term(), HighSeqno :: seqno()}.
 -type revision() :: {history_id(), seqno()}.
 
