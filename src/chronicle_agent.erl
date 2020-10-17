@@ -91,9 +91,7 @@ get_system_state() ->
         {ok, _} ->
             provisioned;
         {error, not_provisioned} ->
-            unprovisioned;
-        {error, _} = Error ->
-            exit(Error)
+            unprovisioned
     end.
 
 -type get_metadata_result() :: {ok, #metadata{}} |
@@ -1711,7 +1709,7 @@ start_snapshot_timer() ->
     erlang:send_after(?SNAPSHOT_TIMEOUT, self(), snapshot_timeout).
 
 cancel_snapshot_timer(TRef) ->
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     ?FLUSH(snapshot_timeout).
 
 schedule_retry_snapshot(State) ->
@@ -1722,7 +1720,7 @@ schedule_retry_snapshot(State) ->
 cancel_snapshot_retry(State) ->
     {retry, TRef} = State#state.snapshot_state,
 
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     ?FLUSH(retry_snapshot),
     State#state{snapshot_state = undefined}.
 
