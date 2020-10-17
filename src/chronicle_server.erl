@@ -240,7 +240,8 @@ reply_request(ReplyTo, Reply) ->
         {from, From} ->
             gen_statem:reply(From, Reply);
         {send, Pid, Tag} ->
-            Pid ! {Tag, Reply};
+            Pid ! {Tag, Reply},
+            ok;
         {many, ReplyTos} ->
             lists:foreach(
               fun (To) ->
