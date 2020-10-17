@@ -47,9 +47,9 @@ get(Key) ->
 
 %% gen_server callbacks
 init([]) ->
-    ets:new(?TABLE, [public, named_table,
-                     {read_concurrency, true},
-                     {write_concurrency, true}]),
+    _ = ets:new(?TABLE, [public, named_table,
+                         {read_concurrency, true},
+                         {write_concurrency, true}]),
     {ok, #{}}.
 
 handle_call({register_writer, Pid, Keys}, _From, State) ->
