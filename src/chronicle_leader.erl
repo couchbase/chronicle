@@ -194,7 +194,7 @@ handle_event(Type, Event, _State, _Data) ->
     keep_state_and_data.
 
 terminate(_Reason, State, Data) ->
-    handle_state_leave(State, Data),
+    _ = handle_state_leave(State, Data),
 
     case State of
         #leader{} ->
@@ -203,7 +203,7 @@ terminate(_Reason, State, Data) ->
             ok
     end,
 
-    reply_to_leader_waiters(no_leader, Data),
+    _ = reply_to_leader_waiters(no_leader, Data),
     publish_leader(no_leader),
     announce_leader_status(not_leader).
 
@@ -634,21 +634,22 @@ reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
     chronicle_utils:maps_foreach(
       fun (TRef, From) ->
               gen_statem:reply(From, Reply),
-              erlang:cancel_timer(TRef),
+              _ = erlang:cancel_timer(TRef),
               ?FLUSH({timeout, TRef, _})
       end, Waiters),
 
     Data#data{leader_waiters = #{}}.
 
 start_election_worker(Data) ->
-    Pid = proc_lib:spawn_link(
-            fun () ->
-                    Result = election_worker(),
-                    exit({shutdown, {election_result, Result}})
-            end),
+    Pid = proc_lib:spawn_link(fun election_worker/0),
     Data#data{election_worker = Pid}.
 
+-spec election_worker() -> no_return().
 election_worker() ->
+    Result = do_election_worker(),
+    exit({shutdown, {election_result, Result}}).
+
+do_election_worker() ->
     {ok, Metadata} = chronicle_agent:get_metadata(),
 
     LatestTerm = Metadata#metadata.term,
@@ -852,7 +853,7 @@ cancel_state_timer(Name, Data) ->
     end.
 
 cancel_state_timer_tref(TRef, Name) ->
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     receive
         {state_timer, Name} ->
             ok
