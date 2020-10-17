@@ -143,7 +143,7 @@ wait_for_process_test_() ->
 
 terminate_and_wait(Pid, Reason) when is_pid(Pid) ->
     terminate(Pid, Reason),
-    wait_for_process(Pid, infinity).
+    ok = wait_for_process(Pid, infinity).
 
 terminate_linked_process(Pid, Reason) when is_pid(Pid) ->
     with_trap_exit(
@@ -153,7 +153,7 @@ terminate_linked_process(Pid, Reason) when is_pid(Pid) ->
               ?FLUSH({'EXIT', Pid, _})
       end),
 
-    wait_for_process(Pid, infinity).
+    ok = wait_for_process(Pid, infinity).
 
 with_trap_exit(Fun) ->
     Old = process_flag(trap_exit, true),
