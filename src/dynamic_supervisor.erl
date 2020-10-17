@@ -27,7 +27,7 @@
 -export([start_link/2, start_link/3, sync/2, send_event/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {supervisor :: pid(),
+-record(state, {supervisor :: undefined | pid(),
                 mod :: module(),
                 mod_state :: term(),
                 child_specs :: list()}).
