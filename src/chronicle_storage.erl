@@ -41,13 +41,14 @@
                   }).
 
 open() ->
-    ets:new(?MEM_LOG_INFO_TAB,
-            [protected, set, named_table, {read_concurrency, true}]),
-    ets:new(?MEM_LOG_TAB,
-            [protected, set, named_table,
-             {keypos, #log_entry.seqno}, {read_concurrency, true}]),
-    ets:new(?CONFIG_INDEX,
-            [protected, ordered_set, named_table, {keypos, #log_entry.seqno}]),
+    _ = ets:new(?MEM_LOG_INFO_TAB,
+                [protected, set, named_table, {read_concurrency, true}]),
+    _ = ets:new(?MEM_LOG_TAB,
+                [protected, set, named_table,
+                 {keypos, #log_entry.seqno}, {read_concurrency, true}]),
+    _ = ets:new(?CONFIG_INDEX,
+                [protected, ordered_set, named_table,
+                 {keypos, #log_entry.seqno}]),
     Storage = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
                        log_tab = ets:whereis(?MEM_LOG_TAB),
                        config_index_tab = ets:whereis(?CONFIG_INDEX),
