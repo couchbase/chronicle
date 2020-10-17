@@ -562,7 +562,7 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     %% Some of the pending entries may actually be committed, but our local
     %% agent doesn't know yet. So those need to be preserved.
     NewPendingEntries =
-        queue_takewhile(
+        chronicle_utils:queue_takewhile(
           fun (#log_entry{seqno = Seqno}) ->
                   Seqno =< CommittedSeqno
           end, PendingEntries),
@@ -622,7 +622,7 @@ maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
         false ->
             PendingEntries = Data#data.pending_entries,
             NewPendingEntries =
-                queue_dropwhile(
+                chronicle_utils:queue_dropwhile(
                   fun (Entry) ->
                           Entry#log_entry.seqno =< NewCommittedSeqno
                   end, PendingEntries),
@@ -1456,7 +1456,7 @@ get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
                     need_catchup
             end;
         false ->
-            Entries = queue_dropwhile(
+            Entries = chronicle_utils:queue_dropwhile(
                         fun (Entry) ->
                                 Entry#log_entry.seqno =< Seqno
                         end, PendingEntries),
@@ -1484,92 +1484,6 @@ send_request_peer_position(Peer, Data) ->
 send_request_position(Peers, Data) ->
     mark_status_requested(Peers, Data),
     send_ensure_term(Peers, peer_position, Data).
-
-queue_takefold(Fun, Acc, Queue) ->
-    case queue:out(Queue) of
-        {empty, _} ->
-            {Acc, Queue};
-        {{value, Value}, NewQueue} ->
-            case Fun(Value, Acc) of
-                {true, NewAcc} ->
-                    queue_takefold(Fun, NewAcc, NewQueue);
-                false ->
-                    {Acc, Queue}
-            end
-    end.
-
--ifdef(TEST).
-queue_takefold_test() ->
-    Q = queue:from_list(lists:seq(1, 10)),
-    MkFun = fun (CutOff) ->
-                    fun (V, Acc) ->
-                            case V =< CutOff of
-                                true ->
-                                    {true, Acc+V};
-                                false ->
-                                    false
-                            end
-                    end
-            end,
-
-    Test = fun (ExpectedSum, ExpectedTail, CutOff) ->
-                   {Sum, NewQ} = queue_takefold(MkFun(CutOff), 0, Q),
-                   ?assertEqual(ExpectedSum, Sum),
-                   ?assertEqual(ExpectedTail, queue:to_list(NewQ))
-           end,
-
-    Test(0, lists:seq(1,10), 0),
-    Test(15, lists:seq(6,10), 5),
-    Test(55, [], 42).
--endif.
-
-queue_takewhile(Pred, Queue) ->
-    {Result, _} =
-        queue_takefold(
-          fun (Value, Acc) ->
-                  case Pred(Value) of
-                      true ->
-                          {true, queue:in(Value, Acc)};
-                      false ->
-                          false
-                  end
-          end, queue:new(), Queue),
-    Result.
-
--ifdef(TEST).
-queue_takewhile_test() ->
-    Q = queue:from_list(lists:seq(1, 10)),
-    ?assertEqual(lists:seq(1, 5),
-                 queue:to_list(queue_takewhile(
-                                 fun (V) ->
-                                         V =< 5
-                                 end, Q))).
--endif.
-
-queue_dropwhile(Pred, Queue) ->
-    {_, NewQueue} =
-        queue_takefold(
-          fun (Value, _) ->
-                  case Pred(Value) of
-                      true ->
-                          {true, unused};
-                      false ->
-                          false
-                  end
-          end, unused, Queue),
-    NewQueue.
-
--ifdef(TEST).
-queue_dropwhile_test() ->
-    Q = queue:from_list(lists:seq(1, 10)),
-    Test = fun (Expected, CutOff) ->
-                   NewQ = queue_dropwhile(fun (V) -> V =< CutOff end, Q),
-                   ?assertEqual(Expected, queue:to_list(NewQ))
-           end,
-    Test(lists:seq(1,10), 0),
-    Test(lists:seq(6,10), 5),
-    Test([], 42).
--endif.
 
 reply_request(ReplyTo, Reply) ->
     chronicle_server:reply_request(ReplyTo, Reply).
