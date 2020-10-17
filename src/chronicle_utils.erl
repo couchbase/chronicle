@@ -292,6 +292,7 @@ monitor_process(Process) ->
 assert_is_test() ->
     ok.
 -else.
+-spec assert_is_test() -> no_return().
 assert_is_test() ->
     error(not_test).
 -endif.
@@ -329,8 +330,9 @@ batch_flush(#batch{name = Name,
         undefined ->
             ok;
         _ when is_reference(Timer) ->
-            erlang:cancel_timer(Timer),
-            ?FLUSH({batch_ready, Name})
+            _ = erlang:cancel_timer(Timer),
+            ?FLUSH({batch_ready, Name}),
+            ok
     end,
     {lists:reverse(Reqs),
      Batch#batch{reqs = [], timer = undefined}}.
@@ -619,7 +621,7 @@ delete_recursive(Path) ->
                     delete_recursive_loop(Path, Children);
                 {error, enoent} ->
                     ok;
-                {error, Error} = Error ->
+                {error, Error} ->
                     {error, {Error, Path}}
             end;
         false ->
