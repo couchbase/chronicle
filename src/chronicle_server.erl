@@ -66,10 +66,12 @@ rsm_command(Tag, HistoryId, Term, RSMName, Command) ->
 
 %% Meant to only be used by chronicle_proposer.
 proposer_ready(Pid, HistoryId, Term, HighSeqno) ->
-    Pid ! {proposer_msg, {proposer_ready, HistoryId, Term, HighSeqno}}.
+    Pid ! {proposer_msg, {proposer_ready, HistoryId, Term, HighSeqno}},
+    ok.
 
 proposer_stopping(Pid, Reason) ->
-    Pid ! {proposer_msg, {proposer_stopping, Reason}}.
+    Pid ! {proposer_msg, {proposer_stopping, Reason}},
+    ok.
 
 %% gen_server callbacks
 callback_mode() ->
