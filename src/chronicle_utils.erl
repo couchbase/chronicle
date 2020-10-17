@@ -296,48 +296,6 @@ assert_is_test() ->
     error(not_test).
 -endif.
 
-run_on_process(Fun) ->
-    run_on_process(Fun, infinity).
-
-run_on_process(Fun, Timeout) ->
-    Parent = self(),
-    Ref = make_ref(),
-    {Pid, MRef} =
-        spawn_monitor(
-          fun () ->
-                  try Fun() of
-                      Result ->
-                          Parent ! {Ref, {ok, Result}}
-                  catch
-                      T:E:Stack ->
-                          Parent ! {Ref, {raised, T, E, Stack}}
-                  end
-          end),
-
-    receive
-        {Ref, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            case Result of
-                {ok, Reply} ->
-                    Reply;
-                {raised, T, E, Stack} ->
-                    erlang:raise(T, E, Stack)
-            end;
-        {'DOWN', MRef, process, Pid, Reason} ->
-            exit(Reason)
-    after
-        Timeout ->
-            erlang:demonitor(MRef, [flush]),
-            exit(Pid, shutdown),
-            exit(timeout)
-    end.
-
--ifdef(TEST).
-run_on_process_test() ->
-    ?assertExit(timeout, run_on_process(fun () -> timer:sleep(1000) end, 100)),
-    ?assertEqual(42, run_on_process(fun () -> 42 end)).
--endif.
-
 -record(batch, { name :: atom(),
                  reqs :: list(),
                  timer :: undefined | reference(),
