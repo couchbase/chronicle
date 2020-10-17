@@ -17,7 +17,7 @@
 %% run.
 -module(chronicle_secondary_sup).
 
--behavior(supervisor).
+-behavior(dynamic_supervisor).
 
 -include("chronicle.hrl").
 

@@ -32,6 +32,16 @@
                 mod_state :: term(),
                 child_specs :: list()}).
 
+-callback init(Args :: term()) ->
+    {ok, SupFlags :: supervisor:sup_flags(), State :: term()} |
+    {stop, Reason :: term()} |
+    ignore.
+-callback child_specs(State :: term()) ->
+    [ChildSpec :: supervisor:child_spec()].
+-callback handle_event(Event :: term(), State :: term()) ->
+    {noreply, NewState :: term()} |
+    {stop, Reason :: term()}.
+
 start_link(Module, Args) ->
     gen_server:start_link(?MODULE, {gen_server, Module, Args}, []).
 
