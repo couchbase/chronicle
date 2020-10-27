@@ -249,11 +249,9 @@ scan_chunk(Pos, Data, Fun, State) ->
 decode_entry(Data) ->
     case decode_entry_size(Data) of
         {ok, Size, Consumed0, NewData0} ->
-            case get_crc_data(NewData0, Size) of
-                {ok, TermBinary, Consumed1, NewData} ->
-                    Term = binary_to_term(TermBinary),
-                    BytesConsumed = Consumed0 + Consumed1,
-                    {ok, Term, BytesConsumed, NewData};
+            case decode_entry_term(NewData0, Size) of
+                {ok, Term, Consumed1, NewData} ->
+                    {ok, Term, Consumed0 + Consumed1, NewData};
                 Error ->
                     Error
             end;
@@ -265,6 +263,15 @@ decode_entry_size(Data) ->
     case get_crc_data(Data, ?TERM_SIZE_BYTES) of
         {ok, <<Size:?TERM_SIZE_BITS>>, Consumed, NewData} ->
             {ok, Size, Consumed, NewData};
+        Error ->
+            Error
+    end.
+
+decode_entry_term(Data, Size) ->
+    case get_crc_data(Data, Size) of
+        {ok, TermBinary, Consumed, NewData} ->
+            Term = binary_to_term(TermBinary),
+            {ok, Term, Consumed, NewData};
         Error ->
             Error
     end.
