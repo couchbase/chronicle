@@ -22,7 +22,7 @@
 -define(MAGIC, <<"chronicle">>).
 -define(MAGIC_BYTES, 9).
 -define(VERSION, 1).
--define(HEADER_BYTES, ?MAGIC_BYTES + 1).
+-define(HEADER_BYTES, (?MAGIC_BYTES + 1)).
 
 -define(READ_CHUNK_SIZE, 1024 * 1024).
 -define(WRITE_CHUNK_SIZE, 1024 * 1024).
@@ -30,8 +30,11 @@
 -define(TERM_SIZE_BITS, 32).
 -define(TERM_SIZE_BYTES, (?TERM_SIZE_BITS bsr 3)).
 -define(TERM_SIZE_MAX, (1 bsl ?TERM_SIZE_BITS) - 1).
+-define(TERM_HEADER_BYTES, (?CRC_BYTES + ?TERM_SIZE_BYTES)).
 
--record(log, { fd, mode }).
+-record(log, { fd,
+               mode,
+               start_pos }).
 
 open(Path, Fun, State) ->
     case open_int(Path, write) of
@@ -54,8 +57,8 @@ open(Path, Fun, State) ->
 open_int(Path, Mode) ->
     case file:open(Path, open_flags(Mode)) of
         {ok, Fd} ->
-            case check_header(Fd) of
-                ok ->
+            case read_header(Fd) of
+                {ok, _} ->
                     {ok, make_log(Fd, Mode)};
                 {error, no_header} = Error ->
                     ok = file:close(Fd),
@@ -98,12 +101,15 @@ maybe_create(Path, Mode, Error) ->
     end.
 
 create(Path) ->
+    create(Path, #{}).
+
+create(Path, UserData) ->
     Mode = write,
     case file:open(Path, open_flags(Mode)) of
         {ok, Fd} ->
             %% Truncate the file if we're recreating it.
             ok = truncate(Fd, 0),
-            ok = write_header(Fd),
+            ok = write_header(Fd, UserData),
             ok = file:sync(Fd),
             ok = chronicle_utils:sync_dir(filename:dirname(Path)),
             {ok, make_log(Fd, Mode)};
@@ -111,14 +117,42 @@ create(Path) ->
             Error
     end.
 
-check_header(Fd) ->
-    case chronicle_utils:read_full(Fd, ?HEADER_BYTES) of
-        {ok, Data} ->
-            check_header_data(Data);
+read_header(Fd) ->
+    Size = ?HEADER_BYTES + ?TERM_HEADER_BYTES,
+    case chronicle_utils:read_full(Fd, Size) of
+        {ok, <<HeaderData:?HEADER_BYTES/binary,
+               TermHeader:?TERM_HEADER_BYTES/binary>>} ->
+            case check_header_data(HeaderData) of
+                ok ->
+                    read_header_user_data(Fd, TermHeader);
+                {error, _} = Error ->
+                    Error
+            end;
         eof ->
             {error, no_header};
         {error, _} = Error ->
             Error
+    end.
+
+read_header_user_data(Fd, TermHeader) ->
+    case decode_entry_size(TermHeader) of
+        {ok, Size, _, <<>>} ->
+            FullSize = ?CRC_BYTES + Size,
+            case chronicle_utils:read_full(Fd, FullSize) of
+                {ok, TermData} ->
+                    case decode_entry_term(TermData, Size) of
+                        {ok, UserData, _, <<>>} ->
+                            {ok, UserData};
+                        corrupt ->
+                            {error, {corrupt_log, bad_header_user_data}}
+                    end;
+                eof ->
+                    {error, no_header};
+                {error, _} = Error ->
+                    Error
+            end;
+        corrupt ->
+            {error, {corrupt_log, bad_header_user_data}}
     end.
 
 check_header_data(Data) ->
@@ -137,9 +171,9 @@ check_header_data(Data) ->
             end
     end.
 
-write_header(Fd) ->
+write_header(Fd, UserData) ->
     Header = <<?MAGIC/binary, ?VERSION:8>>,
-    file:write(Fd, Header).
+    file:write(Fd, encode_term(UserData, Header)).
 
 append(#log{mode = write, fd = Fd}, Terms) ->
     encode_terms(Terms,
@@ -182,7 +216,8 @@ encode_term(Term, AccData) ->
       TermBinary/binary>>.
 
 make_log(Fd, Mode) ->
-    #log{fd = Fd, mode = Mode}.
+    {ok, Pos} = file:position(Fd, cur),
+    #log{fd = Fd, mode = Mode, start_pos = Pos}.
 
 truncate(Fd, Pos) ->
     case file:position(Fd, Pos) of
@@ -195,8 +230,7 @@ truncate(Fd, Pos) ->
 scan(Log, Fun, State) ->
     scan(Log, Fun, State, #{}).
 
-scan(#log{fd = Fd}, Fun, State, Opts) ->
-    Pos = ?HEADER_BYTES,
+scan(#log{fd = Fd, start_pos = Pos}, Fun, State, Opts) ->
     case file:position(Fd, Pos) of
         {ok, ActualPos} ->
             true = (Pos =:= ActualPos),
