@@ -25,7 +25,11 @@
 
 -define(RANGE_KEY, '$range').
 
+-define(LOG_MAX_SIZE, 512 * 1024).
+
 -record(storage, { current_log,
+                   current_log_ix,
+                   current_log_data_size,
                    low_seqno,
                    high_seqno,
                    committed_seqno,
@@ -105,7 +109,11 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
             #{meta := Meta, config := Config,
               low_seqno := LowSeqno, high_seqno := HighSeqno,
               snapshots := Snapshots} = FinalState,
+
+            {ok, DataSize} = chronicle_log:data_size(CurrentLog),
             Storage#storage{current_log = CurrentLog,
+                            current_log_ix = Current,
+                            current_log_data_size = DataSize,
                             low_seqno = LowSeqno,
                             high_seqno = HighSeqno,
                             meta = Meta,
@@ -114,6 +122,37 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
         {error, Error} ->
             ?ERROR("Failed to open log ~p: ~p", [CurrentLogPath, Error]),
             exit({failed_to_open_log, CurrentLogPath, Error})
+    end.
+
+maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
+    case LogDataSize > ?LOG_MAX_SIZE of
+        true ->
+            rollover(Storage);
+        false ->
+            Storage
+    end.
+
+rollover(#storage{current_log = CurrentLog,
+                  current_log_ix = CurrentLogIx,
+                  data_dir = DataDir,
+                  config = Config,
+                  meta = Meta} = Storage) ->
+    sync(Storage),
+    ok = chronicle_log:close(CurrentLog),
+
+    NewLogIx = CurrentLogIx + 1,
+    NewLogPath = log_path(DataDir, NewLogIx),
+    NewLogData = #{config => Config, meta => Meta},
+
+    ?INFO("Rolling over to a new log file: ~p", [NewLogPath]),
+
+    case chronicle_log:create(NewLogPath, NewLogData) of
+        {ok, NewLog} ->
+            Storage#storage{current_log = NewLog,
+                            current_log_ix = NewLogIx,
+                            current_log_data_size = 0};
+        {error, Error} ->
+            exit({rollover_failed, NewLogPath, Error})
     end.
 
 publish(#storage{log_info_tab = LogInfoTab,
@@ -280,8 +319,7 @@ get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
 store_meta(Updates, Storage) ->
     case store_meta_prepare(Updates, Storage) of
         {ok, DedupedUpdates, NewStorage} ->
-            log_append([{meta, DedupedUpdates}], Storage),
-            NewStorage;
+            log_append([{meta, DedupedUpdates}], NewStorage);
         not_needed ->
             Storage
     end.
@@ -308,17 +346,17 @@ truncate(Seqno, #storage{high_seqno = HighSeqno,
     true = (Seqno >= CommittedSeqno),
     true = (Seqno =< HighSeqno),
 
-    log_append([{truncate, Seqno}], Storage),
-    NewStorage = config_index_truncate(Seqno, Storage),
-    NewStorage#storage{high_seqno = Seqno}.
+    NewStorage0 = log_append([{truncate, Seqno}], Storage),
+    NewStorage1 = config_index_truncate(Seqno, NewStorage0),
+    NewStorage1#storage{high_seqno = Seqno}.
 
 append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
     {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
-    log_append(DiskEntries, NewStorage0),
-    NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
-    config_index_append(Entries, NewStorage1).
+    NewStorage1 = log_append(DiskEntries, NewStorage0),
+    NewStorage2 = mem_log_append(EndSeqno, Entries, NewStorage1),
+    config_index_append(Entries, NewStorage2).
 
 append_handle_meta(Storage, Entries, Opts) ->
     case maps:find(meta, Opts) of
@@ -380,10 +418,14 @@ find_logs(DataDir) ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Records, #storage{current_log = Log}) ->
+log_append(Records, #storage{current_log = Log,
+                             current_log_data_size = LogDataSize} = Storage) ->
     case chronicle_log:append(Log, Records) of
-        ok ->
-            ok;
+        {ok, BytesWritten} ->
+            NewLogDataSize = LogDataSize + BytesWritten,
+            NewStorage = Storage#storage{
+                           current_log_data_size = NewLogDataSize},
+            maybe_rollover(NewStorage);
         {error, Error} ->
             exit({append_failed, Error})
     end.
@@ -543,8 +585,8 @@ record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
-    log_append([{snapshot, Seqno, Config}], Storage),
-    Storage#storage{snapshots = [{Seqno, Config} | Snapshots]}.
+    NewStorage = log_append([{snapshot, Seqno, Config}], Storage),
+    NewStorage#storage{snapshots = [{Seqno, Config} | Snapshots]}.
 
 install_snapshot(Seqno, Config, Meta,
                  #storage{high_seqno = HighSeqno,
@@ -552,15 +594,15 @@ install_snapshot(Seqno, Config, Meta,
     true = (Seqno > HighSeqno),
 
     Seqno = get_latest_snapshot_seqno(Storage),
-    log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
+    NewStorage = log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
 
     %% TODO: The log entries in the ets table need to be cleaned up as
     %% well. Deal with this as part of compaction.
     %% TODO: config index also needs to be reset
-    Storage#storage{meta = maps:merge(OldMeta, Meta),
-                    low_seqno = Seqno + 1,
-                    high_seqno = Seqno,
-                    config = Config}.
+    NewStorage#storage{meta = maps:merge(OldMeta, Meta),
+                       low_seqno = Seqno + 1,
+                       high_seqno = Seqno,
+                       config = Config}.
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).

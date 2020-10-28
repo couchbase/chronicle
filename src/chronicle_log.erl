@@ -178,8 +178,23 @@ write_header(Fd, UserData) ->
 append(#log{mode = write, fd = Fd}, Terms) ->
     encode_terms(Terms,
                  fun (Data) ->
-                         file:write(Fd, Data)
+                         case file:write(Fd, Data) of
+                             ok ->
+                                 {ok, byte_size(Data)};
+                             {error, _} = Error ->
+                                 Error
+                         end
                  end).
+
+data_size(#log{fd = Fd, start_pos = HeaderSize}) ->
+    case file:position(Fd, cur) of
+        {ok, Size} ->
+            DataSize = Size - HeaderSize,
+            true = (DataSize >= 0),
+            {ok, DataSize};
+        {error, _} = Error ->
+            Error
+    end.
 
 encode_terms(Terms, Fun) ->
     encode_terms(Terms, <<>>, Fun).
