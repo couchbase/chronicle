@@ -369,7 +369,7 @@ find_logs(DataDir) ->
                          {match, [Index]} ->
                              {true, list_to_integer(Index)};
                          nomatch ->
-                             ?WARNING("Ignoring unexpected file on "
+                             ?WARNING("Ignoring unexpected file in "
                                       "log directory: ~p", [Candidate]),
                              false
                      end
