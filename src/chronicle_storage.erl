@@ -19,6 +19,10 @@
 
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
 -define(CONFIG_INDEX, ?ETS_TABLE(chronicle_config_index)).
@@ -73,7 +77,8 @@ open() ->
     end.
 
 open_logs(#storage{data_dir = DataDir} = Storage) ->
-    {Sealed, Current} = find_logs(DataDir),
+    {Orphans, Sealed, Current} = find_logs(DataDir),
+
     InitState = #{meta => #{},
                   config => undefined,
                   low_seqno => ?NO_SEQNO + 1,
@@ -101,6 +106,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
               low_seqno := LowSeqno, high_seqno := HighSeqno,
               snapshots := Snapshots} = FinalState,
 
+            maybe_delete_orphans(Orphans),
+
             {ok, DataSize} = chronicle_log:data_size(CurrentLog),
             Storage#storage{current_log = CurrentLog,
                             current_log_ix = CurrentLogIx,
@@ -114,6 +121,22 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
             ?ERROR("Failed to open log ~p: ~p", [CurrentLogPath, Error]),
             exit({failed_to_open_log, CurrentLogPath, Error})
     end.
+
+maybe_delete_orphans([]) ->
+    ok;
+maybe_delete_orphans(Orphans) ->
+    Paths = [LogPath || {_, LogPath} <- Orphans],
+    ?WARNING("Found orphan logs. Going to delete them. Logs:~n~p", [Paths]),
+    lists:foreach(
+      fun (Path) ->
+              case file:delete(Path) of
+                  ok ->
+                      ok;
+                  {error, Error} ->
+                      ?WARNING("Failed to delete orphan log ~p: ~p",
+                               [Path, Error])
+              end
+      end, Paths).
 
 maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
     case LogDataSize > ?LOG_MAX_SIZE of
@@ -409,8 +432,39 @@ find_logs(DataDir) ->
         [] ->
             {[], {0, log_path(DataDir, 0)}};
         _ ->
-            {lists:droplast(Logs1), lists:last(Logs1)}
+            {Orphans, NonOrphans} = find_orphan_logs(Logs1),
+            {Orphans, lists:droplast(NonOrphans), lists:last(NonOrphans)}
     end.
+
+find_orphan_logs(Logs) ->
+    [Last | Rest] = lists:reverse(Logs),
+    find_orphan_logs_loop(Rest, [Last]).
+
+find_orphan_logs_loop([], Acc) ->
+    {[], Acc};
+find_orphan_logs_loop([{LogIx, _} = Log | Rest] = Logs,
+                      [{PrevIx, _} | _] = Acc) ->
+    case LogIx + 1 =:= PrevIx of
+        true ->
+            find_orphan_logs_loop(Rest, [Log | Acc]);
+        false ->
+            {lists:reverse(Logs), Acc}
+    end.
+
+-ifdef(TEST).
+find_orphan_logs_test() ->
+    Logs0 = [{0, "0.log"}, {1, "1.log"}, {2, "2.log"}],
+    ?assertEqual({[], Logs0}, find_orphan_logs(Logs0)),
+
+    Logs1 = [{4, "4.log"}, {5, "5.log"}],
+    ?assertEqual({[], Logs1}, find_orphan_logs(Logs1)),
+
+    ?assertEqual({Logs0, Logs1}, find_orphan_logs(Logs0 ++ Logs1)),
+
+    Logs2 = [{7, "7.log"}],
+    ?assertEqual({Logs0 ++ Logs1, Logs2},
+                 find_orphan_logs(Logs0 ++ Logs1 ++ Logs2)).
+-endif.
 
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
