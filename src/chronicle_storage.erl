@@ -81,10 +81,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   snapshots => []},
     SealedState =
         lists:foldl(
-          fun (LogIndex, Acc) ->
-                  LogPath = log_path(DataDir, LogIndex),
+          fun ({_LogIx, LogPath}, Acc) ->
                   HandleEntryFun = make_handle_log_entry_fun(LogPath, Storage),
-
                   case chronicle_log:read_log(LogPath, HandleEntryFun, Acc) of
                       {ok, NewAcc} ->
                           NewAcc;
@@ -94,7 +92,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   end
           end, InitState, Sealed),
 
-    CurrentLogPath = log_path(DataDir, Current),
+    {CurrentLogIx, CurrentLogPath} = Current,
     case chronicle_log:open(CurrentLogPath,
                             make_handle_log_entry_fun(CurrentLogPath, Storage),
                             SealedState) of
@@ -105,7 +103,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
 
             {ok, DataSize} = chronicle_log:data_size(CurrentLog),
             Storage#storage{current_log = CurrentLog,
-                            current_log_ix = Current,
+                            current_log_ix = CurrentLogIx,
                             current_log_data_size = DataSize,
                             low_seqno = LowSeqno,
                             high_seqno = HighSeqno,
@@ -398,7 +396,7 @@ find_logs(DataDir) ->
                                   "^([[:digit:]]\+).log$",
                                   [{capture, all_but_first, list}]) of
                           {match, [Index]} ->
-                              {true, list_to_integer(Index)};
+                              {true, {list_to_integer(Index), Candidate}};
                           nomatch ->
                               ?WARNING("Ignoring unexpected file in "
                                        "log directory: ~p", [Candidate]),
@@ -406,10 +404,10 @@ find_logs(DataDir) ->
                       end
               end, Candidates),
 
-    Logs1 = lists:sort(Logs0),
+    Logs1 = lists:keysort(1, Logs0),
     case Logs1 of
         [] ->
-            {[], 0};
+            {[], {0, log_path(DataDir, 0)}};
         _ ->
             {lists:droplast(Logs1), lists:last(Logs1)}
     end.
