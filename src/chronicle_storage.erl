@@ -73,14 +73,7 @@ open() ->
     end.
 
 open_logs(#storage{data_dir = DataDir} = Storage) ->
-    {Sealed, Current} =
-        case find_logs(DataDir) of
-            [] ->
-                {[], 0};
-            Logs ->
-                {lists:droplast(Logs), lists:last(Logs)}
-        end,
-
+    {Sealed, Current} = find_logs(DataDir),
     InitState = #{meta => #{},
                   config => undefined,
                   low_seqno => ?NO_SEQNO + 1,
@@ -398,22 +391,28 @@ close(#storage{current_log = Log,
 find_logs(DataDir) ->
     LogsDir = logs_dir(DataDir),
     Candidates = filelib:wildcard(filename:join(LogsDir, "*.log")),
-    Logs = lists:filtermap(
-             fun (Candidate) ->
-                     Name = filename:basename(Candidate),
-                     case re:run(Name,
-                                 "^([[:digit:]]\+).log$",
-                                 [{capture, all_but_first, list}]) of
-                         {match, [Index]} ->
-                             {true, list_to_integer(Index)};
-                         nomatch ->
-                             ?WARNING("Ignoring unexpected file in "
-                                      "log directory: ~p", [Candidate]),
-                             false
-                     end
-             end, Candidates),
+    Logs0 = lists:filtermap(
+              fun (Candidate) ->
+                      Name = filename:basename(Candidate),
+                      case re:run(Name,
+                                  "^([[:digit:]]\+).log$",
+                                  [{capture, all_but_first, list}]) of
+                          {match, [Index]} ->
+                              {true, list_to_integer(Index)};
+                          nomatch ->
+                              ?WARNING("Ignoring unexpected file in "
+                                       "log directory: ~p", [Candidate]),
+                              false
+                      end
+              end, Candidates),
 
-    lists:sort(Logs).
+    Logs1 = lists:sort(Logs0),
+    case Logs1 of
+        [] ->
+            {[], 0};
+        _ ->
+            {lists:droplast(Logs1), lists:last(Logs1)}
+    end.
 
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
