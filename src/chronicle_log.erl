@@ -60,15 +60,10 @@ open_int(Path, Mode) ->
             case read_header(Fd) of
                 {ok, _} ->
                     {ok, make_log(Fd, Mode)};
-                {error, no_header} = Error ->
-                    ok = file:close(Fd),
-                    maybe_create(Path, Mode, Error);
                 {error, _} = Error ->
                     ok = file:close(Fd),
                     Error
             end;
-        {error, enoent} = Error ->
-            maybe_create(Path, Mode, Error);
         {error, _} = Error ->
             Error
     end.
@@ -91,17 +86,6 @@ sync(#log{fd = Fd}) ->
 
 close(#log{fd = Fd})->
     file:close(Fd).
-
-maybe_create(Path, Mode, Error) ->
-    case Mode of
-        write ->
-            create(Path);
-        read ->
-            Error
-    end.
-
-create(Path) ->
-    create(Path, #{}).
 
 create(Path, UserData) ->
     Mode = write,

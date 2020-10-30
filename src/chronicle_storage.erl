@@ -98,28 +98,38 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
           end, InitState, Sealed),
 
     {CurrentLogIx, CurrentLogPath} = Current,
-    case chronicle_log:open(CurrentLogPath,
-                            make_handle_log_entry_fun(CurrentLogPath, Storage),
-                            SealedState) of
-        {ok, CurrentLog, FinalState} ->
-            #{meta := Meta, config := Config,
-              low_seqno := LowSeqno, high_seqno := HighSeqno,
-              snapshots := Snapshots} = FinalState,
+    {CurrentLog, FinalState} = open_current_log(CurrentLogPath,
+                                                Storage, SealedState),
+    #{meta := Meta, config := Config,
+      low_seqno := LowSeqno, high_seqno := HighSeqno,
+      snapshots := Snapshots} = FinalState,
+    {ok, DataSize} = chronicle_log:data_size(CurrentLog),
 
-            maybe_delete_orphans(Orphans),
+    maybe_delete_orphans(Orphans),
+    Storage#storage{current_log = CurrentLog,
+                    current_log_ix = CurrentLogIx,
+                    current_log_data_size = DataSize,
+                    low_seqno = LowSeqno,
+                    high_seqno = HighSeqno,
+                    meta = Meta,
+                    config = Config,
+                    snapshots = Snapshots}.
 
-            {ok, DataSize} = chronicle_log:data_size(CurrentLog),
-            Storage#storage{current_log = CurrentLog,
-                            current_log_ix = CurrentLogIx,
-                            current_log_data_size = DataSize,
-                            low_seqno = LowSeqno,
-                            high_seqno = HighSeqno,
-                            meta = Meta,
-                            config = Config,
-                            snapshots = Snapshots};
+open_current_log(LogPath, Storage, State) ->
+    case chronicle_log:open(LogPath,
+                            make_handle_log_entry_fun(LogPath, Storage),
+                            State) of
+        {ok, Log, NewState} ->
+            {Log, NewState};
+        {error, Error} when Error =:= enoent;
+                            Error =:= no_header ->
+            ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
+            #{meta := Meta, config := Config} = State,
+            Log = create_log(Config, Meta, LogPath),
+            {Log, State};
         {error, Error} ->
-            ?ERROR("Failed to open log ~p: ~p", [CurrentLogPath, Error]),
-            exit({failed_to_open_log, CurrentLogPath, Error})
+            ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
+            exit({failed_to_open_log, LogPath, Error})
     end.
 
 maybe_delete_orphans([]) ->
@@ -156,17 +166,23 @@ rollover(#storage{current_log = CurrentLog,
 
     NewLogIx = CurrentLogIx + 1,
     NewLogPath = log_path(DataDir, NewLogIx),
-    NewLogData = #{config => Config, meta => Meta},
+    NewLog = create_log(Config, Meta, NewLogPath),
+    Storage#storage{current_log = NewLog,
+                    current_log_ix = NewLogIx,
+                    current_log_data_size = 0}.
 
-    ?INFO("Rolling over to a new log file: ~p", [NewLogPath]),
+create_log(Config, Meta, LogPath) ->
+    ?INFO("Creating log file ~p.~n"
+          "Config:~n~p~n"
+          "Metadata:~n~p",
+          [LogPath, Config, Meta]),
 
-    case chronicle_log:create(NewLogPath, NewLogData) of
-        {ok, NewLog} ->
-            Storage#storage{current_log = NewLog,
-                            current_log_ix = NewLogIx,
-                            current_log_data_size = 0};
+    LogData = #{config => Config, meta => Meta},
+    case chronicle_log:create(LogPath, LogData) of
+        {ok, Log} ->
+            Log;
         {error, Error} ->
-            exit({rollover_failed, NewLogPath, Error})
+            exit({create_log_failed, LogPath, Error})
     end.
 
 publish(#storage{log_info_tab = LogInfoTab,
