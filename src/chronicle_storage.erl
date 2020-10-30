@@ -124,8 +124,8 @@ open_current_log(LogPath, Storage, State) ->
         {error, Error} when Error =:= enoent;
                             Error =:= no_header ->
             ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
-            #{meta := Meta, config := Config} = State,
-            Log = create_log(Config, Meta, LogPath),
+            #{meta := Meta, config := Config, high_seqno := HighSeqno} = State,
+            Log = create_log(Config, Meta, HighSeqno, LogPath),
             {Log, State};
         {error, Error} ->
             ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
@@ -160,24 +160,25 @@ rollover(#storage{current_log = CurrentLog,
                   current_log_ix = CurrentLogIx,
                   data_dir = DataDir,
                   config = Config,
-                  meta = Meta} = Storage) ->
+                  meta = Meta,
+                  high_seqno = HighSeqno} = Storage) ->
     sync(Storage),
     ok = chronicle_log:close(CurrentLog),
 
     NewLogIx = CurrentLogIx + 1,
     NewLogPath = log_path(DataDir, NewLogIx),
-    NewLog = create_log(Config, Meta, NewLogPath),
+    NewLog = create_log(Config, Meta, HighSeqno, NewLogPath),
     Storage#storage{current_log = NewLog,
                     current_log_ix = NewLogIx,
                     current_log_data_size = 0}.
 
-create_log(Config, Meta, LogPath) ->
+create_log(Config, Meta, HighSeqno, LogPath) ->
     ?INFO("Creating log file ~p.~n"
           "Config:~n~p~n"
           "Metadata:~n~p",
           [LogPath, Config, Meta]),
 
-    LogData = #{config => Config, meta => Meta},
+    LogData = #{config => Config, meta => Meta, high_seqno => HighSeqno},
     case chronicle_log:create(LogPath, LogData) of
         {ok, Log} ->
             Log;
