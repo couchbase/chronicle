@@ -350,7 +350,7 @@ get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
 store_meta(Updates, Storage) ->
     case store_meta_prepare(Updates, Storage) of
         {ok, DedupedUpdates, NewStorage} ->
-            log_append([{meta, DedupedUpdates}], NewStorage);
+            maybe_rollover(log_append([{meta, DedupedUpdates}], NewStorage));
         not_needed ->
             Storage
     end.
@@ -379,7 +379,7 @@ truncate(Seqno, #storage{high_seqno = HighSeqno,
 
     NewStorage0 = log_append([{truncate, Seqno}], Storage),
     NewStorage1 = config_index_truncate(Seqno, NewStorage0),
-    NewStorage1#storage{high_seqno = Seqno}.
+    maybe_rollover(NewStorage1#storage{high_seqno = Seqno}).
 
 append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
@@ -387,7 +387,7 @@ append(StartSeqno, EndSeqno, Entries, Opts,
     {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
     NewStorage1 = log_append(DiskEntries, NewStorage0),
     NewStorage2 = mem_log_append(EndSeqno, Entries, NewStorage1),
-    config_index_append(Entries, NewStorage2).
+    maybe_rollover(config_index_append(Entries, NewStorage2)).
 
 append_handle_meta(Storage, Entries, Opts) ->
     case maps:find(meta, Opts) of
@@ -491,9 +491,7 @@ log_append(Records, #storage{current_log = Log,
     case chronicle_log:append(Log, Records) of
         {ok, BytesWritten} ->
             NewLogDataSize = LogDataSize + BytesWritten,
-            NewStorage = Storage#storage{
-                           current_log_data_size = NewLogDataSize},
-            maybe_rollover(NewStorage);
+            Storage#storage{current_log_data_size = NewLogDataSize};
         {error, Error} ->
             exit({append_failed, Error})
     end.
