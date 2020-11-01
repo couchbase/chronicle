@@ -322,24 +322,14 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                    config => Config,
                    meta => maps:merge(CurrentMeta, Meta)};
         #log_entry{seqno = Seqno} ->
-            #{low_seqno := LowSeqno,
-              high_seqno := PrevSeqno,
-              config := Config} = State,
+            #{high_seqno := PrevSeqno, config := Config} = State,
 
-            case Seqno =:= PrevSeqno + 1 orelse PrevSeqno =:= ?NO_SEQNO of
+            case Seqno =:= PrevSeqno + 1 of
                 true ->
                     ok;
                 false ->
                     exit({inconsistent_log, LogPath, Entry, PrevSeqno})
             end,
-
-            NewLowSeqno =
-                case LowSeqno =/= ?NO_SEQNO of
-                    true ->
-                        LowSeqno;
-                    false ->
-                        Seqno
-                end,
 
             ets:insert(Storage#storage.log_tab, Entry),
             NewConfig  =
@@ -352,7 +342,6 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                 end,
 
             State#{config => NewConfig,
-                   low_seqno => NewLowSeqno,
                    high_seqno => Seqno}
     end.
 
