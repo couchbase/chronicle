@@ -36,10 +36,11 @@
                mode,
                start_pos }).
 
-open(Path, Fun, State) ->
+open(Path, UserDataFun, LogEntryFun, State) ->
     case open_int(Path, write) of
-        {ok, Log} ->
-            try scan(Log, Fun, State, #{repair => true}) of
+        {ok, Log, UserData} ->
+            try scan(Log, LogEntryFun,
+                     UserDataFun(UserData, State), #{repair => true}) of
                 {ok, NewState} ->
                     {ok, Log, NewState};
                 {error, _} = Error ->
@@ -58,8 +59,8 @@ open_int(Path, Mode) ->
     case file:open(Path, open_flags(Mode)) of
         {ok, Fd} ->
             case read_header(Fd) of
-                {ok, _} ->
-                    {ok, make_log(Fd, Mode)};
+                {ok, UserData} ->
+                    {ok, make_log(Fd, Mode), UserData};
                 {error, _} = Error ->
                     ok = file:close(Fd),
                     Error
@@ -68,11 +69,11 @@ open_int(Path, Mode) ->
             Error
     end.
 
-read_log(Path, Fun, State) ->
+read_log(Path, UserDataFun, LogEntryFun, State) ->
     case open_int(Path, read) of
-        {ok, Log} ->
+        {ok, Log, UserData} ->
             try
-                scan(Log, Fun, State)
+                scan(Log, LogEntryFun, UserDataFun(UserData, State))
             after
                 close(Log)
             end;

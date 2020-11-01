@@ -87,8 +87,11 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
     SealedState =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc) ->
+                  HandleUserDataFun = make_handle_user_data_fun(LogPath),
                   HandleEntryFun = make_handle_log_entry_fun(LogPath, Storage),
-                  case chronicle_log:read_log(LogPath, HandleEntryFun, Acc) of
+                  case chronicle_log:read_log(LogPath,
+                                              HandleUserDataFun, HandleEntryFun,
+                                              Acc) of
                       {ok, NewAcc} ->
                           NewAcc;
                       {error, Error} ->
@@ -117,6 +120,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
 
 open_current_log(LogPath, Storage, State) ->
     case chronicle_log:open(LogPath,
+                            make_handle_user_data_fun(LogPath),
                             make_handle_log_entry_fun(LogPath, Storage),
                             State) of
         {ok, Log, NewState} ->
@@ -251,6 +255,39 @@ maybe_complete_wipe(DataDir) ->
 
 wipe_marker(DataDir) ->
     filename:join(DataDir, "chronicle.wipe").
+
+make_handle_user_data_fun(LogPath) ->
+    fun (UserData, State) ->
+            handle_user_data(LogPath, UserData, State)
+    end.
+
+handle_user_data(LogPath, UserData, State) ->
+    #{config := Config, meta := Meta, high_seqno := HighSeqno} = UserData,
+
+    #{config := StateConfig,
+      meta := StateMeta,
+      high_seqno := StateHighSeqno} = State,
+
+    case StateConfig of
+        undefined ->
+            State#{config => Config,
+                   meta => Meta,
+                   high_seqno => HighSeqno,
+                   low_seqno => HighSeqno + 1};
+        _ ->
+            case Config =:= StateConfig
+                andalso Meta =:= StateMeta
+                andalso HighSeqno =:= StateHighSeqno of
+                true ->
+                    State;
+                false ->
+                    exit({inconsistent_log,
+                          LogPath,
+                          {config, Config, StateConfig},
+                          {meta, Meta, StateMeta},
+                          {high_seqno, HighSeqno, StateHighSeqno}})
+            end
+    end.
 
 make_handle_log_entry_fun(LogPath, Storage) ->
     fun (Entry, State) ->
