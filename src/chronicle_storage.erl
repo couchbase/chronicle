@@ -447,7 +447,7 @@ find_logs(DataDir) ->
     Logs1 = lists:keysort(1, Logs0),
     case Logs1 of
         [] ->
-            {[], {0, log_path(DataDir, 0)}};
+            {[], [], {0, log_path(DataDir, 0)}};
         _ ->
             {Orphans, NonOrphans} = find_orphan_logs(Logs1),
             {Orphans, lists:droplast(NonOrphans), lists:last(NonOrphans)}
