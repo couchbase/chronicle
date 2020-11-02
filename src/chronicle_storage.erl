@@ -43,7 +43,6 @@
                    current_log_data_size,
                    low_seqno,
                    high_seqno,
-                   committed_seqno,
                    meta,
                    config,
                    snapshots,
@@ -69,7 +68,6 @@ open() ->
                        config_index_tab = ets:whereis(?CONFIG_INDEX),
                        low_seqno = ?NO_SEQNO + 1,
                        high_seqno = ?NO_SEQNO,
-                       committed_seqno = ?NO_SEQNO,
                        meta = #{}},
 
     try
@@ -199,20 +197,10 @@ create_log(Config, Meta, HighSeqno, LogPath) ->
 
 publish(#storage{log_info_tab = LogInfoTab,
                  low_seqno = LowSeqno,
-                 high_seqno = HighSeqno,
-                 committed_seqno = CommittedSeqno} = Storage) ->
+                 high_seqno = HighSeqno} = Storage) ->
+    CommittedSeqno = get_committed_seqno(Storage),
     ets:insert(LogInfoTab, {?RANGE_KEY, LowSeqno, HighSeqno, CommittedSeqno}),
     Storage.
-
-set_committed_seqno(Seqno, #storage{
-                              low_seqno = LowSeqno,
-                              high_seqno = HighSeqno,
-                              committed_seqno = CommittedSeqno} = Storage) ->
-    true = (Seqno >= CommittedSeqno),
-    true = (Seqno >= LowSeqno - 1),
-    true = (Seqno =< HighSeqno),
-
-    Storage#storage{committed_seqno = Seqno}.
 
 ensure_dirs(DataDir) ->
     ok = chronicle_utils:mkdir_p(logs_dir(DataDir)),
@@ -366,6 +354,11 @@ is_config_entry(#log_entry{value = Value}) ->
 get_meta(Storage) ->
     Storage#storage.meta.
 
+get_committed_seqno(#storage{meta = Meta}) ->
+    get_committed_seqno(Meta);
+get_committed_seqno(#{?META_COMMITTED_SEQNO := CommittedSeqno}) ->
+    CommittedSeqno.
+
 get_high_seqno(Storage) ->
     Storage#storage.high_seqno.
 
@@ -407,8 +400,9 @@ store_meta_prepare(Updates, #storage{meta = Meta} = Storage) ->
             not_needed
     end.
 
-truncate(Seqno, #storage{high_seqno = HighSeqno,
-                         committed_seqno = CommittedSeqno} = Storage) ->
+truncate(Seqno, #storage{high_seqno = HighSeqno} = Storage) ->
+    CommittedSeqno = get_committed_seqno(Storage),
+
     true = (Seqno >= CommittedSeqno),
     true = (Seqno =< HighSeqno),
 

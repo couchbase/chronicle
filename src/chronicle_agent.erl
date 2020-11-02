@@ -1543,12 +1543,7 @@ storage_open() ->
     publish_storage(Storage1).
 
 publish_storage(Storage) ->
-    chronicle_storage:publish(propagate_committed_seqno(Storage)).
-
-propagate_committed_seqno(Storage) ->
-    #{?META_COMMITTED_SEQNO :=
-          CommittedSeqno} = chronicle_storage:get_meta(Storage),
-    chronicle_storage:set_committed_seqno(CommittedSeqno, Storage).
+    chronicle_storage:publish(Storage).
 
 append_entry(Entry, Meta, #state{storage = Storage} = State) ->
     Seqno = Entry#log_entry.seqno,
