@@ -138,3 +138,10 @@
 
 -define(CRC_BITS, 32).
 -define(CRC_BYTES, (?CRC_BITS bsr 3)).
+
+-define(META_PEER, peer).
+-define(META_HISTORY_ID, history_id).
+-define(META_TERM, term).
+-define(META_TERM_VOTED, term_voted).
+-define(META_COMMITTED_SEQNO, committed_seqno).
+-define(META_PENDING_BRANCH, pending_branch).

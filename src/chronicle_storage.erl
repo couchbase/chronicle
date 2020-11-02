@@ -31,6 +31,13 @@
 
 -define(LOG_MAX_SIZE, 512 * 1024).
 
+-type meta() :: #{ ?META_PEER => chronicle:peer(),
+                   ?META_HISTORY_ID => chronicle:history_id(),
+                   ?META_TERM => chronicle:leader_term(),
+                   ?META_TERM_VOTED => chronicle:leader_term(),
+                   ?META_COMMITTED_SEQNO => chronicle:seqno(),
+                   ?META_PENDING_BRANCH => undefined | #branch{} }.
+
 -record(storage, { current_log,
                    current_log_ix,
                    current_log_data_size,
@@ -355,6 +362,7 @@ is_config_entry(#log_entry{value = Value}) ->
             false
     end.
 
+-spec get_meta(#storage{}) -> meta().
 get_meta(Storage) ->
     Storage#storage.meta.
 
@@ -373,6 +381,7 @@ get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
             Config
     end.
 
+-spec store_meta(meta(), #storage{}) -> #storage{}.
 store_meta(Updates, Storage) ->
     case store_meta_prepare(Updates, Storage) of
         {ok, DedupedUpdates, NewStorage} ->

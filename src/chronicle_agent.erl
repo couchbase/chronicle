@@ -356,7 +356,7 @@ handle_call(wipe, _From, State) ->
     handle_wipe(State);
 handle_call({establish_term, HistoryId, Term}, _From, State) ->
     %% TODO: consider simply skipping the position check for this case
-    Position = {get_meta(term_voted, State), get_high_seqno(State)},
+    Position = {get_meta(?META_TERM_VOTED, State), get_high_seqno(State)},
     handle_establish_term(HistoryId, Term, Position, State);
 handle_call({establish_term, HistoryId, Term, Position}, _From, State) ->
     handle_establish_term(HistoryId, Term, Position, State);
@@ -414,12 +414,12 @@ handle_get_metadata(State) ->
     end.
 
 state2metadata(State) ->
-    #{peer := Peer,
-      history_id := HistoryId,
-      term := Term,
-      term_voted := TermVoted,
-      committed_seqno := CommittedSeqno,
-      pending_branch := PendingBranch} = get_meta(State),
+    #{?META_PEER := Peer,
+      ?META_HISTORY_ID := HistoryId,
+      ?META_TERM := Term,
+      ?META_TERM_VOTED := TermVoted,
+      ?META_COMMITTED_SEQNO := CommittedSeqno,
+      ?META_PENDING_BRANCH := PendingBranch} = get_meta(State),
 
     ConfigEntry = get_config(State),
     {Config, ConfigRevision} =
@@ -466,7 +466,7 @@ handle_register_rsm(Name, Pid, #state{rsms_by_name = RSMs,
             NewRSMs = RSMs#{Name => {MRef, Pid}},
             NewMRefs = MRefs#{MRef => Name},
 
-            CommittedSeqno = get_meta(committed_seqno, State),
+            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, State),
             Info0 = #{committed_seqno => CommittedSeqno},
             Info1 = case need_rsm_snapshot(Name, State) of
                         {true, NeedSnapshotSeqno} ->
@@ -585,7 +585,9 @@ foreach_rsm(Fun, #state{rsms_by_name = RSMs}) ->
 handle_reprovision(State) ->
     case check_reprovision(State) of
         {ok, Config} ->
-            #{history_id := HistoryId, term := Term} = get_meta(State),
+            #{?META_HISTORY_ID := HistoryId,
+              ?META_TERM := Term} = get_meta(State),
+
             HighSeqno = get_high_seqno(State),
             Peer = get_peer_name(),
             NewTerm = next_term(Term, Peer),
@@ -600,10 +602,10 @@ handle_reprovision(State) ->
             ?DEBUG("Reprovisioning peer with config:~n~p", [ConfigEntry]),
 
             NewState = append_entry(ConfigEntry,
-                                    #{peer => Peer,
-                                      term => NewTerm,
-                                      term_voted => NewTerm,
-                                      committed_seqno => Seqno},
+                                    #{?META_PEER => Peer,
+                                      ?META_TERM => NewTerm,
+                                      ?META_TERM_VOTED => NewTerm,
+                                      ?META_COMMITTED_SEQNO => Seqno},
                                     State),
 
             announce_system_reprovisioned(NewState),
@@ -618,7 +620,7 @@ handle_reprovision(State) ->
 check_reprovision(State) ->
     case is_provisioned(State) of
         true ->
-            Peer = get_meta(peer, State),
+            Peer = get_meta(?META_PEER, State),
             ConfigEntry = get_config(State),
             Config = ConfigEntry#log_entry.value,
             case Config of
@@ -658,11 +660,11 @@ handle_provision(Machines0, State) ->
                    [HistoryId, Config]),
 
             NewState = append_entry(ConfigEntry,
-                                    #{peer => Peer,
-                                      history_id => HistoryId,
-                                      term => Term,
-                                      term_voted => Term,
-                                      committed_seqno => Seqno},
+                                    #{?META_PEER => Peer,
+                                      ?META_HISTORY_ID => HistoryId,
+                                      ?META_TERM => Term,
+                                      ?META_TERM_VOTED => Term,
+                                      ?META_COMMITTED_SEQNO => Seqno},
                                     State),
 
             announce_system_provisioned(NewState),
@@ -706,7 +708,7 @@ handle_establish_term(HistoryId, Term, Position, State) ->
 
     case check_establish_term(HistoryId, Term, Position, State) of
         ok ->
-            NewState = store_meta(#{term => Term}, State),
+            NewState = store_meta(#{?META_TERM => Term}, State),
             announce_term_established(Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
             {reply, {ok, state2metadata(State)}, NewState};
@@ -720,7 +722,7 @@ check_establish_term(HistoryId, Term, Position, State) ->
            check_peer_current(Position, State)).
 
 check_later_term(Term, State) ->
-    CurrentTerm = get_meta(term, State),
+    CurrentTerm = get_meta(?META_TERM, State),
     case term_number(Term) > term_number(CurrentTerm) of
         true ->
             ok;
@@ -729,7 +731,7 @@ check_later_term(Term, State) ->
     end.
 
 check_peer_current(Position, State) ->
-    OurTermVoted = get_meta(term_voted, State),
+    OurTermVoted = get_meta(?META_TERM_VOTED, State),
     OurHighSeqno = get_high_seqno(State),
     OurPosition = {OurTermVoted, OurHighSeqno},
     case compare_positions(Position, OurPosition) of
@@ -784,7 +786,7 @@ complete_append(HistoryId, Term, Info, State) ->
     Peer =
         case WasProvisioned of
             true ->
-                get_meta(peer, State);
+                get_meta(?META_PEER, State);
             false ->
                 PeerName = get_peer_name(),
 
@@ -800,16 +802,16 @@ complete_append(HistoryId, Term, Info, State) ->
         end,
 
     PreMetadata =
-        #{history_id => HistoryId,
-          term => Term,
-          term_voted => Term,
-          pending_branch => undefined,
-          peer => Peer},
-    PostMetadata = #{committed_seqno => NewCommittedSeqno},
+        #{?META_HISTORY_ID => HistoryId,
+          ?META_TERM => Term,
+          ?META_TERM_VOTED => Term,
+          ?META_PENDING_BRANCH => undefined,
+          ?META_PEER => Peer},
+    PostMetadata = #{?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
     %% When resolving a branch, we must never delete the branch record without
     %% also logging a new config. Therefore the update needs to be atomic.
-    Atomic = (get_meta(pending_branch, State) =/= undefined),
+    Atomic = (get_meta(?META_PENDING_BRANCH, State) =/= undefined),
     NewState = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
                               PostMetadata, Truncate, Atomic, State),
 
@@ -848,7 +850,7 @@ check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State) ->
 check_append_history_id(HistoryId, Entries, State) ->
     case check_history_id(HistoryId, State) of
         ok ->
-            OldHistoryId = get_meta(history_id, State),
+            OldHistoryId = get_meta(?META_HISTORY_ID, State),
             case HistoryId =:= OldHistoryId of
                 true ->
                     ok;
@@ -885,8 +887,8 @@ check_append_history_id(HistoryId, Entries, State) ->
 check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, State) ->
     case get_entries_seqnos(AtSeqno, Entries) of
         {ok, StartSeqno, EndSeqno} ->
-            #{term_voted := OurTermVoted,
-              committed_seqno := OurCommittedSeqno} = get_meta(State),
+            #{?META_TERM_VOTED := OurTermVoted,
+              ?META_COMMITTED_SEQNO := OurCommittedSeqno} = get_meta(State),
             OurHighSeqno = get_high_seqno(State),
 
             {SafeHighSeqno, NewTerm} =
@@ -1047,8 +1049,8 @@ check_committed_seqno(Term, CommittedSeqno, HighSeqno, State) ->
            check_committed_seqno_rollback(Term, CommittedSeqno, State)).
 
 check_committed_seqno_rollback(Term, CommittedSeqno, State) ->
-    #{term_voted := OurTermVoted,
-      committed_seqno := OurCommittedSeqno} = get_meta(State),
+    #{?META_TERM_VOTED := OurTermVoted,
+      ?META_COMMITTED_SEQNO := OurCommittedSeqno} = get_meta(State),
     case CommittedSeqno < OurCommittedSeqno of
         true ->
             case Term =:= OurTermVoted of
@@ -1088,7 +1090,7 @@ check_committed_seqno_known(CommittedSeqno, HighSeqno, State) ->
     end.
 
 check_not_earlier_term(Term, State) ->
-    CurrentTerm = get_meta(term, State),
+    CurrentTerm = get_meta(?META_TERM, State),
     case term_number(Term) >= term_number(CurrentTerm) of
         true ->
             ok;
@@ -1099,14 +1101,14 @@ check_not_earlier_term(Term, State) ->
 handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State) ->
     case check_local_mark_committed(HistoryId, Term, CommittedSeqno, State) of
         ok ->
-            OurCommittedSeqno = get_meta(committed_seqno, State),
+            OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, State),
             NewState =
                 case OurCommittedSeqno =:= CommittedSeqno of
                     true ->
                         State;
                     false ->
                         NewState0 =
-                            store_meta(#{committed_seqno =>
+                            store_meta(#{?META_COMMITTED_SEQNO =>
                                              CommittedSeqno}, State),
 
                         announce_committed_seqno(CommittedSeqno, NewState0),
@@ -1144,7 +1146,7 @@ handle_install_snapshot(HistoryId, Term,
             Peer =
                 case WasProvisioned of
                     true ->
-                        get_meta(peer, State);
+                        get_meta(?META_PEER, State);
                     false ->
                         %% TODO: Not checking peer name against the config
                         %% entry passed to us. That's because this is just the
@@ -1190,7 +1192,7 @@ check_install_snapshot(HistoryId, Term,
            check_snapshot_config(ConfigEntry, RSMSnapshots)).
 
 check_snapshot_seqno(SnapshotSeqno, State) ->
-    CommittedSeqno = get_meta(committed_seqno, State),
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, State),
 
     case SnapshotSeqno > CommittedSeqno of
         true ->
@@ -1222,9 +1224,10 @@ handle_store_branch(Branch, State) ->
                 check_branch_compatible(Branch, State),
                 check_branch_coordinator(Branch, State)) of
         {ok, FinalBranch} ->
-            NewState = store_meta(#{pending_branch => FinalBranch}, State),
+            NewState =
+                store_meta(#{?META_PENDING_BRANCH => FinalBranch}, State),
 
-            case get_meta(pending_branch, State) of
+            case get_meta(?META_PENDING_BRANCH, State) of
                 undefined ->
                     %% New branch, announce history change.
                     announce_new_history(NewState);
@@ -1239,7 +1242,7 @@ handle_store_branch(Branch, State) ->
     end.
 
 check_branch_compatible(NewBranch, State) ->
-    PendingBranch = get_meta(pending_branch, State),
+    PendingBranch = get_meta(?META_PENDING_BRANCH, State),
     case PendingBranch =:= undefined of
         true ->
             ok;
@@ -1256,7 +1259,7 @@ check_branch_compatible(NewBranch, State) ->
     end.
 
 check_branch_coordinator(Branch, State) ->
-    Peer = get_meta(peer, State),
+    Peer = get_meta(?META_PEER, State),
     Coordinator =
         case Branch#branch.coordinator of
             self ->
@@ -1279,7 +1282,7 @@ handle_undo_branch(BranchId, State) ->
     assert_valid_history_id(BranchId),
     case check_branch_id(BranchId, State) of
         ok ->
-            NewState = store_meta(#{pending_branch => undefined}, State),
+            NewState = store_meta(#{?META_PENDING_BRANCH => undefined}, State),
             announce_new_history(NewState),
 
             ?DEBUG("Undid branch ~p", [BranchId]),
@@ -1369,7 +1372,7 @@ need_rsm_snapshot(RSM, Seqno, State) ->
     end.
 
 check_branch_id(BranchId, State) ->
-    OurBranch = get_meta(pending_branch, State),
+    OurBranch = get_meta(?META_PENDING_BRANCH, State),
     case OurBranch of
         undefined ->
             {error, no_branch};
@@ -1393,8 +1396,8 @@ check_history_id(HistoryId, State) ->
 
 %% TODO: get rid of this once #state{} doesn't duplicate #metadata{}.
 get_history_id_int(State) ->
-    #{history_id := CommittedHistoryId,
-      pending_branch := PendingBranch} = get_meta(State),
+    #{?META_HISTORY_ID := CommittedHistoryId,
+      ?META_PENDING_BRANCH := PendingBranch} = get_meta(State),
 
     case PendingBranch of
         undefined ->
@@ -1404,7 +1407,7 @@ get_history_id_int(State) ->
     end.
 
 check_same_term(Term, State) ->
-    OurTerm = get_meta(term, State),
+    OurTerm = get_meta(?META_TERM, State),
     case Term =:= OurTerm of
         true ->
             ok;
@@ -1459,7 +1462,7 @@ announce_new_history(State) ->
     chronicle_events:sync_notify({new_history, HistoryId, Metadata}).
 
 maybe_announce_term_established(Term, State) ->
-    OldTerm = get_meta(term, State),
+    OldTerm = get_meta(?META_TERM, State),
     case Term =:= OldTerm of
         true ->
             ok;
@@ -1485,8 +1488,8 @@ announce_new_config(State) ->
     chronicle_events:sync_notify({new_config, Config, Metadata}).
 
 maybe_announce_committed_seqno(OldState, NewState) ->
-    OldCommittedSeqno = get_meta(committed_seqno, OldState),
-    NewCommittedSeqno = get_meta(committed_seqno, NewState),
+    OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldState),
+    NewCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, NewState),
     case OldCommittedSeqno =:= NewCommittedSeqno of
         true ->
             ok;
@@ -1521,12 +1524,12 @@ storage_open() ->
             true ->
                 Storage0;
             false ->
-                SeedMeta = #{peer => ?NO_PEER,
-                             history_id => ?NO_HISTORY,
-                             term => ?NO_TERM,
-                             term_voted => ?NO_TERM,
-                             committed_seqno => ?NO_SEQNO,
-                             pending_branch => undefined},
+                SeedMeta = #{?META_PEER => ?NO_PEER,
+                             ?META_HISTORY_ID => ?NO_HISTORY,
+                             ?META_TERM => ?NO_TERM,
+                             ?META_TERM_VOTED => ?NO_TERM,
+                             ?META_COMMITTED_SEQNO => ?NO_SEQNO,
+                             ?META_PENDING_BRANCH => undefined},
                 ?INFO("Found empty storage. "
                       "Seeding it with default metadata:~n~p", [SeedMeta]),
                 chronicle_storage:store_meta(SeedMeta, Storage0)
@@ -1543,7 +1546,8 @@ publish_storage(Storage) ->
     chronicle_storage:publish(propagate_committed_seqno(Storage)).
 
 propagate_committed_seqno(Storage) ->
-    #{committed_seqno := CommittedSeqno} = chronicle_storage:get_meta(Storage),
+    #{?META_COMMITTED_SEQNO :=
+          CommittedSeqno} = chronicle_storage:get_meta(Storage),
     chronicle_storage:set_committed_seqno(CommittedSeqno, Storage).
 
 append_entry(Entry, Meta, #state{storage = Storage} = State) ->
@@ -1659,7 +1663,7 @@ maybe_initiate_snapshot(#state{snapshot_state = {retry, _}} = State) ->
     State;
 maybe_initiate_snapshot(State) ->
     LatestSnapshotSeqno = get_latest_snapshot_seqno(State),
-    CommittedSeqno = get_meta(committed_seqno, State),
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, State),
 
     case CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL of
         true ->
@@ -1671,7 +1675,7 @@ maybe_initiate_snapshot(State) ->
 initiate_snapshot(State) ->
     undefined = State#state.snapshot_state,
 
-    CommittedSeqno = get_meta(committed_seqno, State),
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, State),
     CommittedConfig = get_config_for_seqno(CommittedSeqno, State),
     CurrentConfig = get_config(State),
 
