@@ -50,7 +50,7 @@
 -define(SELF_PEER, 'self@nohost').
 -define(NO_PEER, 'nonode@nohost').
 -define(NO_HISTORY, <<"no-history">>).
--define(NO_TERM, {0, <<"no-term">>}).
+-define(NO_TERM, {0, ?NO_PEER}).
 -define(NO_SEQNO, 0).
 
 -record(rsm_config, { module :: module(),
