@@ -40,6 +40,7 @@
 
 -record(storage, { current_log,
                    current_log_ix,
+                   current_log_path,
                    current_log_data_size,
                    low_seqno,
                    high_seqno,
@@ -51,7 +52,9 @@
 
                    log_info_tab,
                    log_tab,
-                   config_index_tab
+                   config_index_tab,
+
+                   log_segments
                   }).
 
 open() ->
@@ -88,7 +91,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   config => undefined,
                   low_seqno => ?NO_SEQNO + 1,
                   high_seqno => ?NO_SEQNO,
-                  snapshots => []},
+                  snapshots => [],
+                  log_segments => queue:new()},
     SealedState =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc) ->
@@ -97,8 +101,14 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   case chronicle_log:read_log(LogPath,
                                               HandleUserDataFun, HandleEntryFun,
                                               Acc) of
-                      {ok, NewAcc} ->
-                          NewAcc;
+                      {ok, NewAcc0} ->
+                          #{meta := Meta,
+                            log_segments := LogSegments0} = NewAcc0,
+                          CommittedSeqno = get_committed_seqno(Meta),
+                          LogSegments =
+                              queue:in({LogPath, CommittedSeqno}, LogSegments0),
+
+                          NewAcc0#{log_segments => LogSegments};
                       {error, Error} ->
                           ?ERROR("Failed to read log ~p: ~p", [LogPath, Error]),
                           exit({failed_to_read_log, LogPath, Error})
@@ -110,18 +120,20 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                                                 Storage, SealedState),
     #{meta := Meta, config := Config,
       low_seqno := LowSeqno, high_seqno := HighSeqno,
-      snapshots := Snapshots} = FinalState,
+      snapshots := Snapshots, log_segments := LogSegments} = FinalState,
     {ok, DataSize} = chronicle_log:data_size(CurrentLog),
 
     maybe_delete_orphans(Orphans),
     Storage#storage{current_log = CurrentLog,
                     current_log_ix = CurrentLogIx,
+                    current_log_path = CurrentLogPath,
                     current_log_data_size = DataSize,
                     low_seqno = LowSeqno,
                     high_seqno = HighSeqno,
                     meta = Meta,
                     config = Config,
-                    snapshots = Snapshots}.
+                    snapshots = Snapshots,
+                    log_segments = LogSegments}.
 
 open_current_log(LogPath, Storage, State) ->
     case chronicle_log:open(LogPath,
@@ -167,19 +179,26 @@ maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
 
 rollover(#storage{current_log = CurrentLog,
                   current_log_ix = CurrentLogIx,
+                  current_log_path = CurrentLogPath,
                   data_dir = DataDir,
                   config = Config,
                   meta = Meta,
-                  high_seqno = HighSeqno} = Storage) ->
+                  high_seqno = HighSeqno,
+                  log_segments = LogSegments} = Storage) ->
     sync(Storage),
     ok = chronicle_log:close(CurrentLog),
+
+    CommittedSeqno = get_committed_seqno(Meta),
+    NewLogSegments = queue:in({CurrentLogPath, CommittedSeqno}, LogSegments),
 
     NewLogIx = CurrentLogIx + 1,
     NewLogPath = log_path(DataDir, NewLogIx),
     NewLog = create_log(Config, Meta, HighSeqno, NewLogPath),
     Storage#storage{current_log = NewLog,
                     current_log_ix = NewLogIx,
-                    current_log_data_size = 0}.
+                    current_log_path = NewLogPath,
+                    current_log_data_size = 0,
+                    log_segments = NewLogSegments}.
 
 create_log(Config, Meta, HighSeqno, LogPath) ->
     ?INFO("Creating log file ~p.~n"
@@ -197,8 +216,9 @@ create_log(Config, Meta, HighSeqno, LogPath) ->
 
 publish(#storage{log_info_tab = LogInfoTab,
                  low_seqno = LowSeqno,
-                 high_seqno = HighSeqno} = Storage) ->
-    CommittedSeqno = get_committed_seqno(Storage),
+                 high_seqno = HighSeqno,
+                 meta = Meta} = Storage) ->
+    CommittedSeqno = get_committed_seqno(Meta),
     ets:insert(LogInfoTab, {?RANGE_KEY, LowSeqno, HighSeqno, CommittedSeqno}),
     Storage.
 
@@ -354,8 +374,6 @@ is_config_entry(#log_entry{value = Value}) ->
 get_meta(Storage) ->
     Storage#storage.meta.
 
-get_committed_seqno(#storage{meta = Meta}) ->
-    get_committed_seqno(Meta);
 get_committed_seqno(#{?META_COMMITTED_SEQNO := CommittedSeqno}) ->
     CommittedSeqno.
 
