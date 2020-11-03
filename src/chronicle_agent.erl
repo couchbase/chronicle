@@ -1598,7 +1598,6 @@ append_entries(StartSeqno, EndSeqno, Entries,
 
 record_snapshot(Seqno, ConfigEntry, #state{storage = Storage} = State) ->
     NewStorage = chronicle_storage:record_snapshot(Seqno, ConfigEntry, Storage),
-    chronicle_storage:sync(NewStorage),
     State#state{storage = NewStorage}.
 
 save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
