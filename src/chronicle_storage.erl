@@ -356,7 +356,7 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
             end,
 
             ets:insert(Storage#storage.log_tab, Entry),
-            NewConfig  =
+            NewConfig =
                 case is_config_entry(Entry) of
                     true ->
                         ets:insert(Storage#storage.config_index_tab, Entry),
