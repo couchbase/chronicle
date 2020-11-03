@@ -590,7 +590,7 @@ mkdir_p(Path) ->
                     ok;
                 {error, enoent} ->
                     file:make_dir(Path);
-                {error, {wrong_file_type, _}} ->
+                {error, {wrong_file_type, _, _}} ->
                     {error, eexist};
                 {error, _} = Error ->
                     Error
@@ -607,7 +607,7 @@ check_file_exists(Path, Type) ->
                 true ->
                     ok;
                 false ->
-                    {error, {wrong_file_type, ActualType}}
+                    {error, {wrong_file_type, Type, ActualType}}
             end;
         Error ->
             Error
