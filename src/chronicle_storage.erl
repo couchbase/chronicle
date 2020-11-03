@@ -97,7 +97,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
     SealedState =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc) ->
-                  HandleUserDataFun = make_handle_user_data_fun(LogPath),
+                  HandleUserDataFun =
+                      make_handle_user_data_fun(LogPath, Storage),
                   HandleEntryFun = make_handle_log_entry_fun(LogPath, Storage),
                   case chronicle_log:read_log(LogPath,
                                               HandleUserDataFun, HandleEntryFun,
@@ -138,7 +139,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
 
 open_current_log(LogPath, Storage, State) ->
     case chronicle_log:open(LogPath,
-                            make_handle_user_data_fun(LogPath),
+                            make_handle_user_data_fun(LogPath, Storage),
                             make_handle_log_entry_fun(LogPath, Storage),
                             State) of
         {ok, Log, NewState} ->
@@ -272,12 +273,12 @@ maybe_complete_wipe(DataDir) ->
 wipe_marker(DataDir) ->
     filename:join(DataDir, "chronicle.wipe").
 
-make_handle_user_data_fun(LogPath) ->
+make_handle_user_data_fun(LogPath, Storage) ->
     fun (UserData, State) ->
-            handle_user_data(LogPath, UserData, State)
+            handle_user_data(LogPath, Storage, UserData, State)
     end.
 
-handle_user_data(LogPath, UserData, State) ->
+handle_user_data(LogPath, Storage, UserData, State) ->
     #{config := Config, meta := Meta, high_seqno := HighSeqno} = UserData,
 
     #{config := StateConfig,
@@ -286,6 +287,13 @@ handle_user_data(LogPath, UserData, State) ->
 
     case StateConfig of
         undefined ->
+            case Config of
+                undefined ->
+                    ok;
+                #log_entry{} ->
+                    ets:insert(Storage#storage.config_index_tab, Config)
+            end,
+
             State#{config => Config,
                    meta => Meta,
                    high_seqno => HighSeqno,
