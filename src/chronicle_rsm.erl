@@ -643,6 +643,7 @@ handle_seqno_committed(CommittedSeqno, State,
     case CommittedSeqno >= ReadSeqno of
         true ->
             NewData = read_log(CommittedSeqno, State, Data),
+            maybe_publish_local_revision(State, NewData),
             handle_seqno_committed_next_state(CommittedSeqno, State, NewData);
         false ->
             ?DEBUG("Ignoring seqno_committed ~p "
@@ -673,23 +674,50 @@ save_snapshot(Seqno, #data{name = Name,
                          mod_state = ModState},
     chronicle_agent:save_rsm_snapshot(Name, Seqno, Snapshot).
 
-read_log(EndSeqno, State, Data) ->
-    Entries = get_log(EndSeqno, Data),
-    NewData = apply_entries(EndSeqno, Entries, State, Data),
-    maybe_publish_local_revision(State, NewData),
-    NewData.
+read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
+    StartSeqno = ReadSeqno + 1,
+    case get_log(StartSeqno, EndSeqno, Data) of
+        {ok, Entries} ->
+            apply_entries(EndSeqno, Entries, State, Data);
+        {error, compacted} ->
+            %% We should only get this error when a new snapshot was installed
+            %% by the leader. So we always expect to have a snapshot
+            %% available, and the snapshot seqno is expected to be greater
+            %% than our read seqno.
+            {ok, SnapshotSeqno, Snapshot} = get_snapshot(Data),
+            true = (SnapshotSeqno >= StartSeqno),
 
-get_log(EndSeqno, #data{name = Name, read_seqno = ReadSeqno}) ->
-    case ReadSeqno =:= EndSeqno of
+            ?DEBUG("Got log compacted when reading seqnos ~p to ~p. "
+                   "Applying snapshot at seqno ~p",
+                   [StartSeqno, EndSeqno, SnapshotSeqno]),
+
+            NewData = apply_snapshot(SnapshotSeqno, Snapshot, Data),
+            case EndSeqno > SnapshotSeqno of
+                true ->
+                    %% There are more entries to read.
+                    read_log(EndSeqno, State, NewData);
+                false ->
+                    NewData
+            end
+    end.
+
+get_log(StartSeqno, EndSeqno, #data{name = Name}) ->
+    case StartSeqno > EndSeqno of
         true ->
-            [];
+            {ok, []};
         false ->
-            true = (ReadSeqno < EndSeqno),
-
-            %% TODO: deal with compaction
-            {ok, Log} =
-                chronicle_agent:get_log_for_rsm(Name, ReadSeqno + 1, EndSeqno),
-            Log
+            case chronicle_agent:get_log_for_rsm(Name, StartSeqno, EndSeqno) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, compacted} = Error ->
+                    Error;
+                {error, Error} ->
+                    ?ERROR("Unexpected error reading log for RSM ~p: ~p.~n"
+                           "Start seqno: ~p~n"
+                           "End seqno: ~p",
+                           [Name, Error, StartSeqno, EndSeqno]),
+                    exit({read_log_error, Name, Error, StartSeqno, EndSeqno})
+            end
     end.
 
 submit_command(Command, From,
@@ -773,8 +801,11 @@ register_with_agent(#data{name = Name} = Data) ->
 
     {#init{wait_for_seqno = CommittedSeqno}, Effects1}.
 
-maybe_restore_snapshot(#data{name = Name} = Data) ->
-    case chronicle_agent:get_rsm_snapshot(Name) of
+get_snapshot(#data{name = Name}) ->
+    chronicle_agent:get_rsm_snapshot(Name).
+
+maybe_restore_snapshot(Data) ->
+    case get_snapshot(Data) of
         {ok, SnapshotSeqno, Snapshot} ->
             apply_snapshot(SnapshotSeqno, Snapshot, Data);
         {no_snapshot, SnapshotSeqno} ->
