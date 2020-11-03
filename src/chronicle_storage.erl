@@ -427,8 +427,8 @@ store_meta_prepare(Updates, #storage{meta = Meta} = Storage) ->
             not_needed
     end.
 
-truncate(Seqno, #storage{high_seqno = HighSeqno} = Storage) ->
-    CommittedSeqno = get_committed_seqno(Storage),
+truncate(Seqno, #storage{meta = Meta, high_seqno = HighSeqno} = Storage) ->
+    CommittedSeqno = get_committed_seqno(Meta),
 
     true = (Seqno >= CommittedSeqno),
     true = (Seqno =< HighSeqno),
