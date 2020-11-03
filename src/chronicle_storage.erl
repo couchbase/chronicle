@@ -799,6 +799,16 @@ read_rsm_snapshot(RSM, Seqno, #storage{data_dir = DataDir}) ->
 
 validate_snapshot(DataDir, Seqno, Config) ->
     SnapshotDir = snapshot_dir(DataDir, Seqno),
+    case chronicle_utils:check_file_exists(SnapshotDir, directory) of
+        ok ->
+            validate_existing_snapshot(SnapshotDir, Config);
+        {error, enoent} ->
+            missing;
+        {error, Error} ->
+            error({validate_snapshot_failed, SnapshotDir, Error})
+    end.
+
+validate_existing_snapshot(SnapshotDir, Config) ->
     RSMs = chronicle_utils:config_rsms(Config#log_entry.value),
     Errors =
         lists:filtermap(
@@ -823,10 +833,12 @@ validate_state(#storage{low_seqno = LowSeqno,
                         data_dir = DataDir} = Storage) ->
     {ValidSnapshots0, InvalidSnapshots} =
         lists:foldl(
-          fun ({Seqno, Config} = Snapshot, {AccValid, AccInvalid}) ->
+          fun ({Seqno, Config} = Snapshot, {AccValid, AccInvalid} = Acc) ->
                   case validate_snapshot(DataDir, Seqno, Config) of
                       ok ->
                           {[Snapshot | AccValid], AccInvalid};
+                      missing ->
+                          Acc;
                       {error, _} = Error ->
                           {AccValid, [{Snapshot, Error} | AccInvalid]}
                   end
