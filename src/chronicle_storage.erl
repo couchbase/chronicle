@@ -174,7 +174,7 @@ maybe_delete_orphans(Orphans) ->
 maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
     case LogDataSize > ?LOG_MAX_SIZE of
         true ->
-            rollover(Storage);
+            compact(rollover(Storage));
         false ->
             Storage
     end.
@@ -710,7 +710,7 @@ record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
     NewStorage0 = log_append([{snapshot, Seqno, Config}], Storage),
     NewStorage1 = NewStorage0#storage{snapshots =
                                           [{Seqno, Config} | Snapshots]},
-    compact_snapshots(NewStorage1).
+    compact(NewStorage1).
 
 install_snapshot(Seqno, Config, Meta,
                  #storage{high_seqno = HighSeqno,
@@ -897,7 +897,7 @@ get_latest_snapshot_seqno(Storage) ->
     end.
 
 compact(Storage) ->
-    compact_snapshots(Storage).
+    compact_log(compact_snapshots(Storage)).
 
 compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
     NumSnapshots = length(Snapshots),
@@ -929,3 +929,72 @@ delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
         {error, Error} ->
             exit({delete_snapshot_failed, Error})
     end.
+
+compact_log(#storage{log_segments = LogSegments} = Storage) ->
+    NumLogSegments = queue:len(LogSegments),
+    case NumLogSegments > ?MAX_LOG_SEGMENTS of
+        true ->
+            do_compact_log(NumLogSegments, Storage);
+        false ->
+            Storage
+    end.
+
+do_compact_log(NumLogSegments, #storage{log_segments = LogSegments,
+                                        snapshots = Snapshots} = Storage) ->
+    %% Make sure we don't lose the snapshots
+    %%
+    %% TODO: consider moving all syncing to chronicle_storage, so no extra
+    %% syncing is needed here.
+    sync(Storage),
+
+    {Delete, Keep} = queue:split(NumLogSegments - ?MAX_LOG_SEGMENTS,
+                                 LogSegments),
+
+    %% Don't delete past our earliest snapshot.
+    SnapshotSeqno =
+        case Snapshots of
+            [] ->
+                ?NO_SEQNO;
+            _ ->
+                {Seqno, _} = lists:last(Snapshots),
+                Seqno
+        end,
+
+    Remaining =
+        chronicle_utils:queue_dropwhile(
+          fun ({LogPath, LogSeqno}) ->
+                  %% Note the strict inequality. This is due to snapshot
+                  %% records being stored in the log itself. With =< instead
+                  %% of < there would be a possibility of tossing out the
+                  %% snapshot record.
+                  case LogSeqno < SnapshotSeqno of
+                      true ->
+                          case file:delete(LogPath) of
+                              ok ->
+                                  ?INFO("Deleted ~s", [LogPath]),
+                                  true;
+                              {error, Error} ->
+                                  ?ERROR("Failed to delete ~s: ~p",
+                                         [LogPath, Error]),
+                                  error({compact_log_failed, LogPath, Error})
+                          end;
+                      false ->
+                          false
+                  end
+          end, Delete),
+
+    case queue:is_empty(Remaining) of
+        true ->
+            ok;
+        false ->
+            %% This shouldn't happen assuming snapshots are taken regularly
+            %% enough. But if it does, for the sake of simplicity, we'll just
+            %% wait until the next snapshot (instead of requesting a snapshot
+            %% explicitly).
+            ?WARNING("Didn't delete some log segments. Snapshot seqno ~p.~n"
+                     "Segments:~n~p",
+                     [SnapshotSeqno, queue:to_list(Remaining)])
+    end,
+
+    NewLogSegments = queue:join(Remaining, Keep),
+    Storage#storage{log_segments = NewLogSegments}.
