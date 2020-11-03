@@ -30,6 +30,7 @@
 -define(RANGE_KEY, '$range').
 
 -define(LOG_MAX_SIZE, 512 * 1024).
+-define(MAX_SNAPSHOTS, 4).
 
 -type meta() :: #{ ?META_PEER => chronicle:peer(),
                    ?META_HISTORY_ID => chronicle:history_id(),
@@ -77,7 +78,7 @@ open() ->
         DataDir = chronicle_env:data_dir(),
         maybe_complete_wipe(DataDir),
         ensure_dirs(DataDir),
-        validate_state(open_logs(Storage#storage{data_dir = DataDir}))
+        compact(validate_state(open_logs(Storage#storage{data_dir = DataDir})))
     catch
         T:E:Stack ->
             close(Storage),
@@ -698,8 +699,10 @@ record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
-    NewStorage = log_append([{snapshot, Seqno, Config}], Storage),
-    NewStorage#storage{snapshots = [{Seqno, Config} | Snapshots]}.
+    NewStorage0 = log_append([{snapshot, Seqno, Config}], Storage),
+    NewStorage1 = NewStorage0#storage{snapshots =
+                                          [{Seqno, Config} | Snapshots]},
+    compact_snapshots(NewStorage1).
 
 install_snapshot(Seqno, Config, Meta,
                  #storage{high_seqno = HighSeqno,
@@ -871,4 +874,38 @@ get_latest_snapshot_seqno(Storage) ->
             ?NO_SEQNO;
         {Seqno, _Config} ->
             Seqno
+    end.
+
+compact(Storage) ->
+    compact_snapshots(Storage).
+
+compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
+    NumSnapshots = length(Snapshots),
+    case NumSnapshots > ?MAX_SNAPSHOTS of
+        true ->
+            %% Sync the log file to make sure we don't forget about any of the
+            %% existing snapshots.
+            sync(Storage),
+
+            {KeepSnapshots,
+             DeleteSnapshots} = lists:split(?MAX_SNAPSHOTS, Snapshots),
+
+            lists:foreach(
+              fun ({SnapshotSeqno, _}) ->
+                      delete_snapshot(SnapshotSeqno, Storage)
+              end, DeleteSnapshots),
+
+            Storage#storage{snapshots = KeepSnapshots};
+        false ->
+            Storage
+    end.
+
+delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
+    SnapshotDir = snapshot_dir(DataDir, SnapshotSeqno),
+    ?INFO("Deleting snapshot at seqno ~p: ~s", [SnapshotSeqno, SnapshotDir]),
+    case chronicle_utils:delete_recursive(SnapshotDir) of
+        ok ->
+            ok;
+        {error, Error} ->
+            exit({delete_snapshot_failed, Error})
     end.
