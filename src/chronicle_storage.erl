@@ -613,11 +613,11 @@ sync_dir(Dir) ->
     end.
 
 get_log() ->
-    {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
+    {LogLowSeqno, LogHighSeqno, _} = get_published_seqno_range(),
     get_log(LogLowSeqno, LogHighSeqno).
 
 get_log(StartSeqno, EndSeqno) ->
-    {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
+    {LogLowSeqno, LogHighSeqno, _} = get_published_seqno_range(),
     true = (StartSeqno >= LogLowSeqno),
     true = (EndSeqno =< LogHighSeqno),
 
@@ -635,7 +635,8 @@ get_log(StartSeqno, EndSeqno) ->
 
 get_log_committed(StartSeqno, EndSeqno) ->
     true = (StartSeqno =< EndSeqno),
-    {LogLowSeqno, LogHighSeqno, LogCommittedSeqno} = get_seqno_range(),
+    {LogLowSeqno, LogHighSeqno, LogCommittedSeqno} =
+        get_published_seqno_range(),
     case EndSeqno > LogCommittedSeqno of
         true ->
             {error, {uncommitted, StartSeqno, EndSeqno, LogCommittedSeqno}};
@@ -653,7 +654,7 @@ do_get_log_committed(StartSeqno, EndSeqno) ->
         {ok, _} = Ok ->
             Ok;
         {missing_entry, MissingSeqno} ->
-            {LogLowSeqno, LogHighSeqno, _} = get_seqno_range(),
+            {LogLowSeqno, LogHighSeqno, _} = get_published_seqno_range(),
 
             %% Compaction must have happened while we were reading the
             %% entries. So start and end seqnos must now be out of range. If
@@ -694,7 +695,7 @@ get_log_entry(Seqno, #storage{log_tab = Tab}) ->
             {error, not_found}
     end.
 
-get_seqno_range() ->
+get_published_seqno_range() ->
     [{_, LowSeqno, HighSeqno, CommittedSeqno}] =
         ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
     {LowSeqno, HighSeqno, CommittedSeqno}.
