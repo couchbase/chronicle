@@ -556,6 +556,10 @@ log_append(Records, #storage{current_log = Log,
             exit({append_failed, Error})
     end.
 
+config_index_replace(Config, #storage{config_index_tab = Tab}) ->
+    ets:delete_all_objects(Tab),
+    ets:insert(Tab, Config).
+
 config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
     NewConfig = truncate_table(Tab, Seqno),
     Storage#storage{config = NewConfig}.
@@ -727,6 +731,8 @@ install_snapshot(Seqno, Config, Meta,
 
     Seqno = get_latest_snapshot_seqno(Storage),
     NewStorage = log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
+
+    config_index_replace(Config, Storage),
 
     %% TODO: The log entries in the ets table need to be cleaned up as
     %% well. Deal with this as part of compaction.
