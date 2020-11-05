@@ -340,6 +340,10 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                                      [{Seqno, Config} | CurrentSnapshots]
                              end, State);
         {install_snapshot, Seqno, Config, Meta} ->
+            ets:delete_all_objects(Storage#storage.log_tab),
+            ets:delete_all_objects(Storage#storage.config_index_tab),
+            ets:insert(Storage#storage.config_index_tab, Config),
+
             CurrentMeta = maps:get(meta, State),
             State#{low_seqno => Seqno + 1,
                    high_seqno => Seqno,
