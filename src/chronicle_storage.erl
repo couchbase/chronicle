@@ -696,9 +696,12 @@ get_log_entry(Seqno, #storage{log_tab = Tab}) ->
     end.
 
 get_published_seqno_range() ->
-    [{_, LowSeqno, HighSeqno, CommittedSeqno}] =
-        ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY),
-    {LowSeqno, HighSeqno, CommittedSeqno}.
+    case ets:lookup(?MEM_LOG_INFO_TAB, ?RANGE_KEY) of
+        [] ->
+            not_published;
+        [{_, LowSeqno, HighSeqno, CommittedSeqno}] ->
+            {LowSeqno, HighSeqno, CommittedSeqno}
+    end.
 
 record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
                                         snapshots = Snapshots} = Storage) ->
