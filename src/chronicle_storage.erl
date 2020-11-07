@@ -442,11 +442,14 @@ store_meta_prepare(Updates, #storage{meta = Meta} = Storage) ->
             not_needed
     end.
 
-truncate(Seqno, #storage{meta = Meta, high_seqno = HighSeqno} = Storage) ->
+truncate(Seqno, #storage{meta = Meta,
+                         low_seqno = LowSeqno,
+                         high_seqno = HighSeqno} = Storage) ->
     CommittedSeqno = get_committed_seqno(Meta),
 
     true = (Seqno >= CommittedSeqno),
     true = (Seqno =< HighSeqno),
+    true = (Seqno + 1 >= LowSeqno),
 
     NewStorage0 = log_append([{truncate, Seqno}], Storage),
     NewStorage1 = config_index_truncate(Seqno, NewStorage0),
