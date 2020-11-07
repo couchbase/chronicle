@@ -900,24 +900,19 @@ validate_state(#storage{low_seqno = LowSeqno,
     end,
 
     ValidSnapshots = lists:reverse(ValidSnapshots0),
-    LastSnapshotSeqno =
-        case ValidSnapshots of
-            [] ->
-                ?NO_SEQNO + 1;
-            [{Seqno, _} | _] ->
-                Seqno
-        end,
+    NewStorage = Storage#storage{snapshots = ValidSnapshots},
+    SnapshotSeqno = get_latest_snapshot_seqno(NewStorage),
 
-    case LastSnapshotSeqno + 1 >= LowSeqno of
+    case SnapshotSeqno + 1 >= LowSeqno of
         true ->
             ok;
         false ->
             ?ERROR("Last snapshot at seqno ~p is below our low seqno ~p",
-                   [LastSnapshotSeqno, LowSeqno]),
-            exit({missing_snapshot, LastSnapshotSeqno, LowSeqno})
+                   [SnapshotSeqno, LowSeqno]),
+            exit({missing_snapshot, SnapshotSeqno, LowSeqno})
     end,
 
-    Storage#storage{snapshots = ValidSnapshots}.
+    NewStorage.
 
 get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
