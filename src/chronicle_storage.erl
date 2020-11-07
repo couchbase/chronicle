@@ -332,8 +332,18 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                              end, State);
         {truncate, Seqno} ->
             NewConfig = truncate_table(Storage#storage.config_index_tab, Seqno),
-            State#{config => NewConfig,
-                   high_seqno => Seqno};
+            NewState = State#{config => NewConfig,
+                              high_seqno => Seqno},
+
+            %% For the first log segment it's possible for truncate to go
+            %% below the low seqno. So it needs to be adjusted accordingly.
+            LowSeqno = maps:get(low_seqno, State),
+            case Seqno < LowSeqno of
+                true ->
+                    NewState#{low_seqno => Seqno + 1};
+                false ->
+                    NewState
+            end;
         {snapshot, Seqno, Config} ->
             maps:update_with(snapshots,
                              fun (CurrentSnapshots) ->
