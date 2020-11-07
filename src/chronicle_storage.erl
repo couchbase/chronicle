@@ -908,7 +908,7 @@ validate_state(#storage{low_seqno = LowSeqno,
                 Seqno
         end,
 
-    case LastSnapshotSeqno >= LowSeqno of
+    case LastSnapshotSeqno + 1 >= LowSeqno of
         true ->
             ok;
         false ->
