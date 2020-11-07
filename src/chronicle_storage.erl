@@ -331,7 +331,8 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                                      maps:merge(CurrentMeta, KVs)
                              end, State);
         {truncate, Seqno} ->
-            NewConfig = truncate_table(Storage#storage.config_index_tab, Seqno),
+            NewConfig = truncate_ordered_table(Storage#storage.config_index_tab,
+                                               Seqno),
             NewState = State#{config => NewConfig,
                               high_seqno => Seqno},
 
@@ -571,7 +572,7 @@ config_index_replace(Config, #storage{config_index_tab = Tab}) ->
     ets:insert(Tab, Config).
 
 config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
-    NewConfig = truncate_table(Tab, Seqno),
+    NewConfig = truncate_ordered_table(Tab, Seqno),
     Storage#storage{config = NewConfig}.
 
 config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
@@ -588,10 +589,10 @@ config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
 
     Storage#storage{config = NewConfig}.
 
-truncate_table(Table, Seqno) ->
-    truncate_table_loop(Table, ets:last(Table), Seqno).
+truncate_ordered_table(Table, Seqno) ->
+    truncate_ordered_table_loop(Table, ets:last(Table), Seqno).
 
-truncate_table_loop(Table, Last, Seqno) ->
+truncate_ordered_table_loop(Table, Last, Seqno) ->
     case Last of
         '$end_of_table' ->
             undefined;
@@ -600,7 +601,7 @@ truncate_table_loop(Table, Last, Seqno) ->
                 true ->
                     Prev = ets:prev(Table, EntrySeqno),
                     ets:delete(Table, EntrySeqno),
-                    truncate_table_loop(Table, Prev, Seqno);
+                    truncate_ordered_table_loop(Table, Prev, Seqno);
                 false ->
                     [Entry] = ets:lookup(Table, EntrySeqno),
                     Entry
