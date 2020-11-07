@@ -331,14 +331,18 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                                      maps:merge(CurrentMeta, KVs)
                              end, State);
         {truncate, Seqno} ->
-            NewConfig = truncate_ordered_table(Storage#storage.config_index_tab,
-                                               Seqno),
+            #storage{log_tab = LogTab,
+                     config_index_tab = ConfigIndexTab} = Storage,
+
+            #{low_seqno := LowSeqno, high_seqno := HighSeqno} = State,
+            delete_table_range(Seqno + 1, HighSeqno, LogTab),
+
+            NewConfig = truncate_ordered_table(ConfigIndexTab, Seqno),
             NewState = State#{config => NewConfig,
                               high_seqno => Seqno},
 
             %% For the first log segment it's possible for truncate to go
             %% below the low seqno. So it needs to be adjusted accordingly.
-            LowSeqno = maps:get(low_seqno, State),
             case Seqno < LowSeqno of
                 true ->
                     NewState#{low_seqno => Seqno + 1};
@@ -615,6 +619,13 @@ mem_log_append(EndSeqno, Entries,
                #storage{log_tab = LogTab} = Storage) ->
     ets:insert(LogTab, Entries),
     Storage#storage{high_seqno = EndSeqno}.
+
+delete_table_range(FromSeqno, ToSeqno, _Tab)
+  when FromSeqno > ToSeqno ->
+    ok;
+delete_table_range(FromSeqno, ToSeqno, LogTab) ->
+    ets:delete(FromSeqno, LogTab),
+    delete_table_range(FromSeqno + 1, ToSeqno, LogTab).
 
 file_exists(Path, Type) ->
     case chronicle_utils:check_file_exists(Path, Type) of
