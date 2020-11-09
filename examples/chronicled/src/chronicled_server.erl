@@ -242,13 +242,12 @@ add_nodes(Nodes) ->
                     ?LOG_DEBUG("nodes ~p", [nodes()]),
                     Result = chronicle:add_voters(ToAdd),
                     ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
-                    Message = case Result of
-                                  ok ->
-                                      <<"nodes added">>;
-                                  _ ->
-                                      <<"nodes could not be added">>
-                              end,
-                    {Result, Message};
+                    case Result of
+                        ok ->
+                            {true, <<"nodes added">>};
+                        _ ->
+                            {false, <<"nodes could not be added">>}
+                    end;
                 CantConnect ->
                     ?LOG_DEBUG("Can't connect to nodes: ~p", [CantConnect]),
                     {false, <<"can't connect to some nodes to be added">>}
