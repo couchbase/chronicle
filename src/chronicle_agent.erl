@@ -1600,7 +1600,8 @@ record_snapshot(Seqno, ConfigEntry, #state{storage = Storage} = State) ->
     NewStorage = chronicle_storage:record_snapshot(Seqno, ConfigEntry, Storage),
     State#state{storage = NewStorage}.
 
-save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
+install_snapshot(Seqno, ConfigEntry, RSMSnapshots, Metadata,
+                 #state{storage = Storage} = State) ->
     lists:foreach(
       fun ({RSM, RSMSnapshotBinary}) ->
               RSMSnapshot = binary_to_term(RSMSnapshotBinary),
@@ -1608,15 +1609,10 @@ save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage) ->
                                                   RSMSnapshot, Storage)
       end, maps:to_list(RSMSnapshots)),
 
-    chronicle_storage:record_snapshot(Seqno, ConfigEntry, Storage).
-
-install_snapshot(Seqno, ConfigEntry, RSMSnapshots, Metadata,
-                 #state{storage = Storage} = State) ->
-    NewStorage0 = save_snapshot(Seqno, ConfigEntry, RSMSnapshots, Storage),
-    NewStorage1 = chronicle_storage:install_snapshot(Seqno, ConfigEntry,
-                                                     Metadata, NewStorage0),
-    chronicle_storage:sync(NewStorage1),
-    State#state{storage = publish_storage(NewStorage1)}.
+    NewStorage = chronicle_storage:install_snapshot(Seqno, ConfigEntry,
+                                                     Metadata, Storage),
+    chronicle_storage:sync(NewStorage),
+    State#state{storage = publish_storage(NewStorage)}.
 
 get_peer_name() ->
     Peer = ?PEER(),

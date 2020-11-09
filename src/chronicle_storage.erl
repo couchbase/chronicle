@@ -350,20 +350,18 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                     NewState
             end;
         {snapshot, Seqno, Config} ->
-            maps:update_with(snapshots,
-                             fun (CurrentSnapshots) ->
-                                     [{Seqno, Config} | CurrentSnapshots]
-                             end, State);
+            add_snapshot(Seqno, Config, State);
         {install_snapshot, Seqno, Config, Meta} ->
             ets:delete_all_objects(Storage#storage.log_tab),
             ets:delete_all_objects(Storage#storage.config_index_tab),
             ets:insert(Storage#storage.config_index_tab, Config),
 
             CurrentMeta = maps:get(meta, State),
-            State#{low_seqno => Seqno + 1,
-                   high_seqno => Seqno,
-                   config => Config,
-                   meta => maps:merge(CurrentMeta, Meta)};
+            NewState = State#{low_seqno => Seqno + 1,
+                              high_seqno => Seqno,
+                              config => Config,
+                              meta => maps:merge(CurrentMeta, Meta)},
+            add_snapshot(Seqno, Config, NewState);
         #log_entry{seqno = Seqno} ->
             #{high_seqno := PrevSeqno, config := Config} = State,
 
@@ -387,6 +385,12 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
             State#{config => NewConfig,
                    high_seqno => Seqno}
     end.
+
+add_snapshot(Seqno, Config, State) ->
+    maps:update_with(snapshots,
+                     fun (CurrentSnapshots) ->
+                             [{Seqno, Config} | CurrentSnapshots]
+                     end, State).
 
 is_config_entry(#log_entry{value = Value}) ->
     case Value of
@@ -736,25 +740,30 @@ get_published_seqno_range() ->
             {LowSeqno, HighSeqno, CommittedSeqno}
     end.
 
-record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
-                                        snapshots = Snapshots} = Storage) ->
+record_snapshot(Seqno, Config, Storage) ->
+    record_snapshot(Seqno, Config, {snapshot, Seqno, Config}, Storage).
+
+record_snapshot(Seqno, Config, LogRecord,
+                #storage{data_dir = DataDir,
+                         snapshots = Snapshots} = Storage) ->
     LatestSnapshotSeqno = get_latest_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
 
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
-    NewStorage0 = log_append([{snapshot, Seqno, Config}], Storage),
+    NewStorage0 = log_append([LogRecord], Storage),
     NewStorage1 = NewStorage0#storage{snapshots =
                                           [{Seqno, Config} | Snapshots]},
     compact(NewStorage1).
 
 install_snapshot(Seqno, Config, Meta,
                  #storage{meta = OldMeta} = Storage) ->
-    Seqno = get_latest_snapshot_seqno(Storage),
-    NewStorage = log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
+    NewStorage = record_snapshot(Seqno, Config,
+                                 {install_snapshot, Seqno, Config, Meta},
+                                 Storage),
 
-    config_index_replace(Config, Storage),
+    config_index_replace(Config, NewStorage),
 
     %% TODO: The log entries in the ets table need to be cleaned up as
     %% well. Deal with this as part of compaction.
