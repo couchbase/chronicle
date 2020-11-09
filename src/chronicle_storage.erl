@@ -750,10 +750,7 @@ record_snapshot(Seqno, Config, #storage{data_dir = DataDir,
     compact(NewStorage1).
 
 install_snapshot(Seqno, Config, Meta,
-                 #storage{high_seqno = HighSeqno,
-                          meta = OldMeta} = Storage) ->
-    true = (Seqno > HighSeqno),
-
+                 #storage{meta = OldMeta} = Storage) ->
     Seqno = get_latest_snapshot_seqno(Storage),
     NewStorage = log_append([{install_snapshot, Seqno, Config, Meta}], Storage),
 
