@@ -43,6 +43,7 @@
 -record(storage, { current_log,
                    current_log_ix,
                    current_log_path,
+                   current_log_start_seqno,
                    current_log_data_size,
                    low_seqno,
                    high_seqno,
@@ -94,7 +95,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   low_seqno => ?NO_SEQNO + 1,
                   high_seqno => ?NO_SEQNO,
                   snapshots => [],
-                  log_segments => queue:new()},
+                  log_segments => []},
     SealedState =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc) ->
@@ -105,12 +106,10 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                                               HandleUserDataFun, HandleEntryFun,
                                               Acc) of
                       {ok, NewAcc0} ->
-                          #{meta := Meta,
+                          #{log_start_seqno := LogStartSeqno,
                             log_segments := LogSegments0} = NewAcc0,
-                          CommittedSeqno = get_committed_seqno(Meta),
-                          LogSegments =
-                              queue:in({LogPath, CommittedSeqno}, LogSegments0),
-
+                          LogSegment = {LogPath, LogStartSeqno},
+                          LogSegments = [LogSegment | LogSegments0],
                           NewAcc0#{log_segments => LogSegments};
                       {error, Error} ->
                           ?ERROR("Failed to read log ~p: ~p", [LogPath, Error]),
@@ -123,6 +122,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                                                 Storage, SealedState),
     #{meta := Meta, config := Config,
       low_seqno := LowSeqno, high_seqno := HighSeqno,
+      log_start_seqno := CurrentLogStartSeqno,
       snapshots := Snapshots, log_segments := LogSegments} = FinalState,
     {ok, DataSize} = chronicle_log:data_size(CurrentLog),
 
@@ -131,6 +131,7 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                     current_log_ix = CurrentLogIx,
                     current_log_path = CurrentLogPath,
                     current_log_data_size = DataSize,
+                    current_log_start_seqno = CurrentLogStartSeqno,
                     low_seqno = LowSeqno,
                     high_seqno = HighSeqno,
                     meta = Meta,
@@ -150,7 +151,7 @@ open_current_log(LogPath, Storage, State) ->
             ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
             #{meta := Meta, config := Config, high_seqno := HighSeqno} = State,
             Log = create_log(Config, Meta, HighSeqno, LogPath),
-            {Log, State};
+            {Log, State#{log_start_seqno => HighSeqno + 1}};
         {error, Error} ->
             ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
             exit({failed_to_open_log, LogPath, Error})
@@ -183,6 +184,7 @@ maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
 rollover(#storage{current_log = CurrentLog,
                   current_log_ix = CurrentLogIx,
                   current_log_path = CurrentLogPath,
+                  current_log_start_seqno = CurrentLogStartSeqno,
                   data_dir = DataDir,
                   config = Config,
                   meta = Meta,
@@ -191,8 +193,8 @@ rollover(#storage{current_log = CurrentLog,
     sync(Storage),
     ok = chronicle_log:close(CurrentLog),
 
-    CommittedSeqno = get_committed_seqno(Meta),
-    NewLogSegments = queue:in({CurrentLogPath, CommittedSeqno}, LogSegments),
+    LogSegment = {CurrentLogPath, CurrentLogStartSeqno},
+    NewLogSegments = [LogSegment | LogSegments],
 
     NewLogIx = CurrentLogIx + 1,
     NewLogPath = log_path(DataDir, NewLogIx),
@@ -201,6 +203,7 @@ rollover(#storage{current_log = CurrentLog,
                     current_log_ix = NewLogIx,
                     current_log_path = NewLogPath,
                     current_log_data_size = 0,
+                    current_log_start_seqno = HighSeqno + 1,
                     log_segments = NewLogSegments}.
 
 create_log(Config, Meta, HighSeqno, LogPath) ->
@@ -286,6 +289,7 @@ handle_user_data(LogPath, Storage, UserData, State) ->
       meta := StateMeta,
       high_seqno := StateHighSeqno} = State,
 
+    NewState = State#{log_start_seqno => HighSeqno + 1},
     case StateConfig of
         undefined ->
             case Config of
@@ -295,16 +299,16 @@ handle_user_data(LogPath, Storage, UserData, State) ->
                     ets:insert(Storage#storage.config_index_tab, Config)
             end,
 
-            State#{config => Config,
-                   meta => Meta,
-                   high_seqno => HighSeqno,
-                   low_seqno => HighSeqno + 1};
+            NewState#{config => Config,
+                      meta => Meta,
+                      high_seqno => HighSeqno,
+                      low_seqno => HighSeqno + 1};
         _ ->
             case Config =:= StateConfig
                 andalso Meta =:= StateMeta
                 andalso HighSeqno =:= StateHighSeqno of
                 true ->
-                    State;
+                    NewState;
                 false ->
                     exit({inconsistent_log,
                           LogPath,
@@ -972,24 +976,21 @@ delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
     end.
 
 compact_log(#storage{log_segments = LogSegments} = Storage) ->
-    NumLogSegments = queue:len(LogSegments),
+    NumLogSegments = length(LogSegments),
     case NumLogSegments > ?MAX_LOG_SEGMENTS of
         true ->
-            do_compact_log(NumLogSegments, Storage);
+            do_compact_log(Storage);
         false ->
             Storage
     end.
 
-do_compact_log(NumLogSegments, #storage{log_segments = LogSegments,
-                                        snapshots = Snapshots} = Storage) ->
+do_compact_log(#storage{log_segments = LogSegments,
+                        snapshots = Snapshots} = Storage) ->
     %% Make sure we don't lose the snapshots
     %%
     %% TODO: consider moving all syncing to chronicle_storage, so no extra
     %% syncing is needed here.
     sync(Storage),
-
-    {Delete, Keep} = queue:split(NumLogSegments - ?MAX_LOG_SEGMENTS,
-                                 LogSegments),
 
     %% Don't delete past our earliest snapshot.
     SnapshotSeqno =
@@ -1001,41 +1002,70 @@ do_compact_log(NumLogSegments, #storage{log_segments = LogSegments,
                 Seqno
         end,
 
-    Remaining =
-        chronicle_utils:queue_dropwhile(
-          fun ({LogPath, LogSeqno}) ->
-                  %% Note the strict inequality. This is due to snapshot
-                  %% records being stored in the log itself. With =< instead
-                  %% of < there would be a possibility of tossing out the
-                  %% snapshot record.
-                  case LogSeqno < SnapshotSeqno of
-                      true ->
-                          case file:delete(LogPath) of
-                              ok ->
-                                  ?INFO("Deleted ~s", [LogPath]),
-                                  true;
-                              {error, Error} ->
-                                  ?ERROR("Failed to delete ~s: ~p",
-                                         [LogPath, Error]),
-                                  error({compact_log_failed, LogPath, Error})
-                          end;
-                      false ->
-                          false
-                  end
-          end, Delete),
+    {CannotDelete, CanDelete} = classify_logs(SnapshotSeqno, LogSegments),
+    LogSegments = CannotDelete ++ CanDelete,
 
-    case queue:is_empty(Remaining) of
+    {Keep, Delete} =
+        case length(CannotDelete) > ?MAX_LOG_SEGMENTS of
+            true ->
+                WarnLogs = lists:nthtail(?MAX_LOG_SEGMENTS, CannotDelete),
+
+                %% This shouldn't happen assuming snapshots are taken
+                %% regularly enough. But if it does, for the sake of
+                %% simplicity, we'll just wait until the next snapshot
+                %% (instead of requesting a snapshot explicitly).
+                ?WARNING("Can't delete some required log segments. "
+                         "Snapshot seqno ~p.~n"
+                         "All log segments:~n~p~n"
+                         "Extraneous log segments:~n~p",
+                         [SnapshotSeqno, LogSegments, WarnLogs]),
+
+                {CannotDelete, CanDelete};
+            false ->
+                lists:split(?MAX_LOG_SEGMENTS, LogSegments)
+        end,
+
+    ?DEBUG("Going to delete the following log "
+           "files (preserved snapshot seqno: ~p):~n"
+           "~p",
+           [SnapshotSeqno, Delete]),
+
+    lists:foreach(
+      fun ({LogPath, _}) ->
+              case file:delete(LogPath) of
+                  ok ->
+                      ?INFO("Deleted ~s", [LogPath]),
+                      true;
+                  {error, Error} ->
+                      ?ERROR("Failed to delete ~s: ~p",
+                             [LogPath, Error]),
+                      error({compact_log_failed, LogPath, Error})
+              end
+      end, Delete),
+
+    Storage#storage{log_segments = Keep}.
+
+classify_logs(SnapshotSeqno, Logs) ->
+    classify_logs_loop(SnapshotSeqno, Logs, []).
+
+classify_logs_loop(_, [], Acc) ->
+    {lists:reverse(Acc), []};
+classify_logs_loop(SnapshotSeqno, [{_, LogStartSeqno} = Log | RestLogs], Acc) ->
+    case LogStartSeqno > SnapshotSeqno of
         true ->
-            ok;
+            classify_logs_loop(SnapshotSeqno, RestLogs, [Log | Acc]);
         false ->
-            %% This shouldn't happen assuming snapshots are taken regularly
-            %% enough. But if it does, for the sake of simplicity, we'll just
-            %% wait until the next snapshot (instead of requesting a snapshot
-            %% explicitly).
-            ?WARNING("Didn't delete some log segments. Snapshot seqno ~p.~n"
-                     "Segments:~n~p",
-                     [SnapshotSeqno, queue:to_list(Remaining)])
-    end,
+            {lists:reverse([Log | Acc]), RestLogs}
+    end.
 
-    NewLogSegments = queue:join(Remaining, Keep),
-    Storage#storage{log_segments = NewLogSegments}.
+-ifdef(TEST).
+classify_logs_loop() ->
+    Logs = [{log1, 200}, {log2, 150}, {log3, 200}, {log4, 150}, {log5, 100}],
+    ?assertEqual({[], Logs}, classify_logs(250, Logs)),
+    ?assertEqual({[], Logs}, classify_logs(200, Logs)),
+    ?assertEqual({Logs, []}, classify_logs(50, Logs)),
+
+    [Log1, Log2, Log3, Log4, Log5] = Logs,
+    ?assertEqual({[Log1, Log2], [Log3, Log4, Log5]}, classify_logs(175, Logs)),
+    ?assertEqual({[Log1, Log2, Log3, Log4], [Log5]}, classify_logs(125, Logs)).
+-endif.
