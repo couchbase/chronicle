@@ -323,6 +323,8 @@ make_handle_log_entry_fun(LogPath, Storage) ->
             handle_log_entry(LogPath, Storage, Entry, State)
     end.
 
+%% TODO: In many respects log entry handlers duplicate the code in functions
+%% that log the corresponding entries. Get rid of this duplication.
 handle_log_entry(LogPath, Storage, Entry, State) ->
     case Entry of
         {atomic, Entries} ->
