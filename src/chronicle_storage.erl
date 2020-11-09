@@ -30,6 +30,7 @@
 -define(RANGE_KEY, '$range').
 
 -define(LOG_MAX_SIZE, 512 * 1024).
+-define(MAX_LOG_SEGMENTS, 20).
 -define(MAX_SNAPSHOTS, 4).
 
 -type meta() :: #{ ?META_PEER => chronicle:peer(),
