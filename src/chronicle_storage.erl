@@ -267,7 +267,7 @@ snapshots_dir(DataDir) ->
     filename:join(chronicle_dir(DataDir), "snapshots").
 
 snapshot_dir(DataDir, Seqno) ->
-    filename:join(snapshots_dir(DataDir), io_lib:format("~16.16.0b", [Seqno])).
+    filename:join(snapshots_dir(DataDir), integer_to_list(Seqno)).
 
 wipe() ->
     DataDir = chronicle_env:data_dir(),
