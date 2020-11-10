@@ -1729,8 +1729,11 @@ maybe_cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
             cancel_snapshot(State)
     end.
 
-cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
-    #snapshot_state{tref = TRef, savers = Savers} = SnapshotState,
+cancel_snapshot(#state{snapshot_state = SnapshotState,
+                       storage = Storage} = State) ->
+    #snapshot_state{tref = TRef,
+                    savers = Savers,
+                    seqno = SnapshotSeqno} = SnapshotState,
 
     cancel_snapshot_timer(TRef),
     chronicle_utils:maps_foreach(
@@ -1738,10 +1741,9 @@ cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
               chronicle_utils:terminate_linked_process(Pid, kill)
       end, Savers),
 
-    ?INFO("Snapshot at seqno ~p canceled.",
-          [SnapshotState#snapshot_state.seqno]),
+    ?INFO("Snapshot at seqno ~p canceled.", [SnapshotSeqno]),
+    chronicle_storage:delete_snapshot(SnapshotSeqno, Storage),
 
-    %% TODO: cleanup leftover files
     State#state{snapshot_state = undefined}.
 
 get_rsms(#log_entry{value = Config}) ->
