@@ -1738,6 +1738,9 @@ cancel_snapshot(#state{snapshot_state = SnapshotState} = State) ->
               chronicle_utils:terminate_linked_process(Pid, kill)
       end, Savers),
 
+    ?INFO("Snapshot at seqno ~p canceled.",
+          [SnapshotState#snapshot_state.seqno]),
+
     %% TODO: cleanup leftover files
     State#state{snapshot_state = undefined}.
 
