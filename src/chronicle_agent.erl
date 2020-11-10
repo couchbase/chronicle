@@ -1610,7 +1610,7 @@ install_snapshot(Seqno, ConfigEntry, RSMSnapshots, Metadata,
       end, maps:to_list(RSMSnapshots)),
 
     NewStorage = chronicle_storage:install_snapshot(Seqno, ConfigEntry,
-                                                     Metadata, Storage),
+                                                    Metadata, Storage),
     chronicle_storage:sync(NewStorage),
     State#state{storage = publish_storage(NewStorage)}.
 
