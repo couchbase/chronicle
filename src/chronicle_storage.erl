@@ -542,22 +542,11 @@ close(#storage{current_log = Log,
 
 find_logs(DataDir) ->
     LogsDir = logs_dir(DataDir),
-    Candidates = filelib:wildcard(filename:join(LogsDir, "*.log")),
-    Logs0 = lists:filtermap(
-              fun (Candidate) ->
-                      Name = filename:basename(Candidate),
-                      case re:run(Name,
-                                  "^([[:digit:]]\+).log$",
-                                  [{capture, all_but_first, list}]) of
-                          {match, [Index]} ->
-                              {true, {list_to_integer(Index), Candidate}};
-                          nomatch ->
-                              ?WARNING("Ignoring unexpected file in "
-                                       "log directory: ~p", [Candidate]),
-                              false
-                      end
-              end, Candidates),
-
+    Logs0 = list_dir(LogsDir,
+                     "^([[:digit:]]\+).log$", regular,
+                     fun (Path, [Index]) ->
+                             {list_to_integer(Index), Path}
+                     end),
     Logs1 = lists:keysort(1, Logs0),
     case Logs1 of
         [] ->
@@ -565,6 +554,42 @@ find_logs(DataDir) ->
         _ ->
             {Orphans, NonOrphans} = find_orphan_logs(Logs1),
             {Orphans, lists:droplast(NonOrphans), lists:last(NonOrphans)}
+    end.
+
+list_dir(Dir, RegExp, Type, Fun) ->
+    case file:list_dir(Dir) of
+        {ok, Children} ->
+            lists:filtermap(
+              fun (Name) ->
+                      Path = filename:join(Dir, Name),
+                      case list_dir_handle_child(Path, Name,
+                                                 RegExp, Type, Fun) of
+                          {ok, Result} ->
+                              {true, Result};
+                          {error, Error} ->
+                              ?WARNING("Ignoring unexpected file ~p: ~p",
+                                       [Path, Error]),
+                              false
+                      end
+              end, Children);
+        {error, Error} ->
+            exit({list_dir_failed, Dir, Error})
+    end.
+
+list_dir_handle_child(Path, Name, RegExp, Type, Fun) ->
+    case re:run(Name, RegExp,
+                [{capture, all_but_first, list}]) of
+        {match, Match} ->
+            case chronicle_utils:check_file_exists(Path, Type) of
+                ok ->
+                    {ok, Fun(Path, Match)};
+                {error, {wrong_file_type, _, _}} = Error ->
+                    Error;
+                {error, _} = Error ->
+                    exit({check_file_exists_failed, Path, Error})
+            end;
+        nomatch ->
+            {error, unknown_file}
     end.
 
 find_orphan_logs(Logs) ->
