@@ -142,7 +142,8 @@ get_full_snapshot(Seqno, Config, Storage) ->
     RSMSnapshots =
         maps:map(
           fun (Name, _) ->
-                  read_rsm_snapshot(Name, Seqno, Storage)
+                  Snapshot = read_rsm_snapshot(Name, Seqno, Storage),
+                  term_to_binary(Snapshot, [compressed])
           end, RSMs),
     {ok, Seqno, Config, RSMSnapshots}.
 
