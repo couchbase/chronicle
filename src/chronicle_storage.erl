@@ -96,6 +96,10 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                   high_seqno => ?NO_SEQNO,
                   snapshots => [],
                   log_segments => []},
+
+    %% TODO: Be more robust when dealing with corrupt log files. As long as a
+    %% consistent state can be recovered, corrupt logs should not be a fatal
+    %% error.
     SealedState =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc) ->
