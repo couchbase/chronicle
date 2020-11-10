@@ -1128,23 +1128,28 @@ do_compact_log(#storage{log_segments = LogSegments,
                 lists:split(?MAX_LOG_SEGMENTS, LogSegments)
         end,
 
-    ?DEBUG("Going to delete the following log "
-           "files (preserved snapshot seqno: ~p):~n"
-           "~p",
-           [SnapshotSeqno, Delete]),
+    case Delete of
+        [] ->
+            ok;
+        _ ->
+            ?DEBUG("Going to delete the following log "
+                   "files (preserved snapshot seqno: ~p):~n"
+                   "~p",
+                   [SnapshotSeqno, Delete]),
 
-    lists:foreach(
-      fun ({LogPath, _}) ->
-              case file:delete(LogPath) of
-                  ok ->
-                      ?INFO("Deleted ~s", [LogPath]),
-                      true;
-                  {error, Error} ->
-                      ?ERROR("Failed to delete ~s: ~p",
-                             [LogPath, Error]),
-                      error({compact_log_failed, LogPath, Error})
-              end
-      end, Delete),
+            lists:foreach(
+              fun ({LogPath, _}) ->
+                      case file:delete(LogPath) of
+                          ok ->
+                              ?INFO("Deleted ~s", [LogPath]),
+                              true;
+                          {error, Error} ->
+                              ?ERROR("Failed to delete ~s: ~p",
+                                     [LogPath, Error]),
+                              error({compact_log_failed, LogPath, Error})
+                      end
+              end, Delete)
+    end,
 
     {_LogPath, NewLowSeqno} = lists:last(Keep),
     Storage#storage{log_segments = Keep, low_seqno = NewLowSeqno}.
