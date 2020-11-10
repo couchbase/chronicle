@@ -31,7 +31,7 @@
 
 -define(LOG_MAX_SIZE, 512 * 1024).
 -define(MAX_LOG_SEGMENTS, 20).
--define(MAX_SNAPSHOTS, 4).
+-define(MAX_SNAPSHOTS, 2).
 
 -type meta() :: #{ ?META_PEER => chronicle:peer(),
                    ?META_HISTORY_ID => chronicle:history_id(),
