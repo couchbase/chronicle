@@ -224,8 +224,33 @@ publish(#storage{log_info_tab = LogInfoTab,
                  low_seqno = LowSeqno,
                  high_seqno = HighSeqno,
                  meta = Meta} = Storage) ->
+    OldPublishedRange = get_published_seqno_range(),
+
     CommittedSeqno = get_committed_seqno(Meta),
     ets:insert(LogInfoTab, {?RANGE_KEY, LowSeqno, HighSeqno, CommittedSeqno}),
+
+    case OldPublishedRange of
+        not_published ->
+            false;
+        {PublishedLowSeqno, PublishedHighSeqno, _} ->
+            case PublishedLowSeqno < LowSeqno of
+                true ->
+                    mem_log_delete_range(PublishedLowSeqno,
+                                         min(LowSeqno - 1, PublishedHighSeqno),
+                                         Storage);
+                false ->
+                    ok
+            end,
+
+            case PublishedHighSeqno > HighSeqno of
+                true ->
+                    mem_log_delete_range(HighSeqno,
+                                         PublishedHighSeqno, Storage);
+                false ->
+                    ok
+            end
+    end,
+
     Storage.
 
 ensure_dirs(DataDir) ->
@@ -631,6 +656,15 @@ mem_log_append(EndSeqno, Entries,
     ets:insert(LogTab, Entries),
     Storage#storage{high_seqno = EndSeqno}.
 
+mem_log_delete_range(FromSeqno, ToSeqno, #storage{log_tab = LogTab}) ->
+    StartTS = erlang:monotonic_time(),
+    delete_table_range(LogTab, FromSeqno, ToSeqno),
+    EndTS = erlang:monotonic_time(),
+
+    ?DEBUG("Deleted log range from seqno ~p to ~p in ~pus",
+           [FromSeqno, ToSeqno,
+            erlang:convert_time_unit(EndTS - StartTS, native, microsecond)]).
+
 delete_table_range(_Tab, FromSeqno, ToSeqno)
   when FromSeqno > ToSeqno ->
     ok;
@@ -771,10 +805,6 @@ install_snapshot(Seqno, Config, Meta,
                                  Storage),
 
     config_index_replace(Config, NewStorage),
-
-    %% TODO: The log entries in the ets table need to be cleaned up as
-    %% well. Deal with this as part of compaction.
-    %% TODO: config index also needs to be reset
     NewStorage#storage{meta = maps:merge(OldMeta, Meta),
                        low_seqno = Seqno + 1,
                        high_seqno = Seqno,
@@ -1045,7 +1075,8 @@ do_compact_log(#storage{log_segments = LogSegments,
               end
       end, Delete),
 
-    Storage#storage{log_segments = Keep}.
+    {_LogPath, NewLowSeqno} = lists:last(Keep),
+    Storage#storage{log_segments = Keep, low_seqno = NewLowSeqno}.
 
 classify_logs(SnapshotSeqno, Logs) ->
     classify_logs_loop(SnapshotSeqno, Logs, []).
