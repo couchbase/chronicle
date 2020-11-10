@@ -342,7 +342,7 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                      config_index_tab = ConfigIndexTab} = Storage,
 
             #{low_seqno := LowSeqno, high_seqno := HighSeqno} = State,
-            delete_table_range(Seqno + 1, HighSeqno, LogTab),
+            delete_table_range(LogTab, Seqno + 1, HighSeqno),
 
             NewConfig = truncate_ordered_table(ConfigIndexTab, Seqno),
             NewState = State#{config => NewConfig,
@@ -631,12 +631,12 @@ mem_log_append(EndSeqno, Entries,
     ets:insert(LogTab, Entries),
     Storage#storage{high_seqno = EndSeqno}.
 
-delete_table_range(FromSeqno, ToSeqno, _Tab)
+delete_table_range(_Tab, FromSeqno, ToSeqno)
   when FromSeqno > ToSeqno ->
     ok;
-delete_table_range(FromSeqno, ToSeqno, LogTab) ->
-    ets:delete(FromSeqno, LogTab),
-    delete_table_range(FromSeqno + 1, ToSeqno, LogTab).
+delete_table_range(LogTab, FromSeqno, ToSeqno) ->
+    ets:delete(LogTab, FromSeqno),
+    delete_table_range(LogTab, FromSeqno + 1, ToSeqno).
 
 file_exists(Path, Type) ->
     case chronicle_utils:check_file_exists(Path, Type) of
