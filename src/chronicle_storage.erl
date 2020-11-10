@@ -69,21 +69,27 @@ open() ->
     _ = ets:new(?CONFIG_INDEX,
                 [protected, ordered_set, named_table,
                  {keypos, #log_entry.seqno}]),
-    Storage = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
-                       log_tab = ets:whereis(?MEM_LOG_TAB),
-                       config_index_tab = ets:whereis(?CONFIG_INDEX),
-                       low_seqno = ?NO_SEQNO + 1,
-                       high_seqno = ?NO_SEQNO,
-                       meta = #{}},
+    Storage0 = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
+                        log_tab = ets:whereis(?MEM_LOG_TAB),
+                        config_index_tab = ets:whereis(?CONFIG_INDEX),
+                        low_seqno = ?NO_SEQNO + 1,
+                        high_seqno = ?NO_SEQNO,
+                        meta = #{}},
 
     try
         DataDir = chronicle_env:data_dir(),
         maybe_complete_wipe(DataDir),
         ensure_dirs(DataDir),
-        compact(validate_state(open_logs(Storage#storage{data_dir = DataDir})))
+
+        Storage1 = Storage0#storage{data_dir = DataDir},
+        Storage2 = compact(validate_state(open_logs(Storage1))),
+
+        cleanup_orphan_snapshots(Storage2),
+
+        Storage2
     catch
         T:E:Stack ->
-            close(Storage),
+            close(Storage0),
             erlang:raise(T, E, Stack)
     end.
 
@@ -166,14 +172,16 @@ maybe_delete_orphans([]) ->
 maybe_delete_orphans(Orphans) ->
     Paths = [LogPath || {_, LogPath} <- Orphans],
     ?WARNING("Found orphan logs. Going to delete them. Logs:~n~p", [Paths]),
+    try_delete_files(Paths).
+
+try_delete_files(Paths) ->
     lists:foreach(
       fun (Path) ->
-              case file:delete(Path) of
+              case chronicle_utils:delete_recursive(Path) of
                   ok ->
                       ok;
                   {error, Error} ->
-                      ?WARNING("Failed to delete orphan log ~p: ~p",
-                               [Path, Error])
+                      ?WARNING("Failed to delete file ~p: ~p", [Path, Error])
               end
       end, Paths).
 
@@ -559,6 +567,40 @@ find_logs(DataDir) ->
             {Orphans, NonOrphans} = find_orphan_logs(Logs1),
             {Orphans, lists:droplast(NonOrphans), lists:last(NonOrphans)}
     end.
+
+cleanup_orphan_snapshots(#storage{data_dir = DataDir,
+                                  snapshots = Snapshots}) ->
+    SnapshotSeqnos = [Seqno || {Seqno, _} <- Snapshots],
+    DiskSnapshots = find_disk_snapshots(DataDir),
+    OrphanSnapshots =
+        lists:filtermap(
+          fun ({SnapshotSeqno, Path}) ->
+                  case lists:member(SnapshotSeqno, SnapshotSeqnos) of
+                      true ->
+                          false;
+                      false ->
+                          {true, Path}
+                  end
+          end, DiskSnapshots),
+
+    case OrphanSnapshots of
+        [] ->
+            ok;
+        _ ->
+            ?WARNING("Found orphan snapshots.~n"
+                     "Known snapshots seqnos: ~p~n"
+                     "Orphan snapshot files:~n~p",
+                     [SnapshotSeqnos, OrphanSnapshots]),
+            try_delete_files(OrphanSnapshots)
+    end.
+
+find_disk_snapshots(DataDir) ->
+    SnapshotsDir = snapshots_dir(DataDir),
+    list_dir(SnapshotsDir,
+             "^([[:digit:]]\+)$", directory,
+             fun (Path, [Seqno]) ->
+                     {list_to_integer(Seqno), Path}
+             end).
 
 list_dir(Dir, RegExp, Type, Fun) ->
     case file:list_dir(Dir) of
