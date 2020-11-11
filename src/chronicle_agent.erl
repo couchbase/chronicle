@@ -483,20 +483,21 @@ handle_register_rsm(Name, Pid, #state{rsms_by_name = RSMs,
 
 handle_get_latest_snapshot(Pid, #state{snapshot_readers = Readers,
                                        storage = Storage} = State) ->
-    case get_latest_snapshot(State) of
-        {Seqno, Config} ->
+    case get_and_hold_latest_snapshot(State) of
+        {{Seqno, Config}, NewState} ->
             MRef = erlang:monitor(process, Pid),
             NewReaders = Readers#{MRef => Seqno},
             {reply, {ok, MRef, Seqno, Config, Storage},
-             State#state{snapshot_readers = NewReaders}};
+             NewState#state{snapshot_readers = NewReaders}};
         no_snapshot ->
             {reply, {error, no_snapshot}, State}
     end.
 
 handle_release_snapshot(MRef, #state{snapshot_readers = Readers} = State) ->
-    {_, NewReaders} = maps:take(MRef, Readers),
+    {SnapshotSeqno, NewReaders} = maps:take(MRef, Readers),
     erlang:demonitor(MRef, [flush]),
-    {noreply, State#state{snapshot_readers = NewReaders}}.
+    {noreply, release_snapshot(SnapshotSeqno,
+                               State#state{snapshot_readers = NewReaders})}.
 
 handle_down(MRef, Pid, Reason, #state{rsms_by_name = RSMs,
                                       rsms_by_mref = MRefs,
@@ -1642,8 +1643,16 @@ get_config_for_seqno(Seqno, #state{storage = Storage}) ->
 get_latest_snapshot_seqno(#state{storage = Storage}) ->
     chronicle_storage:get_latest_snapshot_seqno(Storage).
 
-get_latest_snapshot(#state{storage = Storage}) ->
-    chronicle_storage:get_latest_snapshot(Storage).
+get_and_hold_latest_snapshot(#state{storage = Storage} = State) ->
+    case chronicle_storage:get_and_hold_latest_snapshot(Storage) of
+        {Snapshot, NewStorage} ->
+            {Snapshot, State#state{storage = NewStorage}};
+        no_snapshot ->
+            no_snapshot
+    end.
+
+release_snapshot(Seqno, #state{storage = Storage} = State) ->
+    State#state{storage = chronicle_storage:release_snapshot(Seqno, Storage)}.
 
 get_log_entry(Seqno, #state{storage = Storage}) ->
     chronicle_storage:get_log_entry(Seqno, Storage).

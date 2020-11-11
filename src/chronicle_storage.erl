@@ -50,6 +50,7 @@
                    meta,
                    config,
                    snapshots,
+                   snapshots_in_use,
 
                    data_dir,
 
@@ -74,7 +75,8 @@ open() ->
                         config_index_tab = ets:whereis(?CONFIG_INDEX),
                         low_seqno = ?NO_SEQNO + 1,
                         high_seqno = ?NO_SEQNO,
-                        meta = #{}},
+                        meta = #{},
+                        snapshots_in_use = gb_trees:empty()},
 
     try
         DataDir = chronicle_env:data_dir(),
@@ -1028,6 +1030,48 @@ validate_state(#storage{low_seqno = LowSeqno,
 
     NewStorage.
 
+get_and_hold_latest_snapshot(Storage) ->
+    case get_latest_snapshot(Storage) of
+        no_snapshot ->
+            no_snapshot;
+        {Seqno, _} = Snapshot ->
+            {Snapshot, hold_snapshot(Seqno, Storage)}
+    end.
+
+hold_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
+    NewUseCount =
+        case gb_trees:lookup(Seqno, Snapshots) of
+            none ->
+                1;
+            {value, Value} ->
+                Value + 1
+        end,
+
+    NewSnapshots = gb_trees:enter(Seqno, NewUseCount, Snapshots),
+    Storage#storage{snapshots_in_use = NewSnapshots}.
+
+release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
+    NewUseCount = gb_trees:get(Seqno, Snapshots) - 1,
+
+    NewSnapshots =
+        case NewUseCount =:= 0 of
+            true ->
+                gb_trees:delete(Seqno, Snapshots);
+            false ->
+                gb_trees:update(Seqno, NewUseCount, Snapshots)
+        end,
+
+    Storage#storage{snapshots_in_use = NewSnapshots}.
+
+get_used_snapshot_seqno(#storage{snapshots_in_use = Snapshots}) ->
+    case gb_trees:is_empty(Snapshots) of
+        true ->
+            no_seqno;
+        false ->
+            {Seqno, _} = gb_trees:smallest(Snapshots),
+            Seqno
+    end.
+
 get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
         [] ->
@@ -1055,8 +1099,29 @@ compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
             %% existing snapshots.
             sync(Storage),
 
-            {KeepSnapshots,
-             DeleteSnapshots} = lists:split(?MAX_SNAPSHOTS, Snapshots),
+            {KeepSnapshots0, DeleteSnapshots0} =
+                lists:split(?MAX_SNAPSHOTS, Snapshots),
+
+            {KeepSnapshots, DeleteSnapshots} =
+                case get_used_snapshot_seqno(Storage) of
+                    no_seqno ->
+                        {KeepSnapshots0, DeleteSnapshots0};
+                    UsedSeqno ->
+                        {Used, Unused} = lists:splitwith(
+                                           fun ({Seqno, _}) ->
+                                                   Seqno >= UsedSeqno
+                                           end, DeleteSnapshots0),
+                        case Used of
+                            [] ->
+                                ok;
+                            _ ->
+                                ?DEBUG("Won't delete some snapshots because "
+                                       "they are in use (used seqno ~p):~n~p",
+                                       [UsedSeqno, Used])
+                        end,
+
+                        {KeepSnapshots0 ++ Used, Unused}
+                end,
 
             lists:foreach(
               fun ({SnapshotSeqno, _}) ->
