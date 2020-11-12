@@ -278,8 +278,8 @@ handle_query({rewrite, Fun}, StateRevision, State, Data) ->
     handle_rewrite(Fun, StateRevision, State, Data);
 handle_query({get, Key}, _StateRevision, State, Data) ->
     handle_get(Key, State, Data);
-handle_query(get_full_snapshot, _StateRevision, State, Data) ->
-    handle_get_full_snapshot(State, Data);
+handle_query(get_full_snapshot, StateRevision, State, Data) ->
+    handle_get_full_snapshot(StateRevision, State, Data);
 handle_query({get_snapshot, Keys}, _StateRevision, State, Data) ->
     handle_get_snapshot(Keys, State, Data).
 
@@ -408,8 +408,8 @@ handle_get(Key, State, Data) ->
 
     {reply, Reply, Data}.
 
-handle_get_full_snapshot(State, Data) ->
-    {reply, {ok, State}, Data}.
+handle_get_full_snapshot(StateRevision, State, Data) ->
+    {reply, {ok, {State, StateRevision}}, Data}.
 
 handle_get_snapshot(Keys, State, Data) ->
     Snapshot = maps:with(Keys, State),
