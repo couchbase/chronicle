@@ -77,7 +77,7 @@ get_voters(Timeout) ->
 
 get_config(Timeout) ->
     with_leader(Timeout,
-                fun (TRef, Leader) ->
+                fun (TRef, Leader, _LeaderInfo) ->
                         get_config(Leader, TRef)
                 end).
 
@@ -93,7 +93,7 @@ update_voters(Fun, Timeout) ->
 
 update_config(Fun, Timeout) ->
     with_leader(Timeout,
-                fun (TRef, Leader) ->
+                fun (TRef, Leader, _LeaderInfo) ->
                         update_config_loop(Fun, Leader, TRef)
                 end).
 

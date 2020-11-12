@@ -82,7 +82,7 @@ command(Name, Command) ->
 command(Name, Command, Timeout) ->
     unwrap_command_reply(
       with_leader(Timeout,
-                  fun (TRef, Leader) ->
+                  fun (TRef, Leader, _LeaderInfo) ->
                           command(Leader, Name, Command, TRef)
                   end)).
 
@@ -98,7 +98,7 @@ query(Name, Query, Timeout) ->
 
 get_applied_revision(Name, Type, Timeout) ->
     with_leader(Timeout,
-                fun (TRef, Leader) ->
+                fun (TRef, Leader, _LeaderInfo) ->
                         get_applied_revision(Leader, Name, Type, TRef)
                 end).
 

@@ -409,7 +409,7 @@ with_leader(Timeout, Retries, Fun) ->
 with_leader_loop(TRef, Incarnation, Retries, Fun) ->
     {Leader, NewIncarnation} =
         chronicle_leader:wait_for_leader(Incarnation, TRef),
-    Result = Fun(TRef, Leader),
+    Result = Fun(TRef, Leader, NewIncarnation),
     case Result of
         {error, {leader_error, not_leader}} when Retries > 0 ->
             with_leader_loop(TRef, NewIncarnation, Retries - 1, Fun);
