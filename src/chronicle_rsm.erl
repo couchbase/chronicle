@@ -72,23 +72,19 @@
 start_link(Name, Mod, ModArgs) ->
     gen_statem:start_link(?START_NAME(Name), ?MODULE, [Name, Mod, ModArgs], []).
 
-%% TODO: Commands need to be tagged with current history. If that's not the
-%% case, then after a quorum failover, the failed over part of the cluster may
-%% continue sending commands to the leader in the non-failed over part for
-%% some time.
 command(Name, Command) ->
     command(Name, Command, 5000).
 
 command(Name, Command, Timeout) ->
     unwrap_command_reply(
       with_leader(Timeout,
-                  fun (TRef, Leader, _LeaderInfo) ->
-                          command(Leader, Name, Command, TRef)
+                  fun (TRef, Leader, {HistoryId, _Term}) ->
+                          command(Leader, Name, HistoryId, Command, TRef)
                   end)).
 
-command(Leader, Name, Command, Timeout) ->
+command(Leader, Name, HistoryId, Command, Timeout) ->
     ?DEBUG("Sending Command to ~p: ~p", [Leader, Command]),
-    call(?SERVER(Leader, Name), {command, Command}, Timeout).
+    call(?SERVER(Leader, Name), {command, HistoryId, Command}, Timeout).
 
 query(Name, Query) ->
     query(Name, Query, 5000).
@@ -98,12 +94,14 @@ query(Name, Query, Timeout) ->
 
 get_applied_revision(Name, Type, Timeout) ->
     with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        get_applied_revision(Leader, Name, Type, TRef)
+                fun (TRef, Leader, {HistoryId, _Term}) ->
+                        get_applied_revision(Leader, Name,
+                                             HistoryId, Type, TRef)
                 end).
 
-get_applied_revision(Leader, Name, Type, Timeout) ->
-    call(?SERVER(Leader, Name), {get_applied_revision, Type}, Timeout).
+get_applied_revision(Leader, Name, HistoryId, Type, Timeout) ->
+    call(?SERVER(Leader, Name),
+         {get_applied_revision, HistoryId, Type}, Timeout).
 
 get_local_revision(Name) ->
     case get_local_revision_fast(Name) of
@@ -257,25 +255,27 @@ terminate(Reason, _State, Data) ->
     call_callback(terminate, [Reason], Data).
 
 %% internal
-handle_call({command, Command}, From, State, Data) ->
-    handle_command(Command, From, State, Data);
+handle_call({command, HistoryId, Command}, From, State, Data) ->
+    handle_command(HistoryId, Command, From, State, Data);
 handle_call({query, Query}, From, State, Data) ->
     handle_query(Query, From, State, Data);
 handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
 handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
     handle_sync_revision(Revision, Timeout, From, State, Data);
-handle_call({get_applied_revision, Type}, From, State, Data) ->
-    handle_get_applied_revision(Type, From, State, Data);
+handle_call({get_applied_revision, HistoryId, Type}, From, State, Data) ->
+    handle_get_applied_revision(HistoryId, Type, From, State, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
 
-handle_command(_Command, From, #follower{}, _Data) ->
+handle_command(HistoryId, Command, From,
+               #leader{history_id = OurHistoryId} = State, Data)
+  when HistoryId =:= OurHistoryId ->
+    handle_command_leader(Command, From, State, Data);
+handle_command(_HistoryId, _Command, From, #follower{}, _Data) ->
     {keep_state_and_data,
-     {reply, From, {error, {leader_error, not_leader}}}};
-handle_command(Command, From, #leader{} = State, Data) ->
-    handle_command_leader(Command, From, State, Data).
+     {reply, From, {error, {leader_error, not_leader}}}}.
 
 handle_command_leader(Command, From, State, Data) ->
     case call_callback(handle_command, [Command], Data) of
@@ -522,10 +522,10 @@ pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
             Clients
     end.
 
-handle_get_applied_revision(_Type, From, #follower{}, _Data) ->
-    {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}};
-handle_get_applied_revision(Type, From,
-                            #leader{status = Status} = State, Data) ->
+handle_get_applied_revision(HistoryId, Type, From,
+                            #leader{history_id = OurHistoryId,
+                                    status = Status} = State, Data)
+  when HistoryId =:= OurHistoryId ->
     case Status of
         established ->
             handle_get_applied_revision_leader(Type, From, State, Data);
@@ -543,7 +543,9 @@ handle_get_applied_revision(Type, From,
             %% essentially get stuck. So we need to postpone handling the call
             %% until we know that TermSeqno is committed.
             {keep_state_and_data, postpone}
-    end.
+    end;
+handle_get_applied_revision(_HistoryId, _Type, From, _State, _Data) ->
+    {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}}.
 
 handle_get_applied_revision_leader(Type, From, State, Data) ->
     established = State#leader.status,
