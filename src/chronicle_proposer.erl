@@ -1119,9 +1119,15 @@ handle_cas_config(ReplyTo, NewConfig, CasRevision,
     case CasRevision =:= ConfigRevision of
         true ->
             %% TODO: need to backfill new nodes
-            Transition = #transition{current_config = Config,
-                                     future_config = NewConfig},
-            NewData = propose_config(Transition, ReplyTo, Data),
+            FinalConfig =
+                case config_needs_transition(NewConfig, Config) of
+                    true ->
+                        #transition{current_config = Config,
+                                    future_config = NewConfig};
+                    false ->
+                        NewConfig
+                end,
+            NewData = propose_config(FinalConfig, ReplyTo, Data),
             {keep_state, replicate(NewData)};
         false ->
             Reply = {error, {cas_failed, ConfigRevision}},
@@ -1728,3 +1734,36 @@ get_live_peers(Peers) ->
                       sets:is_element(Peer, LivePeers)
               end
       end, Peers).
+
+config_needs_transition(#config{voters = NewVoters},
+                        #config{voters = OldVoters}) ->
+    Added = NewVoters -- OldVoters,
+    Removed = OldVoters -- NewVoters,
+    NumChanges = length(Added) + length(Removed),
+
+    %% If there's no more than one change, then all quorums in the new config
+    %% interesect all quorums in the old config. So we don't need to go
+    %% through a transitional configuration.
+    NumChanges > 1.
+
+-ifdef(TEST).
+config_needs_transition_test() ->
+    ?assertEqual(false,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [a, b, c, d]})),
+    ?assertEqual(false,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [a, b]})),
+    ?assertEqual(false,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [c, a, d, b]})),
+    ?assertEqual(true,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [a, b, c, d, e]})),
+    ?assertEqual(true,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [a, b, d]})),
+    ?assertEqual(true,
+                 config_needs_transition(#config{voters = [a, b, c]},
+                                         #config{voters = [c, a, e, d, b]})).
+-endif.
