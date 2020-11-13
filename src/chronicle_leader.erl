@@ -370,9 +370,26 @@ handle_reprovisioned(Metadata, _State, Data) ->
     %% the cluster.
     {next_state, #candidate{}, NewData}.
 
-handle_new_config(_Config, Metadata, _State, Data) ->
+handle_new_config(_Config, Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),
-    {keep_state, NewData}.
+
+    case Data#data.electable =:= NewData#data.electable of
+        true ->
+            {keep_state, NewData};
+        false ->
+            case State of
+                #leader{} ->
+                    %% When we are a leader, we may end up changing our node's
+                    %% status making it unelectable. But chronicle_proposer
+                    %% will step down in such situation on its own.
+                    {keep_state, NewData};
+                _ ->
+                    ?INFO("Our electability (the new value is ~p) changed. "
+                          "Becoming an observer.",
+                          [NewData#data.electable]),
+                    {next_state, make_observer(NewData), NewData}
+            end
+    end.
 
 handle_new_history(HistoryId, Metadata, _State, Data) ->
     ?INFO("History changed to ~p. Becoming an observer.", [HistoryId]),
