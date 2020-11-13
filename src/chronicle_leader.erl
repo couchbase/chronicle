@@ -668,47 +668,52 @@ do_election_worker() ->
     Leader = Metadata#metadata.peer,
     OtherPeers = Peers -- [Leader],
 
-    CallFun =
-        fun (Peer) ->
-                request_vote(Peer, Leader, HistoryId, Position)
-        end,
-    HandleResponse =
-        fun (Peer, Resp, Acc) ->
-                case Resp of
-                    {ok, PeerTerm} ->
-                        {no_quorum, Votes, Term} = Acc,
-                        NewVotes = [Peer | Votes],
-                        NewTerm = max(Term, PeerTerm),
-
-                        case have_quorum(NewVotes, Quorum) of
-                            true ->
-                                %% TODO: wait a little more to receive more
-                                %% responses
-                                {stop, {ok, NewTerm}};
-                            false ->
-                                NewAcc = {no_quorum, NewVotes, NewTerm},
-                                {continue, NewAcc}
-                        end;
-                    {error, _} = Error ->
-                        ?DEBUG("Failed to get leader vote from ~p: ~p",
-                               [Peer, Error]),
-                        {continue, Acc}
-                end
-        end,
-
-    case OtherPeers =:= [] of
+    case lists:member(Leader, Peers) of
         true ->
-            ?INFO("I'm the only peer, so I'm the leader."),
-            {ok, Leader, HistoryId, LatestTerm};
+            CallFun =
+                fun (Peer) ->
+                        request_vote(Peer, Leader, HistoryId, Position)
+                end,
+            HandleResponse =
+                fun (Peer, Resp, Acc) ->
+                        case Resp of
+                            {ok, PeerTerm} ->
+                                {no_quorum, Votes, Term} = Acc,
+                                NewVotes = [Peer | Votes],
+                                NewTerm = max(Term, PeerTerm),
+
+                                case have_quorum(NewVotes, Quorum) of
+                                    true ->
+                                        %% TODO: wait a little more to receive
+                                        %% more responses
+                                        {stop, {ok, NewTerm}};
+                                    false ->
+                                        NewAcc = {no_quorum, NewVotes, NewTerm},
+                                        {continue, NewAcc}
+                                end;
+                            {error, _} = Error ->
+                                ?DEBUG("Failed to get leader vote from ~p: ~p",
+                                       [Peer, Error]),
+                                {continue, Acc}
+                        end
+                end,
+
+            case OtherPeers =:= [] of
+                true ->
+                    ?INFO("I'm the only peer, so I'm the leader."),
+                    {ok, Leader, HistoryId, LatestTerm};
+                false ->
+                    case parallel_mapfold(CallFun, HandleResponse,
+                                          {no_quorum, [Leader], LatestTerm},
+                                          OtherPeers) of
+                        {no_quorum, FinalVotes, _} ->
+                            {error, {no_quorum, FinalVotes, Quorum}};
+                        {ok, FinalTerm} ->
+                            {ok, Leader, HistoryId, FinalTerm}
+                    end
+            end;
         false ->
-            case parallel_mapfold(CallFun, HandleResponse,
-                                  {no_quorum, [Leader], LatestTerm},
-                                  OtherPeers) of
-                {no_quorum, FinalVotes, _} ->
-                    {error, {no_quorum, FinalVotes, Quorum}};
-                {ok, FinalTerm} ->
-                    {ok, Leader, HistoryId, FinalTerm}
-            end
+            {error, {not_voter, Leader, Peers}}
     end.
 
 handle_send_heartbeat(State, Data) ->
