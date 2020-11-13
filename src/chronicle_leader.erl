@@ -338,7 +338,7 @@ handle_chronicle_event({term_established, Term}, State, Data) ->
     handle_new_term(Term, State, Data).
 
 handle_unprovisioned(_State, Data) ->
-    ?INFO("System became unprovisoined."),
+    ?INFO("System became unprovisioned."),
     NewData = Data#data{peers = [],
                         history_id = ?NO_HISTORY,
                         established_term = ?NO_TERM,
