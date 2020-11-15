@@ -891,8 +891,8 @@ handle_config_post_append(OldData,
     case GotCommitted of
         true ->
             %% Stop replicating to nodes that might have been removed.
-            QuorumNodes = NewData#data.quorum_peers,
-            NewData0 = update_peers(QuorumNodes, NewData),
+            NewData0 = reset_peers(NewData),
+
             NewData1 = maybe_reply_config_change(NewData0),
             NewData2 = maybe_complete_config_transition(NewData1),
 
@@ -916,6 +916,11 @@ handle_config_post_append(OldData,
             %% Nothing changed, so nothing to do.
             {ok, NewData, []}
     end.
+
+reset_peers(Data) ->
+    NewPeers = Data#data.quorum_peers,
+    NewData = Data#data{peers = NewPeers},
+    handle_new_peers(Data, NewData).
 
 is_config_committed(#data{config_revision = ConfigRevision} = Data) ->
     is_revision_committed(ConfigRevision, Data).
@@ -1168,27 +1173,28 @@ update_config(Config, Revision, #data{quorum_peers = OldQuorumPeers} = Data) ->
     Quorum = require_self_quorum(RawQuorum),
     QuorumPeers = get_quorum_peers(Quorum),
 
+    %% When nodes are being removed, attempt to notify them about the new
+    %% config that removes them. This is just a best-effort approach. If nodes
+    %% are down -- they are not going to get notified.
+    NewPeers = lists:usort(OldQuorumPeers ++ QuorumPeers),
     NewData = Data#data{config = Config,
                         config_revision = Revision,
                         being_removed = BeingRemoved,
                         quorum = Quorum,
                         quorum_peers = QuorumPeers,
+                        peers = NewPeers,
                         machines = config_machines(Config)},
 
-    %% When nodes are being removed, attempt to notify them about the new
-    %% config that removes them. This is just a best-effort approach. If nodes
-    %% are down -- they are not going to get notified.
-    NewPeers = lists:usort(OldQuorumPeers ++ QuorumPeers),
-    update_peers(NewPeers, NewData).
+    handle_new_peers(Data, NewData).
 
-update_peers(NewPeers, #data{peers = OldPeers,
-                             quorum_peers = QuorumPeers} = Data) ->
-    [] = (QuorumPeers -- NewPeers),
+handle_new_peers(#data{peers = OldPeers},
+                 #data{peers = NewPeers,
+                       quorum_peers = NewQuorumPeers} = NewData) ->
+    [] = (NewQuorumPeers -- NewPeers),
 
     RemovedPeers = OldPeers -- NewPeers,
     AddedPeers = NewPeers -- OldPeers,
 
-    NewData = Data#data{peers = NewPeers},
     handle_added_peers(AddedPeers, handle_removed_peers(RemovedPeers, NewData)).
 
 handle_removed_peers(Peers, Data) ->
