@@ -779,7 +779,11 @@ sync_quorum_handle_peer_down(Peer, #data{sync_requests = Tab} = Data) ->
               end
       end, ets:tab2list(Tab)).
 
-sync_quorum_on_config_update(AddedPeers, #data{sync_requests = Tab} = Data) ->
+sync_quorum_on_config_update(AddedPeers0, #data{sync_requests = Tab} = Data) ->
+    QuorumPeers = lists:usort(Data#data.quorum_peers),
+    AddedPeers = lists:usort(AddedPeers0),
+    AddedQuorumPeers = ordsets:intersection(QuorumPeers, AddedPeers),
+
     lists:foldl(
       fun (#sync_request{ref = Ref} = Request, AccData) ->
               %% We might have a quorum in the new configuration. If that's
@@ -792,7 +796,8 @@ sync_quorum_on_config_update(AddedPeers, #data{sync_requests = Tab} = Data) ->
                       %% If there are new peers, we need to send extra
                       %% ensure_term requests to them. Otherwise, we might not
                       %% ever get enough responses to reach quorum.
-                      send_ensure_term(AddedPeers, {sync_quorum, Ref}, AccData)
+                      send_ensure_term(AddedQuorumPeers,
+                                       {sync_quorum, Ref}, AccData)
               end
       end, Data, ets:tab2list(Tab)).
 
