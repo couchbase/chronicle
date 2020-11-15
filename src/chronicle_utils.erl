@@ -419,6 +419,14 @@ with_leader_loop(TRef, Incarnation, Retries, Fun) ->
             Result
     end.
 
+get_all_peers(Metadata) ->
+    case Metadata#metadata.pending_branch of
+        undefined ->
+            config_peers(Metadata#metadata.config);
+        #branch{peers = BranchPeers} ->
+            BranchPeers
+    end.
+
 get_establish_quorum(Metadata) ->
     case Metadata#metadata.pending_branch of
         undefined ->
@@ -468,8 +476,9 @@ is_quorum_feasible(Peers, FailedVotes, Quorum) ->
     PossibleVotes = Peers -- FailedVotes,
     have_quorum(PossibleVotes, Quorum).
 
-config_peers(#config{voters = Voters}) ->
-    Voters;
+config_peers(#config{voters = Voters,
+                     replicas = Replicas}) ->
+    Voters ++ Replicas;
 config_peers(#transition{current_config = Current,
                          future_config = Future}) ->
     lists:usort(config_peers(Current) ++ config_peers(Future)).

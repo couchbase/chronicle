@@ -626,12 +626,13 @@ check_reprovision(State) ->
             ConfigEntry = get_config(State),
             Config = ConfigEntry#log_entry.value,
             case Config of
-                #config{voters = Voters} ->
-                    case Voters of
-                        [Peer] ->
+                #config{voters = Voters,
+                        replicas = Replicas} ->
+                    case Voters =:= [Peer] andalso Replicas =:= [] of
+                        true ->
                             {ok, Config};
                         _ ->
-                            {error, {bad_config, Peer, Voters}}
+                            {error, {bad_config, Peer, Voters, Replicas}}
                     end;
                 #transition{} ->
                     {error, {unstable_config, Config}}
@@ -652,7 +653,9 @@ handle_provision(Machines0, State) ->
                          [{Name, #rsm_config{module = Module, args = Args}} ||
                              {Name, Module, Args} <- Machines0]),
 
-            Config = #config{voters = [Peer], state_machines = Machines},
+            Config = #config{voters = [Peer],
+                             replicas = [],
+                             state_machines = Machines},
             ConfigEntry = #log_entry{history_id = HistoryId,
                                      term = Term,
                                      seqno = Seqno,

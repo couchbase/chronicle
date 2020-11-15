@@ -25,6 +25,7 @@
                           get_establish_peers/1,
                           get_establish_quorum/1,
                           get_position/1,
+                          get_all_peers/1,
                           get_quorum_peers/1,
                           have_quorum/2,
                           parallel_mapfold/4,
@@ -428,12 +429,13 @@ metadata2data(Metadata) ->
 
 metadata2data(Metadata, Data) ->
     Self = Metadata#metadata.peer,
-    Peers = get_establish_peers(Metadata),
-    Electable = lists:member(Self, Peers),
+    QuorumPeers = get_establish_peers(Metadata),
+    AllPeers = get_all_peers(Metadata),
+    Electable = lists:member(Self, QuorumPeers),
 
     Data#data{history_id = chronicle_agent:get_history_id(Metadata),
               established_term = Metadata#metadata.term,
-              peers = Peers -- [Self],
+              peers = AllPeers -- [Self],
               electable = Electable}.
 
 handle_note_term_status(HistoryId, Term, Status, State, Data) ->

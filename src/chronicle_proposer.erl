@@ -294,14 +294,16 @@ establish_term_init(Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
     Self = Metadata#metadata.peer,
     Quorum = require_self_quorum(get_establish_quorum(Metadata)),
-    Peers = get_quorum_peers(Quorum),
-    LivePeers = get_live_peers(Peers),
-    DeadPeers = Peers -- LivePeers,
+    QuorumPeers = get_quorum_peers(Quorum),
+    AllPeers = require_self_peer(get_all_peers(Metadata)),
+
+    LiveQuorumPeers = get_live_peers(QuorumPeers),
+    DeadQuorumPeers = QuorumPeers -- LiveQuorumPeers,
 
     ?DEBUG("Going to establish term ~p (history id ~p).~n"
            "Metadata:~n~p~n"
-           "Live peers:~n~p",
-           [Term, HistoryId, Metadata, LivePeers]),
+           "Live quorum peers:~n~p",
+           [Term, HistoryId, Metadata, LiveQuorumPeers]),
 
     #metadata{config = Config,
               config_revision = ConfigRevision,
@@ -309,9 +311,9 @@ establish_term_init(Metadata,
               committed_seqno = CommittedSeqno,
               pending_branch = PendingBranch} = Metadata,
 
-    case is_quorum_feasible(Peers, DeadPeers, Quorum) of
+    case is_quorum_feasible(QuorumPeers, DeadQuorumPeers, Quorum) of
         true ->
-            OtherPeers = LivePeers -- [?SELF_PEER],
+            OtherQuorumPeers = LiveQuorumPeers -- [?SELF_PEER],
 
             %% Send a fake response to update our state with the
             %% knowledge that we've established the term
@@ -323,15 +325,15 @@ establish_term_init(Metadata,
             %% transition to a different state from a state_enter
             %% callback. So here we are.
             NewData0 = send_local_establish_term(Metadata, Data),
-            NewData1 =
-                send_establish_term(OtherPeers, Metadata, NewData0),
+            NewData1 = send_establish_term(OtherQuorumPeers,
+                                           Metadata, NewData0),
             NewData = NewData1#data{peer = Self,
-                                    peers = Peers,
-                                    quorum_peers = Peers,
+                                    peers = AllPeers,
+                                    quorum_peers = QuorumPeers,
                                     quorum = Quorum,
                                     machines = config_machines(Config),
                                     votes = [],
-                                    failed_votes = DeadPeers,
+                                    failed_votes = DeadQuorumPeers,
                                     config = Config,
                                     config_revision = ConfigRevision,
                                     high_seqno = HighSeqno,
@@ -348,10 +350,10 @@ establish_term_init(Metadata,
             %% at least a quorum of nodes should be alive.
             ?WARNING("Can't establish term ~p, history id ~p.~n"
                      "Not enough peers are alive to achieve quorum.~n"
-                     "Peers: ~p~n"
-                     "Live peers: ~p~n"
+                     "Quorum peers: ~p~n"
+                     "Live quorum peers: ~p~n"
                      "Quorum: ~p",
-                     [Term, HistoryId, Peers, LivePeers, Quorum]),
+                     [Term, HistoryId, QuorumPeers, LiveQuorumPeers, Quorum]),
             {stop, {error, no_quorum}}
     end.
 
@@ -528,7 +530,7 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
 establish_term_maybe_transition(establish_term = State,
                                 #data{term = Term,
                                       history_id = HistoryId,
-                                      quorum_peers = Peers,
+                                      quorum_peers = QuorumPeers,
                                       votes = Votes,
                                       failed_votes = FailedVotes,
                                       quorum = Quorum} = Data) ->
@@ -540,7 +542,7 @@ establish_term_maybe_transition(establish_term = State,
 
             {next_state, proposing, Data};
         false ->
-            case is_quorum_feasible(Peers, FailedVotes, Quorum) of
+            case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
                 true ->
                     {keep_state, Data};
                 false ->
@@ -587,7 +589,9 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     %% will get truncated from the history. This can be confusing and it's
     %% possible to deal with this situation better. But for the time being I
     %% decided not to bother.
-    NewConfig = Config#config{voters = Branch#branch.peers},
+    %%
+    %% TODO: figure out what to do with replicas
+    NewConfig = Config#config{voters = Branch#branch.peers, replicas = []},
 
     ?INFO("Resolving a branch.~n"
           "High seqno: ~p~n"
@@ -751,12 +755,12 @@ sync_quorum_maybe_reply(Request, Data) ->
 
 sync_quorum_check_result(#sync_request{votes = Votes,
                                        failed_votes = FailedVotes},
-                         #data{quorum = Quorum, quorum_peers = Peers}) ->
+                         #data{quorum = Quorum, quorum_peers = QuorumPeers}) ->
     case have_quorum(Votes, Quorum) of
         true ->
             ok;
         false ->
-            case is_quorum_feasible(Peers, FailedVotes, Quorum) of
+            case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
                 true ->
                     continue;
                 false ->
@@ -917,9 +921,8 @@ handle_config_post_append(OldData,
             {ok, NewData, []}
     end.
 
-reset_peers(Data) ->
-    NewPeers = Data#data.quorum_peers,
-    NewData = Data#data{peers = NewPeers},
+reset_peers(#data{config = Config} = Data) ->
+    NewData = Data#data{peers = require_self_peer(config_peers(Config, Data))},
     handle_new_peers(Data, NewData).
 
 is_config_committed(#data{config_revision = ConfigRevision} = Data) ->
@@ -1092,21 +1095,22 @@ handle_sync_quorum(ReplyTo, {stopped, _}, _Data) ->
     reply_not_leader(ReplyTo),
     keep_state_and_data;
 handle_sync_quorum(ReplyTo, proposing,
-                   #data{quorum_peers = Peers,
+                   #data{quorum_peers = QuorumPeers,
                          sync_requests = SyncRequests} = Data) ->
     %% TODO: timeouts
-    LivePeers = get_live_peers(Peers),
-    DeadPeers = Peers -- LivePeers,
+    LiveQuorumPeers = get_live_peers(QuorumPeers),
+    DeadQuorumPeers = QuorumPeers -- LiveQuorumPeers,
 
     Ref = make_ref(),
     Request = #sync_request{ref = Ref,
                             reply_to = ReplyTo,
                             votes = [],
-                            failed_votes = DeadPeers},
+                            failed_votes = DeadQuorumPeers},
     case sync_quorum_maybe_reply(Request, Data) of
         continue ->
             ets:insert_new(SyncRequests, Request),
-            {keep_state, send_ensure_term(LivePeers, {sync_quorum, Ref}, Data)};
+            {keep_state,
+             send_ensure_term(LiveQuorumPeers, {sync_quorum, Ref}, Data)};
         done ->
             keep_state_and_data
     end.
@@ -1172,11 +1176,12 @@ update_config(Config, Revision, #data{quorum_peers = OldQuorumPeers} = Data) ->
     %% being removed.
     Quorum = require_self_quorum(RawQuorum),
     QuorumPeers = get_quorum_peers(Quorum),
+    AllPeers = require_self_peer(config_peers(Config, Data)),
 
     %% When nodes are being removed, attempt to notify them about the new
     %% config that removes them. This is just a best-effort approach. If nodes
     %% are down -- they are not going to get notified.
-    NewPeers = lists:usort(OldQuorumPeers ++ QuorumPeers),
+    NewPeers = lists:usort(OldQuorumPeers ++ AllPeers),
     NewData = Data#data{config = Config,
                         config_revision = Revision,
                         being_removed = BeingRemoved,
@@ -1711,12 +1716,23 @@ reply_not_leader(ReplyTo) ->
 require_self_quorum(Quorum) ->
     {joint, {all, sets:from_list([?SELF_PEER])}, Quorum}.
 
+require_self_peer(Peers) ->
+    lists:usort([?SELF_PEER | Peers]).
+
 get_establish_quorum(#metadata{peer = Self} = Metadata) ->
     translate_quorum(chronicle_utils:get_establish_quorum(Metadata), Self).
+
+get_all_peers(#metadata{peer = Self} = Metadata) ->
+    translate_peers(chronicle_utils:get_all_peers(Metadata), Self).
 
 get_append_quorum(Config, #data{peer = Self}) ->
     translate_quorum(chronicle_utils:get_append_quorum(Config), Self).
 
+config_peers(Config, #data{peer = Self}) ->
+    translate_peers(chronicle_utils:config_peers(Config), Self).
+
+translate_peers(Peers, Self) when is_list(Peers) ->
+    sets:to_list(translate_peers(sets:from_list(Peers), Self));
 translate_peers(Peers, Self) ->
     case sets:is_element(Self, Peers) of
         true ->
