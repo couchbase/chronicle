@@ -84,6 +84,7 @@
 
 -record(sync_request, { ref,
                         reply_to,
+                        ok_reply,
                         votes,
                         failed_votes }).
 
@@ -753,12 +754,13 @@ sync_quorum_maybe_reply(Request, Data) ->
             done
     end.
 
-sync_quorum_check_result(#sync_request{votes = Votes,
+sync_quorum_check_result(#sync_request{ok_reply = OkReply,
+                                       votes = Votes,
                                        failed_votes = FailedVotes},
                          #data{quorum = Quorum, quorum_peers = QuorumPeers}) ->
     case have_quorum(Votes, Quorum) of
         true ->
-            ok;
+            OkReply;
         false ->
             case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
                 true ->
@@ -1104,6 +1106,7 @@ handle_sync_quorum(ReplyTo, proposing,
     Ref = make_ref(),
     Request = #sync_request{ref = Ref,
                             reply_to = ReplyTo,
+                            ok_reply = ok,
                             votes = [],
                             failed_votes = DeadQuorumPeers},
     case sync_quorum_maybe_reply(Request, Data) of
