@@ -1096,9 +1096,12 @@ reply_commands_not_leader(Commands) ->
 handle_sync_quorum(ReplyTo, {stopped, _}, _Data) ->
     reply_not_leader(ReplyTo),
     keep_state_and_data;
-handle_sync_quorum(ReplyTo, proposing,
-                   #data{quorum_peers = QuorumPeers,
-                         sync_requests = SyncRequests} = Data) ->
+handle_sync_quorum(ReplyTo, proposing, Data) ->
+    start_sync_quorum(ReplyTo, ok, Data).
+
+start_sync_quorum(ReplyTo, OkReply,
+                  #data{quorum_peers = QuorumPeers,
+                        sync_requests = SyncRequests} = Data) ->
     %% TODO: timeouts
     LiveQuorumPeers = get_live_peers(QuorumPeers),
     DeadQuorumPeers = QuorumPeers -- LiveQuorumPeers,
@@ -1106,7 +1109,7 @@ handle_sync_quorum(ReplyTo, proposing,
     Ref = make_ref(),
     Request = #sync_request{ref = Ref,
                             reply_to = ReplyTo,
-                            ok_reply = ok,
+                            ok_reply = OkReply,
                             votes = [],
                             failed_votes = DeadQuorumPeers},
     case sync_quorum_maybe_reply(Request, Data) of
@@ -1118,13 +1121,12 @@ handle_sync_quorum(ReplyTo, proposing,
             keep_state_and_data
     end.
 
-%% TODO: make the value returned fully linearizable?
 handle_get_config(ReplyTo, #data{config = Config,
                                  config_revision = Revision} = Data) ->
     true = is_config_committed(Data),
     #config{} = Config,
-    reply_request(ReplyTo, {ok, Config, Revision}),
-    keep_state_and_data.
+    Reply = {ok, Config, Revision},
+    start_sync_quorum(ReplyTo, Reply, Data).
 
 handle_cas_config(ReplyTo, NewConfig, CasRevision,
                   #data{config = Config,
