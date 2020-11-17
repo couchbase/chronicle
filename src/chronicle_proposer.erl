@@ -827,10 +827,7 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
                     ?ERROR("Catchup to peer ~p failed with error: ~p",
                            [Peer, Error]),
                     remove_peer_status(Peer, Data),
-                    %% TODO: get rid of this
-                    %%
-                    %% retry immediately so unit tests don't fail
-                    {keep_state, check_peers(Data)}
+                    {keep_state, Data}
             end
     end.
 
