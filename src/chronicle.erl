@@ -20,8 +20,11 @@
 -import(chronicle_utils, [with_leader/2]).
 
 -export([provision/1, reprovision/0]).
--export([get_voters/0, get_voters/1]).
--export([add_voters/1, add_voters/2, remove_voters/1, remove_voters/2]).
+-export([get_peers/0, get_peers/1,
+         get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
+-export([add_voter/1, add_voter/2, add_voters/1, add_voters/2,
+         add_replica/1, add_replica/2, add_replicas/1, add_replicas/2,
+         remove_peer/1, remove_peer/2, remove_peers/1, remove_peers/2]).
 
 -export_type([uuid/0, peer/0, history_id/0,
               leader_term/0, seqno/0, peer_position/0, revision/0]).
@@ -46,49 +49,112 @@ provision(Machines) ->
 reprovision() ->
     chronicle_agent:reprovision().
 
-add_voters(Voters) ->
-    add_voters(Voters, ?DEFAULT_TIMEOUT).
+remove_peer(Peer) ->
+    remove_peer(Peer, ?DEFAULT_TIMEOUT).
 
-add_voters(Voters, Timeout) ->
-    update_voters(
-      fun (OldVoters) ->
-              Voters ++ OldVoters
+remove_peer(Peer, Timeout) ->
+    remove_peers([Peer], Timeout).
+
+remove_peers(Peers) ->
+    remove_peers(Peers, ?DEFAULT_TIMEOUT).
+
+remove_peers(Peers, Timeout) ->
+    validate_peers(Peers),
+    update_peers(
+      fun (Voters, Replicas) ->
+              NewVoters = Voters -- Peers,
+              NewReplicas = Replicas -- Peers,
+
+              {NewVoters, NewReplicas}
       end, Timeout).
 
-remove_voters(Voters) ->
-    remove_voters(Voters, ?DEFAULT_TIMEOUT).
+add_voter(Peer) ->
+    add_voter(Peer, ?DEFAULT_TIMEOUT).
 
-remove_voters(Voters, Timeout) ->
-    update_voters(
-      fun (OldVoters) ->
-              OldVoters -- Voters
+add_voter(Peer, Timeout) ->
+    add_voters([Peer], Timeout).
+
+add_voters(Peers) ->
+    add_voters(Peers, ?DEFAULT_TIMEOUT).
+
+add_voters(Peers, Timeout) ->
+    validate_peers(Peers),
+    update_peers(
+      fun (Voters, Replicas) ->
+              NewVoters = lists:usort(Voters ++ Peers),
+              NewReplicas = Replicas -- Peers,
+              {NewVoters, NewReplicas}
       end, Timeout).
+
+add_replica(Peer) ->
+    add_replica(Peer, ?DEFAULT_TIMEOUT).
+
+add_replica(Peer, Timeout) ->
+    add_replicas([Peer], Timeout).
+
+add_replicas(Peers) ->
+    add_replicas(Peers, ?DEFAULT_TIMEOUT).
+
+add_replicas(Peers, Timeout) ->
+    validate_peers(Peers),
+    update_peers(
+      fun (Voters, Replicas) ->
+              NewVoters = Voters -- Peers,
+              NewReplicas = lists:usort(Replicas ++ Peers),
+              {NewVoters, NewReplicas}
+      end, Timeout).
+
+get_peers() ->
+    get_peers(?DEFAULT_TIMEOUT).
+
+get_peers(Timeout) ->
+    get_config(Timeout,
+               fun (Config, _ConfigRevision) ->
+                       {ok, #{voters => Config#config.voters,
+                              replicas => Config#config.replicas}}
+               end).
 
 get_voters() ->
     get_voters(?DEFAULT_TIMEOUT).
 
 get_voters(Timeout) ->
-    case get_config(Timeout) of
-        {ok, Config, _} ->
-            {ok, Config#config.voters};
-        Error ->
+    get_config(Timeout,
+               fun (Config, _ConfigRevision) ->
+                       {ok, Config#config.voters}
+               end).
+
+get_replicas() ->
+    get_replicas(?DEFAULT_TIMEOUT).
+
+get_replicas(Timeout) ->
+    get_config(Timeout,
+               fun (Config, _ConfigRevision) ->
+                       {ok, Config#config.replicas}
+               end).
+
+get_config(Timeout, Fun) ->
+    with_leader(Timeout,
+                fun (TRef, Leader, _LeaderInfo) ->
+                        get_config(Leader, TRef, Fun)
+                end).
+
+get_config(Leader, TRef, Fun) ->
+    case chronicle_server:get_config(Leader, TRef) of
+        {ok, Config, ConfigRevision} ->
+            Fun(Config, ConfigRevision);
+        {error, _} = Error ->
             Error
     end.
 
-get_config(Timeout) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        get_config(Leader, TRef)
-                end).
-
-get_config(Leader, TRef) ->
-    chronicle_server:get_config(Leader, TRef).
-
-update_voters(Fun, Timeout) ->
+update_peers(Fun, Timeout) ->
     update_config(
-      fun (#config{voters = Voters} = Config) ->
-              NewVoters = Fun(Voters),
-              Config#config{voters = lists:usort(NewVoters)}
+      fun (#config{voters = Voters, replicas = Replicas} = Config) ->
+              {NewVoters, NewReplicas} = Fun(Voters, Replicas),
+
+              NewVoters = (NewVoters -- NewReplicas),
+              NewReplicas = (NewReplicas -- NewVoters),
+
+              Config#config{voters = NewVoters, replicas = NewReplicas}
       end, Timeout).
 
 update_config(Fun, Timeout) ->
@@ -98,20 +164,30 @@ update_config(Fun, Timeout) ->
                 end).
 
 update_config_loop(Fun, Leader, TRef) ->
-    case get_config(Leader, TRef) of
-        {ok, Config, ConfigRevision} ->
-            NewConfig = Fun(Config),
-            case cas_config(Leader, NewConfig, ConfigRevision, TRef) of
-                {ok, _} ->
-                    ok;
-                {error, {cas_failed, _}} ->
-                    update_config_loop(Fun, Leader, TRef);
-                {error, _} = Error ->
-                    Error
-            end;
-        {error, _} = Error ->
-            Error
-    end.
+    get_config(
+      Leader, TRef,
+      fun (Config, ConfigRevision) ->
+              NewConfig = Fun(Config),
+              case cas_config(Leader, NewConfig, ConfigRevision, TRef) of
+                  {ok, _} ->
+                      ok;
+                  {error, {cas_failed, _}} ->
+                      update_config_loop(Fun, Leader, TRef);
+                  {error, _} = Error ->
+                      Error
+              end
+      end).
 
 cas_config(Leader, NewConfig, CasRevision, TRef) ->
     chronicle_server:cas_config(Leader, NewConfig, CasRevision, TRef).
+
+validate_peers(Peers) ->
+    lists:foreach(
+      fun (Peer) ->
+              case is_atom(Peer) of
+                  true ->
+                      ok;
+                  false ->
+                      error(badarg)
+              end
+      end, Peers).

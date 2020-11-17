@@ -259,7 +259,7 @@ remove_nodes(Nodes) ->
     ToRemove = [N || N <- Nodes, lists:member(N, Vs)],
     case ToRemove of
         Nodes ->
-            Result = chronicle:remove_voters(Nodes),
+            Result = chronicle:remove_peers(Nodes),
             ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
             Message = case Result of
                           ok ->
