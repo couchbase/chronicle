@@ -484,7 +484,7 @@ handle_common_error(Peer, Error,
             ignored
     end.
 
-establish_term_handle_vote(Peer, Status, proposing, Data) ->
+establish_term_handle_vote(_Peer, Status, proposing, Data) ->
     case Status of
         {ok, _} ->
             {keep_state, replicate(Data)};
@@ -492,8 +492,8 @@ establish_term_handle_vote(Peer, Status, proposing, Data) ->
             %% This is not exactly clean. But the intention is the
             %% following. We got some error that we chose to ignore. But since
             %% we are already proposing, we need to know this peer's
-            %% position. And that's what it does.
-            {keep_state, check_peers(demonitor_agents([Peer], Data))}
+            %% position.
+            {keep_state, check_peers(Data)}
     end;
 establish_term_handle_vote(Peer, Status, establish_term = State,
                            #data{high_seqno = HighSeqno,
@@ -518,12 +518,7 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                 Data#data{votes = [Peer | Votes],
                           committed_seqno = NewCommittedSeqno};
             failed ->
-                %% Demonitor the peer so we recheck on it once and if we
-                %% successfully establish the term.
-                %%
-                %% TODO: consider replacing it with something cleaner
-                demonitor_agents([Peer],
-                                 Data#data{failed_votes = [Peer | FailedVotes]})
+                Data#data{failed_votes = [Peer | FailedVotes]}
         end,
 
     establish_term_maybe_transition(State, NewData).
