@@ -484,7 +484,7 @@ handle_common_error(Peer, Error,
             ignored
     end.
 
-establish_term_handle_vote(_Peer, Status, proposing, Data) ->
+establish_term_handle_vote(Peer, Status, proposing, Data) ->
     case Status of
         {ok, _} ->
             {keep_state, replicate(Data)};
@@ -493,7 +493,7 @@ establish_term_handle_vote(_Peer, Status, proposing, Data) ->
             %% following. We got some error that we chose to ignore. But since
             %% we are already proposing, we need to know this peer's
             %% position.
-            {keep_state, check_peers(Data)}
+            {keep_state, send_request_peer_position(Peer, Data)}
     end;
 establish_term_handle_vote(Peer, Status, establish_term = State,
                            #data{high_seqno = HighSeqno,
@@ -1204,7 +1204,7 @@ handle_removed_peers(Peers, Data) ->
     demonitor_agents(Peers, Data).
 
 handle_added_peers(Peers, Data) ->
-    NewData = check_peers(Data),
+    NewData = send_request_position(Peers, Data),
     sync_quorum_on_config_update(Peers, NewData).
 
 log_entry_revision(#log_entry{history_id = HistoryId,
