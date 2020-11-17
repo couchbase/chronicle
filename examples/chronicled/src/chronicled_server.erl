@@ -122,12 +122,10 @@ json_api(Req, #state{domain=kv, op=put}=State) ->
     {Result, Req1, State}.
 
 config_api(Req, #state{domain=config, op=info}) ->
-    {ok, Vs} = chronicle:get_voters(),
-    Voters = [atom_to_binary(V, utf8) || V <- Vs],
-    R = {[{<<"voters">>, Voters}]},
+    {ok, Peers} = chronicle:get_peers(),
     cowboy_req:reply(200, #{
                        <<"content-type">> => <<"application/json">>
-                      }, jiffy:encode(R), Req);
+                      }, jiffy:encode(Peers), Req);
 config_api(Req, #state{domain=config, op=addnode}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
     ?LOG_DEBUG("read content: ~p", [Body]),
