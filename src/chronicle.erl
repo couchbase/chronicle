@@ -154,7 +154,14 @@ update_peers(Fun, Timeout) ->
               NewVoters = (NewVoters -- NewReplicas),
               NewReplicas = (NewReplicas -- NewVoters),
 
-              Config#config{voters = NewVoters, replicas = NewReplicas}
+              case NewVoters of
+                  [] ->
+                      {stop, {error, no_voters_left}};
+                  _ ->
+                      NewConfig = Config#config{voters = NewVoters,
+                                                replicas = NewReplicas},
+                      {ok, NewConfig}
+              end
       end, Timeout).
 
 update_config(Fun, Timeout) ->
@@ -167,14 +174,19 @@ update_config_loop(Fun, Leader, TRef) ->
     get_config(
       Leader, TRef,
       fun (Config, ConfigRevision) ->
-              NewConfig = Fun(Config),
-              case cas_config(Leader, NewConfig, ConfigRevision, TRef) of
-                  {ok, _} ->
-                      ok;
-                  {error, {cas_failed, _}} ->
-                      update_config_loop(Fun, Leader, TRef);
-                  {error, _} = Error ->
-                      Error
+              case Fun(Config) of
+                  {ok, NewConfig} ->
+                      case cas_config(Leader, NewConfig,
+                                      ConfigRevision, TRef) of
+                          {ok, _} ->
+                              ok;
+                          {error, {cas_failed, _}} ->
+                              update_config_loop(Fun, Leader, TRef);
+                          {error, _} = Error ->
+                              Error
+                      end;
+                  {stop, Return} ->
+                      Return
               end
       end).
 
