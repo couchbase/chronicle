@@ -49,7 +49,11 @@ get_options() ->
                   {"/config/info", ?MODULE, #state{domain=config,
                                                    op=info}},
                   {"/config/addnode", ?MODULE, #state{domain=config,
-                                                      op=addnode}},
+                                                      op={addnode, voter}}},
+                  {"/config/addvoter", ?MODULE, #state{domain=config,
+                                                       op={addnode, voter}}},
+                  {"/config/addreplica", ?MODULE,
+                   #state{domain=config, op={addnode, replica}}},
                   {"/config/removenode", ?MODULE, #state{domain=config,
                                                          op=removenode}},
                   {"/config/provision", ?MODULE, #state{domain=config,
@@ -126,12 +130,12 @@ config_api(Req, #state{domain=config, op=info}) ->
     cowboy_req:reply(200, #{
                        <<"content-type">> => <<"application/json">>
                       }, jiffy:encode(Peers), Req);
-config_api(Req, #state{domain=config, op=addnode}) ->
+config_api(Req, #state{domain=config, op={addnode, Type}}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
     ?LOG_DEBUG("read content: ~p", [Body]),
     {Result, Message} = case parse_nodes(Body) of
                             Nodes when is_list(Nodes) ->
-                                add_nodes(Nodes);
+                                add_nodes(Nodes, Type);
                             {error, Msg} ->
                                 {false, Msg}
                         end,
@@ -228,9 +232,9 @@ parse_nodes(Body) ->
             {error, "body not json"}
     end.
 
-add_nodes(Nodes) ->
-    {ok, Vs} = chronicle:get_voters(),
-    ToAdd = [N || N <- Nodes, not(lists:member(N, Vs))],
+add_nodes(Nodes, Type) ->
+    CurrentNodes = get_nodes_of_type(Type),
+    ToAdd = [N || N <- Nodes, not(lists:member(N, CurrentNodes))],
     case ToAdd of
         [] ->
             {false, <<"nodes already added">>};
@@ -238,8 +242,8 @@ add_nodes(Nodes) ->
             case [N || N <- ToAdd, net_kernel:connect_node(N) =:= false] of
                 [] ->
                     ?LOG_DEBUG("nodes ~p", [nodes()]),
-                    Result = chronicle:add_voters(ToAdd),
-                    ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
+                    Result = do_add_nodes(ToAdd, Type),
+                    ?LOG_DEBUG("Result of ~p addition: ~p", [Type, Result]),
                     case Result of
                         ok ->
                             {true, <<"nodes added">>};
@@ -253,8 +257,8 @@ add_nodes(Nodes) ->
     end.
 
 remove_nodes(Nodes) ->
-    {ok, Vs} = chronicle:get_voters(),
-    ToRemove = [N || N <- Nodes, lists:member(N, Vs)],
+    PresentNodes = get_present_nodes(),
+    ToRemove = [N || N <- Nodes, lists:member(N, PresentNodes)],
     case ToRemove of
         Nodes ->
             Result = chronicle:remove_peers(Nodes),
@@ -268,4 +272,27 @@ remove_nodes(Nodes) ->
             {Result, Message};
         _ ->
             {false, <<"some nodes not part of cluster">>}
+    end.
+
+get_present_nodes() ->
+    {ok, #{voters := Voters, replicas := Replicas}} = chronicle:get_peers(),
+    Voters ++ Replicas.
+
+get_nodes_of_type(Type) ->
+    {ok, Nodes} =
+        case Type of
+            voter ->
+                chronicle:get_voters();
+            replica ->
+                chronicle:get_replicas()
+        end,
+
+    Nodes.
+
+do_add_nodes(Nodes, Type) ->
+    case Type of
+        voter ->
+            chronicle:add_voters(Nodes);
+        replica ->
+            chronicle:add_replicas(Nodes)
     end.
