@@ -175,6 +175,8 @@ update_config_loop(Fun, Leader, TRef) ->
       Leader, TRef,
       fun (Config, ConfigRevision) ->
               case Fun(Config) of
+                  {ok, NewConfig} when Config =:= NewConfig ->
+                      ok;
                   {ok, NewConfig} ->
                       case cas_config(Leader, NewConfig,
                                       ConfigRevision, TRef) of
