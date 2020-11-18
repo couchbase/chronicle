@@ -533,7 +533,7 @@ get_vnode_dir() ->
 prepare_vnode_dir() ->
     Dir = get_vnode_dir(),
     ok = chronicle_utils:delete_recursive(Dir),
-    chronicle_utils:mkdir_p(Dir),
+    ok = chronicle_utils:mkdir_p(Dir),
     chronicle_env:set_env(data_dir, Dir).
 
 teardown_vnet(_) ->
@@ -787,8 +787,9 @@ partition_test__() ->
                           %% leader.
                           case chronicle_leader:get_leader() of
                               {a, Incarnation} ->
-                                  chronicle_leader:wait_for_leader(Incarnation,
-                                                                   1000);
+                                  {_, _} = chronicle_leader:wait_for_leader(
+                                             Incarnation, 1000),
+                                  ok;
                               _ ->
                                   ok
                           end,
