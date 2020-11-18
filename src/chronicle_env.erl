@@ -87,10 +87,13 @@ get_env(Parameter) ->
 
 -else.
 
+peer_param(Parameter) ->
+    list_to_atom(atom_to_list(?PEER()) ++ "-" ++ atom_to_list(Parameter)).
+
 get_env(Parameter) ->
-    application:get_env(chronicle, {?PEER(), Parameter}).
+    application:get_env(chronicle, peer_param(Parameter)).
 
 set_env(Parameter, Value) ->
-    application:set_env(chronicle, {?PEER(), Parameter}, Value).
+    application:set_env(chronicle, peer_param(Parameter), Value).
 
 -endif.
