@@ -751,7 +751,7 @@ send_msg_to_peers(Msg, #data{peers = Peers}) ->
       end, Peers).
 
 send_msg(Peer, Msg) ->
-    ?SEND(?SERVER(Peer), Msg, [nosuspend, noconnect]).
+    ?SEND(?SERVER(Peer), Msg, [nosuspend]).
 
 handle_announce_leader_status(State, _Data) ->
     Status =
