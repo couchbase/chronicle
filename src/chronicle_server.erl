@@ -20,7 +20,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call/3, call_async/2]).
+-import(chronicle_utils, [call/3]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

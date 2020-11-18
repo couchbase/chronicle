@@ -187,10 +187,6 @@ with_trap_exit_maybe_exit() ->
 next_term({TermNo, _}, Peer) ->
     {TermNo + 1, Peer}.
 
-call_async(ServerRef, Request) ->
-    Ref = make_ref(),
-    call_async(ServerRef, Ref, Request).
-
 call_async(ServerRef, Tag, Request) ->
     %% TODO: consider setting noconnect
     ?SEND(ServerRef, {'$gen_call', {self(), Tag}, Request}),
