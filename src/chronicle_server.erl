@@ -532,13 +532,7 @@ get_vnode_dir() ->
 
 prepare_vnode_dir() ->
     Dir = get_vnode_dir(),
-    case chronicle_utils:delete_recursive(Dir) of
-        ok ->
-            ok;
-        {error, enoent} ->
-            ok
-    end,
-
+    ok = chronicle_utils:delete_recursive(Dir),
     chronicle_utils:mkdir_p(Dir),
     chronicle_env:set_env(data_dir, Dir).
 
