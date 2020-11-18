@@ -555,7 +555,7 @@ simple_test__(Nodes) ->
     ok = rpc_node(a,
                   fun () ->
                           ok = chronicle:add_voters(Nodes),
-                          ok = chronicle:remove_voters([d]),
+                          ok = chronicle:remove_peer(d),
                           {ok, Voters} = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
 
@@ -684,7 +684,7 @@ leader_transfer_test__(Nodes) ->
            fun () ->
                    RPid =
                        spawn_link(fun () ->
-                                          ok = chronicle:remove_voters([Leader])
+                                          ok = chronicle:remove_peer(Leader)
                                   end),
 
                    Pids =
