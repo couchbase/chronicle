@@ -23,7 +23,7 @@
 -endif.
 
 -compile(export_all).
--export_type([batch/0]).
+-export_type([batch/0, send_options/0, send_result/0]).
 
 -ifdef(HAVE_SYNC_DIR).
 -on_load(init_sync_nif/0).
@@ -187,10 +187,15 @@ with_trap_exit_maybe_exit() ->
 next_term({TermNo, _}, Peer) ->
     {TermNo + 1, Peer}.
 
-call_async(ServerRef, Tag, Request) ->
-    %% TODO: consider setting noconnect
-    ?SEND(ServerRef, {'$gen_call', {self(), Tag}, Request}),
-    Tag.
+-type send_options() :: [nosuspend | noconnect].
+-type send_result() :: ok | nosuspend | noconnect.
+
+-spec call_async(ServerRef :: any(),
+                 Tag :: any(),
+                 Request :: any(),
+                 send_options()) -> send_result().
+call_async(ServerRef, Tag, Request, Options) ->
+    ?SEND(ServerRef, {'$gen_call', {self(), Tag}, Request}, Options).
 
 call(ServerRef, Call) ->
     call(ServerRef, Call, 5000).

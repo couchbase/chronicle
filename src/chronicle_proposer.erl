@@ -1392,7 +1392,7 @@ send_establish_term(Peers, Metadata,
                      [Peer, Term, HistoryId, Position]),
 
               chronicle_agent:establish_term(Peer, Opaque,
-                                             HistoryId, Term, Position)
+                                             HistoryId, Term, Position, [])
       end).
 
 replicate_to_peers(PeerSeqnos0, Data) ->
@@ -1428,7 +1428,7 @@ send_append(Peers, PeerSeqnos,
 
                       chronicle_agent:append(Peer, Opaque,
                                              HistoryId, Term, CommittedSeqno,
-                                             PeerSeqno, Entries),
+                                             PeerSeqno, Entries, []),
                       true;
                   need_catchup ->
                       false
@@ -1494,7 +1494,7 @@ send_ensure_term(Peers, Request,
     send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
-              chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term)
+              chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term, [])
       end).
 
 send_request_peer_position(Peer, Data) ->

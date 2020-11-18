@@ -25,7 +25,7 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call_async/3,
+-import(chronicle_utils, [call_async/4,
                           config_peers/1,
                           next_term/2,
                           term_number/1,
@@ -56,7 +56,7 @@
 %% back to the caller when the result is ready. And the result type is
 %% _ReplyType. This is entirely useless for dializer, but is usefull for
 %% documentation purposes.
--type replies(Tag, _ReplyType) :: Tag.
+-type maybe_replies(_Tag, _ReplyType) :: chronicle_utils:send_result().
 -type peer() :: ?SELF_PEER | chronicle:peer().
 
 -record(snapshot_state, { tref,
@@ -255,12 +255,14 @@ establish_local_term(HistoryId, Term) ->
                      Opaque,
                      chronicle:history_id(),
                      chronicle:leader_term(),
-                     chronicle:peer_position()) ->
-          replies(Opaque, establish_term_result()).
-establish_term(Peer, Opaque, HistoryId, Term, Position) ->
+                     chronicle:peer_position(),
+                     chronicle_utils:send_options()) ->
+          maybe_replies(Opaque, establish_term_result()).
+establish_term(Peer, Opaque, HistoryId, Term, Position, Options) ->
     %% TODO: don't abuse gen_server calls here and everywhere else
     call_async(?SERVER(Peer), Opaque,
-               {establish_term, HistoryId, Term, Position}).
+               {establish_term, HistoryId, Term, Position},
+               Options).
 
 -type ensure_term_result() ::
         {ok, #metadata{}} |
@@ -273,10 +275,13 @@ establish_term(Peer, Opaque, HistoryId, Term, Position) ->
 -spec ensure_term(peer(),
                   Opaque,
                   chronicle:history_id(),
-                  chronicle:leader_term()) ->
-          replies(Opaque, ensure_term_result()).
-ensure_term(Peer, Opaque, HistoryId, Term) ->
-    call_async(?SERVER(Peer), Opaque, {ensure_term, HistoryId, Term}).
+                  chronicle:leader_term(),
+                  chronicle_utils:send_options()) ->
+          maybe_replies(Opaque, ensure_term_result()).
+ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
+    call_async(?SERVER(Peer), Opaque,
+               {ensure_term, HistoryId, Term},
+               Options).
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
@@ -291,11 +296,14 @@ ensure_term(Peer, Opaque, HistoryId, Term) ->
              chronicle:leader_term(),
              chronicle:seqno(),
              chronicle:seqno(),
-             [#log_entry{}]) ->
-          replies(Opaque, append_result()).
-append(Peer, Opaque, HistoryId, Term, CommittedSeqno, AtSeqno, Entries) ->
+             [#log_entry{}],
+             chronicle_utils:send_options()) ->
+          maybe_replies(Opaque, append_result()).
+append(Peer, Opaque, HistoryId, Term,
+       CommittedSeqno, AtSeqno, Entries, Options) ->
     call_async(?SERVER(Peer), Opaque,
-               {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries}).
+               {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
+               Options).
 
 install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
     gen_server:call(?SERVER(Peer),
