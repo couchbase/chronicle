@@ -48,8 +48,8 @@ handle_call(get_live_peers, _From, State) ->
     NewState = refresh(State),
     {reply, NewState#state.vnodes, NewState}.
 
-handle_cast(Cast, _State) ->
-    {stop, {unexpected_cast, Cast}}.
+handle_cast(Cast, State) ->
+    {stop, {unexpected_cast, Cast}, State}.
 
 handle_info(refresh, State) ->
     {noreply, refresh(State)};
