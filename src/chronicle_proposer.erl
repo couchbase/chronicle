@@ -1761,6 +1761,9 @@ get_live_peers(Peers) ->
 
 config_needs_transition(#config{voters = NewVoters},
                         #config{voters = OldVoters}) ->
+    do_config_needs_transition(NewVoters, OldVoters).
+
+do_config_needs_transition(NewVoters, OldVoters) ->
     Added = NewVoters -- OldVoters,
     Removed = OldVoters -- NewVoters,
     NumChanges = length(Added) + length(Removed),
@@ -1773,21 +1776,15 @@ config_needs_transition(#config{voters = NewVoters},
 -ifdef(TEST).
 config_needs_transition_test() ->
     ?assertEqual(false,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [a, b, c, d]})),
+                 do_config_needs_transition([a, b, c], [a, b, c, d])),
     ?assertEqual(false,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [a, b]})),
+                 do_config_needs_transition([a, b, c], [a, b])),
     ?assertEqual(false,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [c, a, d, b]})),
+                 do_config_needs_transition([a, b, c], [c, a, d, b])),
     ?assertEqual(true,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [a, b, c, d, e]})),
+                 do_config_needs_transition([a, b, c], [a, b, c, d, e])),
     ?assertEqual(true,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [a, b, d]})),
+                 do_config_needs_transition([a, b, c], [a, b, d])),
     ?assertEqual(true,
-                 config_needs_transition(#config{voters = [a, b, c]},
-                                         #config{voters = [c, a, e, d, b]})).
+                 do_config_needs_transition([a, b, c], [c, a, e, d, b])).
 -endif.
