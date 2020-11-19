@@ -30,6 +30,7 @@
                           have_quorum/2,
                           parallel_mapfold/4,
                           read_timeout/1,
+                          send/3,
                           term_number/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
@@ -751,7 +752,7 @@ send_msg_to_peers(Msg, #data{peers = Peers}) ->
       end, Peers).
 
 send_msg(Peer, Msg) ->
-    ?SEND(?SERVER(Peer), Msg, [nosuspend]).
+    send(?SERVER(Peer), Msg, [nosuspend]).
 
 handle_announce_leader_status(State, _Data) ->
     Status =

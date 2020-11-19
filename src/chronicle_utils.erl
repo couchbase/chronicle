@@ -195,7 +195,34 @@ next_term({TermNo, _}, Peer) ->
                  Request :: any(),
                  send_options()) -> send_result().
 call_async(ServerRef, Tag, Request, Options) ->
-    ?SEND(ServerRef, {'$gen_call', {self(), Tag}, Request}, Options).
+    send(ServerRef, {'$gen_call', {self(), Tag}, Request}, Options).
+
+-spec send(any(), any(), send_options()) -> send_result().
+-ifdef(TEST).
+send(Name, Msg, Options) ->
+    {via, vnet, _} = Name,
+    try
+        vnet:send(element(3, Name), Msg),
+        ok
+    catch
+        exit:{badarg, {_, _}} ->
+            %% vnet:send() may fail with this error when Name can't be
+            %% resolved. This is different from how erlang:send/3 behaves, so
+            %% we are just catching the error.
+
+            %% Force dialyzer to believe that nosuspend and noconnect
+            %% are valid return values.
+            case Options of
+                [] ->
+                    ok;
+                [Other|_]->
+                    Other
+            end
+    end.
+-else.
+send(Name, Msg, Options) ->
+    erlang:send(Name, Msg, Options).
+-endif.
 
 call(ServerRef, Call) ->
     call(ServerRef, Call, 5000).
