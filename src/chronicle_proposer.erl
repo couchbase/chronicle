@@ -500,6 +500,9 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                                  committed_seqno = OurCommittedSeqno,
                                  votes = Votes,
                                  failed_votes = FailedVotes} = Data) ->
+    false = lists:member(Peer, Votes),
+    false = lists:member(Peer, FailedVotes),
+
     NewData =
         case Status of
             {ok, CommittedSeqno} ->
@@ -1030,10 +1033,26 @@ handle_down(MRef, Pid, Reason, State, Data) ->
 
             case State of
                 establish_term ->
-                    establish_term_handle_vote(Peer, failed, State, NewData);
+                    handle_down_establish_term(Peer, State, NewData);
                 proposing ->
                     {keep_state, NewData}
             end
+    end.
+
+handle_down_establish_term(Peer,
+                           establish_term = State,
+                           #data{votes = Votes,
+                                 failed_votes = FailedVotes} = Data) ->
+    %% We might have already gotten a response from this peer before it went
+    %% down.
+    HasVoted = lists:member(Peer, Votes)
+        orelse lists:member(Peer, FailedVotes),
+
+    case HasVoted of
+        true ->
+            {keep_state, Data};
+        false ->
+            establish_term_handle_vote(Peer, failed, State, Data)
     end.
 
 handle_append_commands(Commands, {stopped, _}, _Data) ->
