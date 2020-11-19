@@ -298,13 +298,10 @@ establish_term_init(Metadata,
     QuorumPeers = get_quorum_peers(Quorum),
     AllPeers = require_self_peer(get_all_peers(Metadata)),
 
-    LiveQuorumPeers = get_live_peers(QuorumPeers),
-    DeadQuorumPeers = QuorumPeers -- LiveQuorumPeers,
-
     ?DEBUG("Going to establish term ~p (history id ~p).~n"
            "Metadata:~n~p~n"
-           "Live quorum peers:~n~p",
-           [Term, HistoryId, Metadata, LiveQuorumPeers]),
+           "Quorum peers:~n~p",
+           [Term, HistoryId, Metadata, QuorumPeers]),
 
     #metadata{config = Config,
               config_revision = ConfigRevision,
@@ -312,29 +309,38 @@ establish_term_init(Metadata,
               committed_seqno = CommittedSeqno,
               pending_branch = PendingBranch} = Metadata,
 
-    case is_quorum_feasible(QuorumPeers, DeadQuorumPeers, Quorum) of
-        true ->
-            OtherQuorumPeers = LiveQuorumPeers -- [?SELF_PEER],
+    OtherQuorumPeers = QuorumPeers -- [?SELF_PEER],
 
-            %% Send a fake response to update our state with the
-            %% knowledge that we've established the term
-            %% locally. Initally, I wasn't planning to use such
-            %% somewhat questionable approach and instead would update
-            %% the state here. But if our local peer is the only peer,
-            %% then we need to transition to propsing state
-            %% immediately. But brain-dead gen_statem won't let you
-            %% transition to a different state from a state_enter
-            %% callback. So here we are.
-            NewData0 = send_local_establish_term(Metadata, Data),
-            NewData1 = send_establish_term(OtherQuorumPeers,
-                                           Metadata, NewData0),
+    %% Send a fake response to update our state with the knowledge that we've
+    %% established the term locally. Initally, I wasn't planning to use such
+    %% somewhat questionable approach and instead would update the state
+    %% here. But if our local peer is the only peer, then we need to
+    %% transition to propsing state immediately. But brain-dead gen_statem
+    %% won't let you transition to a different state from a state_enter
+    %% callback. So here we are.
+    NewData0 = send_local_establish_term(Metadata, Data),
+    {NewData1, BusyPeers} = send_establish_term(OtherQuorumPeers,
+                                                Metadata, NewData0),
+
+    case BusyPeers of
+        [] ->
+            ok;
+        _ ->
+            ?WARNING("Couldn't establish term on some peers due "
+                     "to distribution connection being busy.~n"
+                     "Peers:~n~p",
+                     [BusyPeers])
+    end,
+
+    case is_quorum_feasible(QuorumPeers, BusyPeers, Quorum) of
+        true ->
             NewData = NewData1#data{peer = Self,
                                     peers = AllPeers,
                                     quorum_peers = QuorumPeers,
                                     quorum = Quorum,
                                     machines = config_machines(Config),
                                     votes = [],
-                                    failed_votes = DeadQuorumPeers,
+                                    failed_votes = BusyPeers,
                                     config = Config,
                                     config_revision = ConfigRevision,
                                     high_seqno = HighSeqno,
@@ -349,12 +355,12 @@ establish_term_init(Metadata,
             %% This should be a rare situation. That's because to be
             %% elected a leader we need to get a quorum of votes. So
             %% at least a quorum of nodes should be alive.
-            ?WARNING("Can't establish term ~p, history id ~p.~n"
-                     "Not enough peers are alive to achieve quorum.~n"
-                     "Quorum peers: ~p~n"
-                     "Live quorum peers: ~p~n"
-                     "Quorum: ~p",
-                     [Term, HistoryId, QuorumPeers, LiveQuorumPeers, Quorum]),
+            ?WARNING("Can't establish term ~p, history id ~p. "
+                     "Too many busy peers.~n"
+                     "Quorum peers:~n~p~n"
+                     "Busy peers:~n~p~n"
+                     "Quorum:~n~p",
+                     [Term, HistoryId, QuorumPeers, BusyPeers, Quorum]),
             {stop, {error, no_quorum}}
     end.
 
@@ -1267,6 +1273,9 @@ update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     ets:insert(Tab, {Peer, Fun(PeerStatus)}).
 
+mark_peer_status_requested(Peer, Data) ->
+    mark_status_requested([Peer], Data).
+
 mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
     true = ets:insert_new(Tab, [{Peer, requested} || Peer <- Peers]).
 
@@ -1399,10 +1408,9 @@ send_local_establish_term(Metadata,
 
 send_establish_term(Peers, Metadata,
                     #data{history_id = HistoryId, term = Term} = Data) ->
-    mark_status_requested(Peers, Data),
     Position = get_position(Metadata),
     Request = {establish_term, HistoryId, Term, Position},
-    send_requests(
+    maybe_send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
               ?DEBUG("Sending establish_term request to peer ~p. "
@@ -1410,8 +1418,15 @@ send_establish_term(Peers, Metadata,
                      "Log position: ~p.",
                      [Peer, Term, HistoryId, Position]),
 
-              chronicle_agent:establish_term(Peer, Opaque,
-                                             HistoryId, Term, Position, [])
+              case chronicle_agent:establish_term(Peer, Opaque,
+                                                  HistoryId, Term, Position,
+                                                  [nosuspend]) of
+                  ok ->
+                      mark_peer_status_requested(Peer, Data),
+                      true;
+                  nosuspend ->
+                      false
+              end
       end).
 
 replicate_to_peers(PeerSeqnos0, Data) ->
