@@ -1041,6 +1041,7 @@ handle_down(MRef, Pid, Reason, State, Data) ->
                 establish_term ->
                     handle_down_establish_term(Peer, State, NewData);
                 proposing ->
+                    sync_quorum_handle_peer_down(Peer, NewData),
                     {keep_state, NewData}
             end
     end.
