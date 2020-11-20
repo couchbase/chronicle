@@ -361,7 +361,6 @@ handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
     {stop, establish_term_timeout}.
 
 check_peers(#data{peers = Peers} = Data) ->
-    LivePeers = get_live_peers(Peers),
     PeersToCheck =
         lists:filter(
           fun (Peer) ->
@@ -371,7 +370,7 @@ check_peers(#data{peers = Peers} = Data) ->
                       not_found ->
                           true
                   end
-          end, LivePeers),
+          end, Peers),
 
     erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
     send_request_position(PeersToCheck, Data).
