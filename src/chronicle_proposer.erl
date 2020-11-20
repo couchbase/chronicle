@@ -321,16 +321,7 @@ establish_term_init(Metadata,
     NewData0 = send_local_establish_term(Metadata, Data),
     {NewData1, BusyPeers} = send_establish_term(OtherQuorumPeers,
                                                 Metadata, NewData0),
-
-    case BusyPeers of
-        [] ->
-            ok;
-        _ ->
-            ?WARNING("Couldn't establish term on some peers due "
-                     "to distribution connection being busy.~n"
-                     "Peers:~n~p",
-                     [BusyPeers])
-    end,
+    log_busy_peers(establish_term, BusyPeers),
 
     case is_quorum_feasible(QuorumPeers, BusyPeers, Quorum) of
         true ->
@@ -1524,20 +1515,46 @@ get_local_committed_seqno(Data) ->
 get_local_log(StartSeqno, EndSeqno) ->
     chronicle_agent:get_log_committed(StartSeqno, EndSeqno).
 
-send_ensure_term(Peers, Request,
-                 #data{history_id = HistoryId, term = Term} = Data) ->
-    send_requests(
+send_ensure_term(Peers, Request, Data) ->
+    {NewData, []} = do_send_ensure_term(Peers, Request, [], Data),
+    NewData.
+
+maybe_send_ensure_term(Peers, Request, Data) ->
+    do_send_ensure_term(Peers, Request, [nosuspend], Data).
+
+do_send_ensure_term(Peers, Request, Options,
+                    #data{history_id = HistoryId, term = Term} = Data) ->
+    maybe_send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
-              chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term, [])
+              case chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term,
+                                               Options) of
+                  ok ->
+                      true;
+                  nosuspend ->
+                      false
+              end
       end).
 
 send_request_peer_position(Peer, Data) ->
     send_request_position([Peer], Data).
 
 send_request_position(Peers, Data) ->
-    mark_status_requested(Peers, Data),
-    send_ensure_term(Peers, peer_position, Data).
+    {NewData, BusyPeers} = maybe_send_ensure_term(Peers, peer_position, Data),
+    mark_status_requested(Peers -- BusyPeers, NewData),
+    log_busy_peers(request_position, BusyPeers),
+    NewData.
+
+log_busy_peers(Op, BusyPeers) ->
+    case BusyPeers of
+        [] ->
+            ok;
+        _ ->
+            ?WARNING("Dind't send ~p request to some peers due "
+                     "to distribution connection being busy.~n"
+                     "Peers:~n~p",
+                     [Op, BusyPeers])
+    end.
 
 reply_request(ReplyTo, Reply) ->
     chronicle_server:reply_request(ReplyTo, Reply).
