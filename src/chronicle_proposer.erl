@@ -645,15 +645,25 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
             stop({unexpected_error, Peer, Error}, State, Data)
     end.
 
-handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
-                 proposing = State,
-                 #data{committed_seqno = CommittedSeqno} = Data) ->
+handle_append_ok(Peer, PeerHighSeqno,
+                 PeerCommittedSeqno, proposing = State, Data) ->
     ?DEBUG("Append ok on peer ~p.~n"
            "High Seqno: ~p~n"
            "Committed Seqno: ~p",
            [Peer, PeerHighSeqno, PeerCommittedSeqno]),
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
 
+    case check_committed_seqno_advanced(Data) of
+        {ok, NewData, Effects} ->
+            {keep_state, NewData, Effects};
+        {stop, Reason, NewData} ->
+            stop(Reason, State, NewData);
+        no_change ->
+            {keep_state, Data}
+    end.
+
+check_committed_seqno_advanced(#data{committed_seqno =
+                                         CommittedSeqno} = Data) ->
     NewCommittedSeqno = deduce_committed_seqno(Data),
     case NewCommittedSeqno > CommittedSeqno of
         true ->
@@ -665,9 +675,9 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
 
             case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
-                    {keep_state, replicate(NewData), Effects};
-                {stop, Reason, NewData} ->
-                    stop(Reason, State, NewData)
+                    {ok, replicate(NewData), Effects};
+                {stop, _Reason, _NewData} = Stop ->
+                    Stop
             end;
         false ->
             %% Note, that it's possible for the deduced committed seqno to go
@@ -683,7 +693,7 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
             %% topology, what was committed in the old topooogy, might not yet
             %% have a quorum in the new topology. In such case the deduced
             %% committed sequence number will be ?NO_SEQNO.
-            {keep_state, Data}
+            no_change
     end.
 
 handle_peer_position_result(Peer, Result, proposing = State, Data) ->
