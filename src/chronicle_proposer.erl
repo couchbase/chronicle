@@ -654,9 +654,9 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
            [Peer, PeerHighSeqno, PeerCommittedSeqno]),
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
 
-    case deduce_committed_seqno(Data) of
-        {ok, NewCommittedSeqno}
-          when NewCommittedSeqno > CommittedSeqno ->
+    NewCommittedSeqno = deduce_committed_seqno(Data),
+    case NewCommittedSeqno > CommittedSeqno of
+        true ->
             ?DEBUG("Committed seqno advanced.~n"
                    "New committed seqno: ~p~n"
                    "Old committed seqno: ~p",
@@ -669,7 +669,7 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
                 {stop, Reason, NewData} ->
                     stop(Reason, State, NewData)
             end;
-        {ok, _NewCommittedSeqno} ->
+        false ->
             %% Note, that it's possible for the deduced committed seqno to go
             %% backwards with respect to our own committed seqno here. This
             %% may happen for multiple reasons. The simplest scenario is where
@@ -677,12 +677,12 @@ handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno,
             %% erased. If the previous committed seqno was acknowledged only
             %% by a minimal majority of nodes, any of them going down will
             %% result in the deduced seqno going backwards.
-            {keep_state, Data};
-        no_quorum ->
-            %% This case is possible because deduce_committed_seqno/1 always
-            %% uses the most up-to-date config. So what was committed in the
-            %% old config, might not yet have a quorum in the current
-            %% configuration.
+            %%
+            %% Another possibility is when a new topology is adopted. Since
+            %% deduce_committed_seqno/1 always uses the most up-to-date
+            %% topology, what was committed in the old topooogy, might not yet
+            %% have a quorum in the new topology. In such case the deduced
+            %% committed sequence number will be ?NO_SEQNO.
             {keep_state, Data}
     end.
 
@@ -1638,8 +1638,7 @@ deduce_committed_seqno(#data{quorum_peers = Peers,
         lists:filtermap(
           fun (Peer) ->
                   case get_peer_status(Peer, Data) of
-                      {ok, #peer_status{acked_seqno = AckedSeqno}}
-                        when AckedSeqno =/= ?NO_SEQNO ->
+                      {ok, #peer_status{acked_seqno = AckedSeqno}} ->
                           {true, {Peer, AckedSeqno}};
                       _ ->
                           false
@@ -1655,17 +1654,17 @@ deduce_committed_seqno(PeerSeqnos0, Quorum) ->
                            SeqnoA >= SeqnoB
                    end, PeerSeqnos0),
 
-    deduce_committed_seqno_loop(PeerSeqnos, Quorum, sets:new()).
+    deduce_committed_seqno_loop(PeerSeqnos, ?NO_SEQNO, Quorum, sets:new()).
 
-deduce_committed_seqno_loop([], _Quroum, _Votes) ->
-    no_quorum;
-deduce_committed_seqno_loop([{Peer, Seqno} | Rest], Quorum, Votes) ->
+deduce_committed_seqno_loop([], Default, _Quroum, _Votes) ->
+    Default;
+deduce_committed_seqno_loop([{Peer, Seqno} | Rest], Default, Quorum, Votes) ->
     NewVotes = sets:add_element(Peer, Votes),
     case have_quorum(NewVotes, Quorum) of
         true ->
-            {ok, Seqno};
+            Seqno;
         false ->
-            deduce_committed_seqno_loop(Rest, Quorum, NewVotes)
+            deduce_committed_seqno_loop(Rest, Default, Quorum, NewVotes)
     end.
 
 -ifdef(TEST).
@@ -1675,21 +1674,21 @@ deduce_committed_seqno_test() ->
               {all, sets:from_list([a])},
               {majority, sets:from_list(Peers)}},
 
-    ?assertEqual(no_quorum, deduce_committed_seqno([], Quorum)),
-    ?assertEqual(no_quorum, deduce_committed_seqno([{a, 1}, {b, 3}], Quorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(?NO_SEQNO, deduce_committed_seqno([], Quorum)),
+    ?assertEqual(?NO_SEQNO, deduce_committed_seqno([{a, 1}, {b, 3}], Quorum)),
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 1}, {b, 1},
                                          {c, 3}, {d, 1}, {e, 2}], Quorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 1}, {b, 1},
                                          {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual({ok, 2},
+    ?assertEqual(2,
                  deduce_committed_seqno([{a, 2}, {b, 1},
                                          {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 1}, {b, 3},
                                          {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual({ok, 3},
+    ?assertEqual(3,
                  deduce_committed_seqno([{a, 3}, {b, 3},
                                          {c, 3}, {d, 3}, {e, 2}], Quorum)),
 
@@ -1700,18 +1699,18 @@ deduce_committed_seqno_test() ->
                     {majority, sets:from_list(Peers)},
                     {majority, sets:from_list(NewPeers)}}},
 
-    ?assertEqual(no_quorum,
+    ?assertEqual(?NO_SEQNO,
                  deduce_committed_seqno([{c, 1}, {d, 1}, {e, 1}], JointQuorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 1}, {b, 1},
                                          {c, 2}, {d, 2}, {e, 2}], JointQuorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 2}, {b, 2},
                                          {c, 1}, {d, 1}, {e, 1}], JointQuorum)),
-    ?assertEqual({ok, 1},
+    ?assertEqual(1,
                  deduce_committed_seqno([{a, 1}, {b, 2}, {c, 2},
                                          {d, 3}, {e, 1}], JointQuorum)),
-    ?assertEqual({ok, 2},
+    ?assertEqual(2,
                  deduce_committed_seqno([{a, 2}, {b, 2}, {c, 1},
                                          {d, 3}, {e, 1}], JointQuorum)).
 -endif.
