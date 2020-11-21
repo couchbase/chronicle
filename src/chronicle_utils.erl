@@ -727,6 +727,39 @@ maps_foreach_test() ->
     ?assertEqual(lists:sort(maps:to_list(Map)), lists:sort(Elems)).
 -endif.
 
+queue_foreach(Fun, Queue) ->
+    case queue:out(Queue) of
+        {empty, _} ->
+            ok;
+        {{value, Value}, NewQueue} ->
+            Fun(Value),
+            queue_foreach(Fun, NewQueue)
+    end.
+
+-ifdef(TEST).
+queue_foreach_test() ->
+    Q = queue:from_list([1,2,3,4,5]),
+    queue_foreach(
+      fun (Elem) ->
+              self() ! Elem
+      end, Q),
+
+    Rcv = fun () ->
+                  receive
+                      Msg -> Msg
+                  after
+                      0 ->
+                          exit(no_msg)
+                  end
+          end,
+
+    ?assertEqual(1, Rcv()),
+    ?assertEqual(2, Rcv()),
+    ?assertEqual(3, Rcv()),
+    ?assertEqual(4, Rcv()),
+    ?assertEqual(5, Rcv()).
+-endif.
+
 queue_takefold(Fun, Acc, Queue) ->
     case queue:out(Queue) of
         {empty, _} ->
