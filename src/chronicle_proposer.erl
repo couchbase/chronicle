@@ -361,6 +361,8 @@ handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
     {stop, establish_term_timeout}.
 
 check_peers(#data{peers = Peers} = Data) ->
+    erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
+
     PeersToCheck =
         lists:filter(
           fun (Peer) ->
@@ -372,8 +374,11 @@ check_peers(#data{peers = Peers} = Data) ->
                   end
           end, Peers),
 
-    erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
-    send_request_position(PeersToCheck, Data).
+    NewData = send_request_position(PeersToCheck, Data),
+
+    %% Some peers may be behind because we didn't replicate to them due to
+    %% chronicle_agent:append() returning 'nosuspend'.
+    replicate(NewData).
 
 handle_agent_response(Peer,
                       {establish_term, _, _, _} = Request,
@@ -1363,11 +1368,18 @@ remove_peer_statuses(Peers, #data{peer_statuses = Tab}) ->
 
 maybe_send_requests(Peers, Request, Data, Fun) ->
     NewData = monitor_agents(Peers, Data),
-    NotSent = lists:filter(
+    NotSent = lists:filtermap(
                 fun (Peer) ->
                         {ok, Ref} = get_peer_monitor(Peer, NewData),
                         Opaque = make_agent_opaque(Ref, Peer, Request),
-                        not Fun(Peer, Opaque)
+                        case Fun(Peer, Opaque) of
+                            true ->
+                                false;
+                            false ->
+                                true;
+                            {false, Reason} ->
+                                {true, {Peer, Reason}}
+                        end
                 end, Peers),
 
     {NewData, NotSent}.
@@ -1424,7 +1436,11 @@ replicate_to_peers(PeerSeqnos0, Data) ->
     PeerSeqnos = maps:from_list(PeerSeqnos0),
     Peers = maps:keys(PeerSeqnos),
 
-    {NewData, CatchupPeers} = send_append(Peers, PeerSeqnos, Data),
+    {NewData, NotSent} = send_append(Peers, PeerSeqnos, Data),
+    BusyPeers = [Peer || {Peer, busy} <- NotSent],
+    CatchupPeers = [Peer || {Peer, need_catchup} <- NotSent],
+
+    log_busy_peers(append, BusyPeers),
     catchup_peers(CatchupPeers, PeerSeqnos, NewData).
 
 send_append(Peers, PeerSeqnos,
@@ -1440,8 +1456,6 @@ send_append(Peers, PeerSeqnos,
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
                   {ok, Entries} ->
-                      set_peer_sent_seqnos(Peer, HighSeqno,
-                                           CommittedSeqno, Data),
                       ?DEBUG("Sending append request to peer ~p.~n"
                              "History Id: ~p~n"
                              "Term: ~p~n"
@@ -1451,12 +1465,19 @@ send_append(Peers, PeerSeqnos,
                              [Peer, HistoryId, Term,
                               CommittedSeqno, PeerSeqno, Entries]),
 
-                      chronicle_agent:append(Peer, Opaque,
-                                             HistoryId, Term, CommittedSeqno,
-                                             PeerSeqno, Entries, []),
-                      true;
+                      case chronicle_agent:append(Peer, Opaque, HistoryId,
+                                                  Term, CommittedSeqno,
+                                                  PeerSeqno, Entries,
+                                                  [nosuspend]) of
+                          ok ->
+                              set_peer_sent_seqnos(Peer, HighSeqno,
+                                                   CommittedSeqno, Data),
+                              true;
+                          nosuspend ->
+                              {false, busy}
+                      end;
                   need_catchup ->
-                      false
+                      {false, need_catchup}
               end
       end).
 
