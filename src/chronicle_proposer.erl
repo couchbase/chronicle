@@ -238,7 +238,7 @@ handle_state_enter(proposing, Data) ->
 
     announce_proposer_ready(NewData),
 
-    {keep_state, replicate(check_peers(NewData))};
+    {keep_state, check_peers(NewData)};
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
