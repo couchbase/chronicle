@@ -1632,65 +1632,64 @@ get_peer_monitor(Peer, #data{monitors_peers = MPeers}) ->
             not_found
     end.
 
-deduce_committed_seqno(#data{quorum_peers = Peers,
-                             quorum = Quorum} = Data) ->
-    PeerSeqnos =
+deduce_committed_seqno(Data) ->
+    deduce_quorum_value(#peer_status.acked_seqno, ?NO_SEQNO, Data).
+
+deduce_quorum_value(Field, Default,
+                    #data{quorum_peers = Peers,
+                          quorum = Quorum} = Data) ->
+    PeerValues =
         lists:filtermap(
           fun (Peer) ->
                   case get_peer_status(Peer, Data) of
-                      {ok, #peer_status{acked_seqno = AckedSeqno}} ->
-                          {true, {Peer, AckedSeqno}};
+                      {ok, #peer_status{} = PeerStatus} ->
+                          Value = element(Field, PeerStatus),
+                          {true, {Peer, Value}};
                       _ ->
                           false
                   end
           end, Peers),
 
-    deduce_committed_seqno(PeerSeqnos, Quorum).
+    do_deduce_quorum_value(PeerValues, Default, Quorum).
 
-deduce_committed_seqno(PeerSeqnos0, Quorum) ->
-    PeerSeqnos =
+do_deduce_quorum_value(PeerValues0, Default, Quorum) ->
+    PeerValues =
         %% Order peers in the decreasing order of their seqnos.
-        lists:sort(fun ({_PeerA, SeqnoA}, {_PeerB, SeqnoB}) ->
-                           SeqnoA >= SeqnoB
-                   end, PeerSeqnos0),
+        lists:sort(fun ({_PeerA, ValueA}, {_PeerB, ValueB}) ->
+                           ValueA >= ValueB
+                   end, PeerValues0),
 
-    deduce_committed_seqno_loop(PeerSeqnos, ?NO_SEQNO, Quorum, sets:new()).
+    do_deduce_quorum_value_loop(PeerValues, Default, Quorum, sets:new()).
 
-deduce_committed_seqno_loop([], Default, _Quroum, _Votes) ->
+do_deduce_quorum_value_loop([], Default, _Quroum, _Votes) ->
     Default;
-deduce_committed_seqno_loop([{Peer, Seqno} | Rest], Default, Quorum, Votes) ->
+do_deduce_quorum_value_loop([{Peer, Value} | Rest], Default, Quorum, Votes) ->
     NewVotes = sets:add_element(Peer, Votes),
     case have_quorum(NewVotes, Quorum) of
         true ->
-            Seqno;
+            Value;
         false ->
-            deduce_committed_seqno_loop(Rest, Default, Quorum, NewVotes)
+            do_deduce_quorum_value_loop(Rest, Default, Quorum, NewVotes)
     end.
 
 -ifdef(TEST).
-deduce_committed_seqno_test() ->
+deduce_quorum_value_test() ->
+    Deduce = fun (PeerValues, Quorum) ->
+                     do_deduce_quorum_value(PeerValues, 0, Quorum)
+             end,
+
     Peers = [a, b, c, d, e],
     Quorum = {joint,
               {all, sets:from_list([a])},
               {majority, sets:from_list(Peers)}},
 
-    ?assertEqual(?NO_SEQNO, deduce_committed_seqno([], Quorum)),
-    ?assertEqual(?NO_SEQNO, deduce_committed_seqno([{a, 1}, {b, 3}], Quorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 1}, {b, 1},
-                                         {c, 3}, {d, 1}, {e, 2}], Quorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 1}, {b, 1},
-                                         {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual(2,
-                 deduce_committed_seqno([{a, 2}, {b, 1},
-                                         {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 1}, {b, 3},
-                                         {c, 3}, {d, 3}, {e, 2}], Quorum)),
-    ?assertEqual(3,
-                 deduce_committed_seqno([{a, 3}, {b, 3},
-                                         {c, 3}, {d, 3}, {e, 2}], Quorum)),
+    ?assertEqual(0, Deduce([], Quorum)),
+    ?assertEqual(0, Deduce([{a, 1}, {b, 3}], Quorum)),
+    ?assertEqual(1, Deduce([{a, 1}, {b, 1}, {c, 3}, {d, 1}, {e, 2}], Quorum)),
+    ?assertEqual(1, Deduce([{a, 1}, {b, 1}, {c, 3}, {d, 3}, {e, 2}], Quorum)),
+    ?assertEqual(2, Deduce([{a, 2}, {b, 1}, {c, 3}, {d, 3}, {e, 2}], Quorum)),
+    ?assertEqual(1, Deduce([{a, 1}, {b, 3}, {c, 3}, {d, 3}, {e, 2}], Quorum)),
+    ?assertEqual(3, Deduce([{a, 3}, {b, 3}, {c, 3}, {d, 3}, {e, 2}], Quorum)),
 
     NewPeers = [a, b, c],
     JointQuorum = {joint,
@@ -1699,20 +1698,15 @@ deduce_committed_seqno_test() ->
                     {majority, sets:from_list(Peers)},
                     {majority, sets:from_list(NewPeers)}}},
 
-    ?assertEqual(?NO_SEQNO,
-                 deduce_committed_seqno([{c, 1}, {d, 1}, {e, 1}], JointQuorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 1}, {b, 1},
-                                         {c, 2}, {d, 2}, {e, 2}], JointQuorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 2}, {b, 2},
-                                         {c, 1}, {d, 1}, {e, 1}], JointQuorum)),
-    ?assertEqual(1,
-                 deduce_committed_seqno([{a, 1}, {b, 2}, {c, 2},
-                                         {d, 3}, {e, 1}], JointQuorum)),
-    ?assertEqual(2,
-                 deduce_committed_seqno([{a, 2}, {b, 2}, {c, 1},
-                                         {d, 3}, {e, 1}], JointQuorum)).
+    ?assertEqual(0, Deduce([{c, 1}, {d, 1}, {e, 1}], JointQuorum)),
+    ?assertEqual(1, Deduce([{a, 1}, {b, 1},
+                            {c, 2}, {d, 2}, {e, 2}], JointQuorum)),
+    ?assertEqual(1, Deduce([{a, 2}, {b, 2},
+                            {c, 1}, {d, 1}, {e, 1}], JointQuorum)),
+    ?assertEqual(1, Deduce([{a, 1}, {b, 2}, {c, 2},
+                            {d, 3}, {e, 1}], JointQuorum)),
+    ?assertEqual(2, Deduce([{a, 2}, {b, 2}, {c, 1},
+                            {d, 3}, {e, 1}], JointQuorum)).
 -endif.
 
 stop(Reason, State, Data) ->
