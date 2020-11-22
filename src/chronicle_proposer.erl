@@ -1316,12 +1316,10 @@ mark_peer_status_requested(Peer, Data) ->
 mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
     true = ets:insert_new(Tab, [{Peer, requested} || Peer <- Peers]).
 
-init_peer_status(Peer, Metadata, Data) ->
+init_peer_status(Peer, Metadata, #data{term = OurTerm} = Data) ->
     %% We should never overwrite an existing peer status.
     {ok, requested} = get_peer_status(Peer, Data),
-    set_peer_status(Peer, Metadata, Data).
 
-set_peer_status(Peer, Metadata, #data{term = OurTerm} = Data) ->
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
               high_seqno = PeerHighSeqno} = Metadata,
