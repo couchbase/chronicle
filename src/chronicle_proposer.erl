@@ -74,13 +74,16 @@
                 config_change_reply_to,
                 postponed_config_requests }).
 
--record(peer_status, { needs_sync,
-                       acked_seqno,
-                       acked_commit_seqno,
-                       sent_seqno,
-                       sent_commit_seqno,
+-record(peer_status, {
+                      %% The following fields are only valid when peer's state
+                      %% is active.
+                      needs_sync,
+                      acked_seqno,
+                      acked_commit_seqno,
+                      sent_seqno,
+                      sent_commit_seqno,
 
-                       catchup_in_progress = false }).
+                      state :: active | catchup | status_requested }).
 
 -record(sync_request, { ref,
                         reply_to,
@@ -405,7 +408,7 @@ handle_establish_term_result(Peer,
 
     case Result of
         {ok, #metadata{committed_seqno = CommittedSeqno} = Metadata} ->
-            init_peer_status(Peer, Metadata, Data),
+            set_peer_active(Peer, Metadata, Data),
             establish_term_handle_vote(Peer, {ok, CommittedSeqno}, State, Data);
         {error, Error} ->
             remove_peer_status(Peer, Data),
@@ -714,7 +717,7 @@ handle_peer_position_result(Peer, Result, proposing = State, Data) ->
 
     case Result of
         {ok, Metadata} ->
-            init_peer_status(Peer, Metadata, Data),
+            set_peer_active(Peer, Metadata, Data),
             %% We need to check if the committed seqno has advanced because
             %% it's possible that we previously replicated something to this
             %% peer but never got a response because the connection got
@@ -850,7 +853,7 @@ sync_quorum_reply_not_leader(#data{sync_requests = Tab}) ->
 handle_catchup_result(Peer, Result, proposing = State, Data) ->
     case Result of
         {ok, Metadata} ->
-            mark_catchup_done(Peer, Metadata, Data),
+            set_peer_catchup_done(Peer, Metadata, Data),
             {keep_state, replicate(Peer, Data)};
         {error, Error} ->
             case handle_common_error(Peer, Error, Data) of
@@ -986,7 +989,7 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
                   {ok, #peer_status{needs_sync = NeedsSync,
                                     sent_seqno = PeerSentSeqno,
                                     sent_commit_seqno = PeerSentCommitSeqno,
-                                    catchup_in_progress = false}} ->
+                                    state = active}} ->
                       DoSync =
                           NeedsSync
                           orelse HighSeqno > PeerSentSeqno
@@ -1303,6 +1306,14 @@ get_peer_status(Peer, #data{peer_statuses = Tab}) ->
             not_found
     end.
 
+get_peer_state(Peer, Data) ->
+    case get_peer_status(Peer, Data) of
+        {ok, #peer_status{state = PeerState}} ->
+            {ok, PeerState};
+        not_found ->
+            not_found
+    end.
+
 put_peer_status(Peer, PeerStatus, #data{peer_statuses = Tab}) ->
     ets:insert(Tab, {Peer, PeerStatus}).
 
@@ -1310,15 +1321,16 @@ update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     ets:insert(Tab, {Peer, Fun(PeerStatus)}).
 
-mark_peer_status_requested(Peer, Data) ->
-    mark_status_requested([Peer], Data).
+set_peer_status_requested(Peer, Data) ->
+    set_peers_status_requested([Peer], Data).
 
-mark_status_requested(Peers, #data{peer_statuses = Tab}) ->
-    true = ets:insert_new(Tab, [{Peer, requested} || Peer <- Peers]).
+set_peers_status_requested(Peers, #data{peer_statuses = Tab}) ->
+    PeerStatus = #peer_status{state = status_requested},
+    true = ets:insert_new(Tab, [{Peer, PeerStatus} || Peer <- Peers]).
 
-init_peer_status(Peer, Metadata, #data{term = OurTerm} = Data) ->
+set_peer_active(Peer, Metadata, #data{term = OurTerm} = Data) ->
     %% We should never overwrite an existing peer status.
-    {ok, requested} = get_peer_status(Peer, Data),
+    {ok, status_requested} = get_peer_state(Peer, Data),
 
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
@@ -1360,13 +1372,15 @@ init_peer_status(Peer, Metadata, #data{term = OurTerm} = Data) ->
                               sent_seqno = HighSeqno,
                               acked_commit_seqno = CommittedSeqno,
                               sent_commit_seqno = CommittedSeqno,
-                              catchup_in_progress = false},
+                              state = active},
     put_peer_status(Peer, PeerStatus, Data).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
       Peer,
-      fun (#peer_status{acked_seqno = AckedSeqno} = PeerStatus) ->
+      fun (#peer_status{acked_seqno = AckedSeqno,
+                        state = PeerState} = PeerStatus) ->
+              active = PeerState,
               true = (HighSeqno >= AckedSeqno),
               true = (HighSeqno >= CommittedSeqno),
 
@@ -1382,7 +1396,9 @@ set_peer_acked_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
       Peer,
       fun (#peer_status{sent_seqno = SentHighSeqno,
-                        sent_commit_seqno = SentCommittedSeqno} = PeerStatus) ->
+                        sent_commit_seqno = SentCommittedSeqno,
+                        state = PeerState} = PeerStatus) ->
+              active = PeerState,
               true = (SentHighSeqno >= HighSeqno),
               true = (SentCommittedSeqno >= CommittedSeqno),
 
@@ -1390,16 +1406,16 @@ set_peer_acked_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
                                      acked_commit_seqno = CommittedSeqno}
       end, Data).
 
-set_peer_catchup_in_progress(Peer, Data) ->
+set_peer_catchup(Peer, Data) ->
     update_peer_status(
       Peer,
-      fun (#peer_status{catchup_in_progress = false} = PeerStatus) ->
-              PeerStatus#peer_status{catchup_in_progress = true}
+      fun (#peer_status{state = active} = PeerStatus) ->
+              PeerStatus#peer_status{state = catchup}
       end, Data).
 
-mark_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
+set_peer_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
-    true = PeerStatus#peer_status.catchup_in_progress,
+    catchup = PeerStatus#peer_status.state,
     #metadata{high_seqno = HighSeqno,
               committed_seqno = CommittedSeqno,
               term_voted = TermVoted} = Metadata,
@@ -1412,7 +1428,7 @@ mark_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
                                            sent_seqno = CommittedSeqno,
                                            acked_commit_seqno = CommittedSeqno,
                                            sent_commit_seqno = CommittedSeqno,
-                                           catchup_in_progress = false},
+                                           state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
 
 remove_peer_status(Peer, Data) ->
@@ -1458,7 +1474,7 @@ send_requests(Peers, Request, Data, Fun) ->
 send_local_establish_term(Metadata,
                           #data{history_id = HistoryId, term = Term} = Data) ->
     Peers = [?SELF_PEER],
-    mark_status_requested(Peers, Data),
+    set_peers_status_requested(Peers, Data),
     Position = get_position(Metadata),
 
     send_requests(
@@ -1483,7 +1499,7 @@ send_establish_term(Peers, Metadata,
                                                   HistoryId, Term, Position,
                                                   [nosuspend]) of
                   ok ->
-                      mark_peer_status_requested(Peer, Data),
+                      set_peer_status_requested(Peer, Data),
                       true;
                   nosuspend ->
                       false
@@ -1546,7 +1562,7 @@ catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
     NewData = monitor_agents(Peers, demonitor_agents(Peers, Data)),
     lists:foreach(
       fun (Peer) ->
-              set_peer_catchup_in_progress(Peer, NewData),
+              set_peer_catchup(Peer, NewData),
 
               {ok, Ref} = get_peer_monitor(Peer, NewData),
               PeerSeqno = maps:get(Peer, PeerSeqnos),
@@ -1558,7 +1574,7 @@ catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
 
 maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
     case get_peer_status(Peer, Data) of
-        {ok, #peer_status{catchup_in_progress = true}} ->
+        {ok, #peer_status{state = catchup}} ->
             chronicle_catchup:cancel_catchup(Pid, Peer);
         _ ->
             ok
@@ -1588,6 +1604,7 @@ get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
 
 get_local_committed_seqno(Data) ->
     {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),
+    active = PeerStatus#peer_status.state,
     PeerStatus#peer_status.acked_commit_seqno.
 
 get_local_log(StartSeqno, EndSeqno) ->
@@ -1619,7 +1636,7 @@ send_request_peer_position(Peer, Data) ->
 
 send_request_position(Peers, Data) ->
     {NewData, BusyPeers} = maybe_send_ensure_term(Peers, peer_position, Data),
-    mark_status_requested(Peers -- BusyPeers, NewData),
+    set_peers_status_requested(Peers -- BusyPeers, NewData),
     log_busy_peers(request_position, BusyPeers),
     NewData.
 
@@ -1696,7 +1713,10 @@ deduce_committed_seqno(#data{quorum = Quorum,
         lists:filtermap(
           fun (Peer) ->
                   case get_peer_status(Peer, Data) of
-                      {ok, #peer_status{acked_seqno = Seqno}} ->
+                      {ok, #peer_status{acked_seqno = Seqno,
+                                        state = active}} ->
+                          %% Note, that peers in catchup are ignored. They are
+                          %% far behind and can't contribute anything useful.
                           {true, {Peer, Seqno}};
                       _ ->
                           false
