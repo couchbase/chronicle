@@ -488,7 +488,7 @@ handle_common_error(Peer, Error,
 establish_term_handle_vote(Peer, Status, proposing, Data) ->
     case Status of
         {ok, _} ->
-            {keep_state, replicate_to(Peer, Data)};
+            {keep_state, replicate(Peer, Data)};
         failed ->
             %% This is not exactly clean. But the intention is the
             %% following. We got some error that we chose to ignore. But since
@@ -702,7 +702,7 @@ handle_peer_position_result(Peer, Result, proposing = State, Data) ->
     case Result of
         {ok, Metadata} ->
             init_peer_status(Peer, Metadata, Data),
-            {keep_state, replicate_to(Peer, Data)};
+            {keep_state, replicate(Peer, Data)};
         {error, Error} ->
             {stop, Reason} = handle_common_error(Peer, Error, Data),
             stop(Reason, State, Data)
@@ -827,7 +827,7 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
     case Result of
         {ok, Metadata} ->
             set_peer_status(Peer, Metadata, Data),
-            {keep_state, replicate_to(Peer, Data)};
+            {keep_state, replicate(Peer, Data)};
         {error, Error} ->
             case handle_common_error(Peer, Error, Data) of
                 {stop, Reason} ->
@@ -941,9 +941,9 @@ is_revision_committed({_, _, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
 
 replicate(#data{peers = Peers} = Data) ->
     LivePeers = get_live_peers(Peers),
-    replicate_to(LivePeers, Data).
+    replicate(LivePeers, Data).
 
-replicate_to(Peers, Data) when is_list(Peers) ->
+replicate(Peers, Data) when is_list(Peers) ->
     #data{committed_seqno = CommittedSeqno, high_seqno = HighSeqno} = Data,
 
     case get_peers_to_replicate(HighSeqno, CommittedSeqno, Peers, Data) of
@@ -952,8 +952,8 @@ replicate_to(Peers, Data) when is_list(Peers) ->
         PeersToReplicate ->
             replicate_to_peers(PeersToReplicate, Data)
     end;
-replicate_to(Peer, Data) when is_atom(Peer) ->
-    replicate_to([Peer], Data).
+replicate(Peer, Data) when is_atom(Peer) ->
+    replicate([Peer], Data).
 
 get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
     lists:filtermap(
