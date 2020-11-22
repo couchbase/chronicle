@@ -485,10 +485,18 @@ handle_common_error(Peer, Error,
             ignored
     end.
 
-establish_term_handle_vote(Peer, Status, proposing, Data) ->
+establish_term_handle_vote(Peer, Status, proposing = State, Data) ->
     case Status of
         {ok, _} ->
-            {keep_state, replicate(Peer, Data)};
+            %% Though not very likely, it's possible that this peer knew that
+            %% some seqno was committed, while none of the nodes we talked to
+            %% before successfully establishing the term did. In such case
+            %% receiving this response may advance our idea of what is
+            %% committed (though at the moment the committed seqno returned by
+            %% the peer is ignored). That's why we evaluate the committed
+            %% seqno here instead of simply replicating to the peer.
+            check_committed_seqno_advanced(
+              #{must_replicate_to => Peer}, State, Data);
         failed ->
             %% This is not exactly clean. But the intention is the
             %% following. We got some error that we chose to ignore. But since
@@ -652,17 +660,14 @@ handle_append_ok(Peer, PeerHighSeqno,
            "Committed Seqno: ~p",
            [Peer, PeerHighSeqno, PeerCommittedSeqno]),
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
+    check_committed_seqno_advanced(State, Data).
 
-    case check_committed_seqno_advanced(Data) of
-        {ok, NewData, Effects} ->
-            {keep_state, NewData, Effects};
-        {stop, Reason, NewData} ->
-            stop(Reason, State, NewData);
-        no_change ->
-            {keep_state, Data}
-    end.
+check_committed_seqno_advanced(State, Data) ->
+    check_committed_seqno_advanced(#{}, State, Data).
 
-check_committed_seqno_advanced(#data{committed_seqno =
+check_committed_seqno_advanced(Options,
+                               State,
+                               #data{committed_seqno =
                                          CommittedSeqno} = Data) ->
     NewCommittedSeqno = deduce_committed_seqno(Data),
     case NewCommittedSeqno > CommittedSeqno of
@@ -675,9 +680,9 @@ check_committed_seqno_advanced(#data{committed_seqno =
 
             case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
-                    {ok, replicate(NewData), Effects};
-                {stop, _Reason, _NewData} = Stop ->
-                    Stop
+                    {keep_state, replicate(NewData), Effects};
+                {stop, Reason, NewData} ->
+                    stop(Reason, State, NewData)
             end;
         false ->
             %% Note, that it's possible for the deduced committed seqno to go
@@ -693,7 +698,15 @@ check_committed_seqno_advanced(#data{committed_seqno =
             %% topology, what was committed in the old topooogy, might not yet
             %% have a quorum in the new topology. In such case the deduced
             %% committed sequence number will be ?NO_SEQNO.
-            no_change
+            NewData =
+                case maps:find(must_replicate_to, Options) of
+                    {ok, Peers} ->
+                        replicate(Peers, Data);
+                    error ->
+                        Data
+                end,
+
+            {keep_state, NewData}
     end.
 
 handle_peer_position_result(Peer, Result, proposing = State, Data) ->
@@ -702,7 +715,18 @@ handle_peer_position_result(Peer, Result, proposing = State, Data) ->
     case Result of
         {ok, Metadata} ->
             init_peer_status(Peer, Metadata, Data),
-            {keep_state, replicate(Peer, Data)};
+            %% We need to check if the committed seqno has advanced because
+            %% it's possible that we previously replicated something to this
+            %% peer but never got a response because the connection got
+            %% dropped. Once a new connection is created, there'll be nothing
+            %% more to replicate to the peer. So we won't go through the usual
+            %% append code path (unless there are more mutations to
+            %% replicate). But if this peer is required by the quorum (like if
+            %% there are only two nodes in the cluster), we won't be able to
+            %% detect that what was replicated before the connection drop is
+            %% committed.
+            check_committed_seqno_advanced(
+              #{must_replicate_to => Peer}, State, Data);
         {error, Error} ->
             {stop, Reason} = handle_common_error(Peer, Error, Data),
             stop(Reason, State, Data)
