@@ -1690,50 +1690,45 @@ get_peer_monitor(Peer, #data{monitors_peers = MPeers}) ->
             not_found
     end.
 
-deduce_committed_seqno(Data) ->
-    deduce_quorum_value(#peer_status.acked_seqno, ?NO_SEQNO, Data).
-
-deduce_quorum_value(Field, Default,
-                    #data{quorum_peers = Peers,
-                          quorum = Quorum} = Data) ->
-    PeerValues =
+deduce_committed_seqno(#data{quorum = Quorum,
+                             quorum_peers = Peers} = Data) ->
+    PeerSeqnos =
         lists:filtermap(
           fun (Peer) ->
                   case get_peer_status(Peer, Data) of
-                      {ok, #peer_status{} = PeerStatus} ->
-                          Value = element(Field, PeerStatus),
-                          {true, {Peer, Value}};
+                      {ok, #peer_status{acked_seqno = Seqno}} ->
+                          {true, {Peer, Seqno}};
                       _ ->
                           false
                   end
           end, Peers),
 
-    do_deduce_quorum_value(PeerValues, Default, Quorum).
+    deduce_quorum_value(PeerSeqnos, ?NO_SEQNO, Quorum).
 
-do_deduce_quorum_value(PeerValues0, Default, Quorum) ->
+deduce_quorum_value(PeerValues0, Default, Quorum) ->
     PeerValues =
         %% Order peers in the decreasing order of their seqnos.
         lists:sort(fun ({_PeerA, ValueA}, {_PeerB, ValueB}) ->
                            ValueA >= ValueB
                    end, PeerValues0),
 
-    do_deduce_quorum_value_loop(PeerValues, Default, Quorum, sets:new()).
+    deduce_quorum_value_loop(PeerValues, Default, Quorum, sets:new()).
 
-do_deduce_quorum_value_loop([], Default, _Quroum, _Votes) ->
+deduce_quorum_value_loop([], Default, _Quroum, _Votes) ->
     Default;
-do_deduce_quorum_value_loop([{Peer, Value} | Rest], Default, Quorum, Votes) ->
+deduce_quorum_value_loop([{Peer, Value} | Rest], Default, Quorum, Votes) ->
     NewVotes = sets:add_element(Peer, Votes),
     case have_quorum(NewVotes, Quorum) of
         true ->
             Value;
         false ->
-            do_deduce_quorum_value_loop(Rest, Default, Quorum, NewVotes)
+            deduce_quorum_value_loop(Rest, Default, Quorum, NewVotes)
     end.
 
 -ifdef(TEST).
 deduce_quorum_value_test() ->
     Deduce = fun (PeerValues, Quorum) ->
-                     do_deduce_quorum_value(PeerValues, 0, Quorum)
+                     deduce_quorum_value(PeerValues, 0, Quorum)
              end,
 
     Peers = [a, b, c, d, e],
