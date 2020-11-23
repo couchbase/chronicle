@@ -1399,7 +1399,7 @@ check_branch_id(BranchId, State) ->
     end.
 
 check_history_id(HistoryId, State) ->
-    OurHistoryId = get_history_id_int(State),
+    OurHistoryId = get_effective_history_id(State),
     case OurHistoryId =:= ?NO_HISTORY orelse HistoryId =:= OurHistoryId of
         true ->
             ok;
@@ -1407,8 +1407,7 @@ check_history_id(HistoryId, State) ->
             {error, {history_mismatch, OurHistoryId}}
     end.
 
-%% TODO: get rid of this once #state{} doesn't duplicate #metadata{}.
-get_history_id_int(State) ->
+get_effective_history_id(State) ->
     #{?META_HISTORY_ID := CommittedHistoryId,
       ?META_PENDING_BRANCH := PendingBranch} = get_meta(State),
 
@@ -1470,7 +1469,7 @@ assert_valid_peer(_Coordinator) ->
     ok.
 
 announce_new_history(State) ->
-    HistoryId = get_history_id_int(State),
+    HistoryId = get_effective_history_id(State),
     Metadata = state2metadata(State),
     chronicle_events:sync_notify({new_history, HistoryId, Metadata}).
 
