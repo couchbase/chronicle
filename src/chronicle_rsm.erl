@@ -394,14 +394,15 @@ handle_sync_revision_timeout(Request, _State,
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
-handle_seqno_committed_next_state(CommittedSeqno, State, Data) ->
+handle_seqno_committed_next_state(State,
+                                  #data{read_seqno = ReadSeqno} = Data) ->
     case State of
         #follower{} ->
             {keep_state, Data};
         #leader{status = established} ->
             {keep_state, Data};
         #init{wait_for_seqno = Seqno} ->
-            case CommittedSeqno >= Seqno of
+            case ReadSeqno >= Seqno of
                 true ->
                     complete_init(State, Data);
                 false ->
@@ -410,7 +411,7 @@ handle_seqno_committed_next_state(CommittedSeqno, State, Data) ->
         #leader{status = {wait_for_seqno, Seqno}} ->
             %% Mark the leader established when applied seqno catches up with
             %% the high seqno as of when the term was established.
-            case CommittedSeqno >= Seqno of
+            case ReadSeqno >= Seqno of
                 true ->
                     {next_state, State#leader{status = established}, Data};
                 false ->
@@ -646,7 +647,7 @@ handle_seqno_committed(CommittedSeqno, State,
         true ->
             NewData = read_log(CommittedSeqno, State, Data),
             maybe_publish_local_revision(State, NewData),
-            handle_seqno_committed_next_state(CommittedSeqno, State, NewData);
+            handle_seqno_committed_next_state(State, NewData);
         false ->
             ?DEBUG("Ignoring seqno_committed ~p "
                    "when read seqno is ~p", [CommittedSeqno, ReadSeqno]),
