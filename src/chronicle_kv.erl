@@ -222,6 +222,17 @@ get_snapshot_fast_path_loop(Table, TableSeqno, [Key | RestKeys], Snapshot) ->
 get_revision(Name) ->
     chronicle_rsm:get_local_revision(Name).
 
+sync(Name, Type) ->
+    sync(Name, Type, ?DEFAULT_TIMEOUT).
+
+sync(Name, Type, Timeout) ->
+    case Type of
+        local ->
+            ok;
+        _ ->
+            chronicle_rsm:sync(Name, Type, Timeout)
+    end.
+
 %% callbacks
 specs(Name, _Args) ->
     EventName = event_manager_name(Name),
@@ -334,14 +345,8 @@ submit_query(Name, Query, Timeout, Opts) ->
     end.
 
 handle_read_consistency(Name, Timeout, Opts) ->
-    case maps:get(read_consistency, Opts, local) of
-        local ->
-            ok;
-        Consistency
-          when Consistency =:= leader;
-               Consistency =:= quorum ->
-            chronicle_rsm:sync(Name, Consistency, Timeout)
-    end.
+    Consistency = maps:get(read_consistency, Opts, local),
+    sync(Name, Consistency, Timeout).
 
 submit_command(Name, Command, Timeout, Opts) ->
     TRef = start_timeout(Timeout),

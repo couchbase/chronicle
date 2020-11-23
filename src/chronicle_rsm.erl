@@ -92,7 +92,9 @@ query(Name, Query) ->
 query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, Timeout).
 
-get_applied_revision(Name, Type, Timeout) ->
+get_applied_revision(Name, Type, Timeout)
+  when Type =:= leader;
+       Type =:= quorum ->
     with_leader(Timeout,
                 fun (TRef, Leader, {HistoryId, _Term}) ->
                         get_applied_revision(Leader, Name,
