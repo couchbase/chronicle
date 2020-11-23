@@ -68,8 +68,11 @@
 
                 %% Used when the state is 'proposing'.
                 pending_entries,
-                sync_requests,
                 catchup_pid,
+
+                sync_round,
+                acked_sync_round,
+                sync_requests,
 
                 config_change_reply_to,
                 postponed_config_requests }).
@@ -83,13 +86,15 @@
                       sent_seqno,
                       sent_commit_seqno,
 
+                      %% These fields are valid irrespective of the state.
+                      sent_sync_round,
+                      acked_sync_round,
+
                       state :: active | catchup | status_requested }).
 
--record(sync_request, { ref,
+-record(sync_request, { round,
                         reply_to,
-                        ok_reply,
-                        votes,
-                        failed_votes }).
+                        ok_reply }).
 
 start_link(HistoryId, Term) ->
     Self = self(),
@@ -119,8 +124,6 @@ init([Parent, HistoryId, Term]) ->
     chronicle_peers:monitor(),
 
     PeerStatuses = ets:new(peer_statuses, [protected, set]),
-    SyncRequests = ets:new(sync_requests,
-                           [protected, set, {keypos, #sync_request.ref}]),
     Data = #data{ parent = Parent,
                   history_id = HistoryId,
                   term = Term,
@@ -131,7 +134,11 @@ init([Parent, HistoryId, Term]) ->
                   votes = [],
                   failed_votes = [],
                   pending_entries = queue:new(),
-                  sync_requests = SyncRequests,
+
+                  sync_requests = queue:new(),
+                  sync_round = 0,
+                  acked_sync_round = 0,
+
                   postponed_config_requests = []},
 
     {ok, establish_term, Data}.
@@ -377,7 +384,7 @@ check_peers(#data{peers = Peers} = Data) ->
                   end
           end, Peers),
 
-    NewData = send_request_position(PeersToCheck, Data),
+    NewData = send_heartbeat(PeersToCheck, Data),
 
     %% Some peers may be behind because we didn't replicate to them due to
     %% chronicle_agent:append() returning 'nosuspend'.
@@ -391,12 +398,8 @@ handle_agent_response(Peer,
                       {append, _, _, _, _} = Request,
                       Result, State, Data) ->
     handle_append_result(Peer, Request, Result, State, Data);
-handle_agent_response(Peer, peer_position, Result, State, Data) ->
-    handle_peer_position_result(Peer, Result, State, Data);
-handle_agent_response(Peer,
-                      {sync_quorum, _} = Request,
-                      Result, State, Data) ->
-    handle_sync_quorum_result(Peer, Request, Result, State, Data);
+handle_agent_response(Peer, {heartbeat, Round}, Result, State, Data) ->
+    handle_heartbeat_result(Peer, Round, Result, State, Data);
 handle_agent_response(Peer, catchup, Result, State, Data) ->
     handle_catchup_result(Peer, Result, State, Data).
 
@@ -505,7 +508,7 @@ establish_term_handle_vote(Peer, Status, proposing = State, Data) ->
             %% following. We got some error that we chose to ignore. But since
             %% we are already proposing, we need to know this peer's
             %% position.
-            {keep_state, send_request_peer_position(Peer, Data)}
+            {keep_state, send_heartbeat(Peer, Data)}
     end;
 establish_term_handle_vote(Peer, Status, establish_term = State,
                            #data{high_seqno = HighSeqno,
@@ -712,12 +715,17 @@ check_committed_seqno_advanced(Options,
             {keep_state, NewData}
     end.
 
-handle_peer_position_result(Peer, Result, proposing = State, Data) ->
-    ?DEBUG("Peer position response from ~p:~n~p", [Peer, Result]),
+handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
+    ?DEBUG("Peer heartbeat response from ~p (round ~p):~n~p",
+           [Peer, Round, Result]),
 
     case Result of
         {ok, Metadata} ->
-            set_peer_active(Peer, Metadata, Data),
+            maybe_set_peer_active(Peer, Metadata, Data),
+            set_peer_acked_sync_round(Peer, Round, Data),
+
+            NewData = check_sync_round_advanced(Data),
+
             %% We need to check if the committed seqno has advanced because
             %% it's possible that we previously replicated something to this
             %% peer but never got a response because the connection got
@@ -729,126 +737,46 @@ handle_peer_position_result(Peer, Result, proposing = State, Data) ->
             %% detect that what was replicated before the connection drop is
             %% committed.
             check_committed_seqno_advanced(
-              #{must_replicate_to => Peer}, State, Data);
+              #{must_replicate_to => Peer}, State, NewData);
         {error, Error} ->
             {stop, Reason} = handle_common_error(Peer, Error, Data),
             stop(Reason, State, Data)
     end.
 
-handle_sync_quorum_result(Peer, {sync_quorum, Ref}, Result,
-                          proposing = State,
-                          #data{sync_requests = SyncRequests} = Data) ->
-    ?DEBUG("Sync quorum response from ~p: ~p", [Peer, Result]),
-    case ets:lookup(SyncRequests, Ref) of
-        [] ->
-            keep_state_and_data;
-        [#sync_request{} = Request] ->
-            case Result of
-                {ok, _} ->
-                    sync_quorum_handle_vote(Peer, ok, Request, Data),
-                    keep_state_and_data;
-                {error, Error} ->
-                    case handle_common_error(Peer, Error, Data) of
-                        {stop, Reason} ->
-                            stop(Reason, State, Data);
-                        ignored ->
-                            ?ERROR("Unexpected error in sync quorum: ~p",
-                                   [Error]),
-                            sync_quorum_handle_vote(Peer,
-                                                    failed, Request, Data),
-                            keep_state_and_data
-                    end
-            end
-    end.
-
-sync_quorum_handle_vote(Peer, Status,
-                        #sync_request{ref = Ref,
-                                      votes = Votes,
-                                      failed_votes = FailedVotes} = Request,
-                        #data{sync_requests = Requests} = Data) ->
-    NewRequest =
-        case Status of
-            ok ->
-                Request#sync_request{votes = [Peer | Votes]};
-            failed ->
-                Request#sync_request{failed_votes = [Peer | FailedVotes]}
-        end,
-
-    case sync_quorum_maybe_reply(NewRequest, Data) of
-        continue ->
-            ets:insert(Requests, NewRequest);
-        done ->
-            ets:delete(Requests, Ref)
-    end.
-
-sync_quorum_maybe_reply(Request, Data) ->
-    case sync_quorum_check_result(Request, Data) of
-        continue ->
-            continue;
-        Result ->
-            reply_request(Request#sync_request.reply_to, Result),
-            done
-    end.
-
-sync_quorum_check_result(#sync_request{ok_reply = OkReply,
-                                       votes = Votes,
-                                       failed_votes = FailedVotes},
-                         #data{quorum = Quorum, quorum_peers = QuorumPeers}) ->
-    case have_quorum(Votes, Quorum) of
+check_sync_round_advanced(#data{acked_sync_round = AckedRound} = Data) ->
+    NewAckedRound = deduce_acked_sync_round(Data),
+    case NewAckedRound > AckedRound of
         true ->
-            OkReply;
+            NewData = Data#data{acked_sync_round = NewAckedRound},
+            sync_quorum_maybe_reply(NewData);
         false ->
-            case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
-                true ->
-                    continue;
-                false ->
-                    {error, no_quorum}
-            end
+            Data
     end.
 
-sync_quorum_handle_peer_down(Peer, #data{sync_requests = Tab} = Data) ->
-    lists:foreach(
-      fun (#sync_request{votes = Votes,
-                         failed_votes = FailedVotes} = Request) ->
-              HasVoted = lists:member(Peer, Votes)
-                  orelse lists:member(Peer, FailedVotes),
+sync_quorum_maybe_reply(#data{acked_sync_round = AckedRound,
+                              sync_requests = Requests} = Data) ->
+    {_, NewRequests} =
+        chronicle_utils:queue_takefold(
+          fun (Request, _Acc) ->
+                  case Request#sync_request.round =< AckedRound of
+                      true ->
+                          reply_request(Request#sync_request.reply_to,
+                                        Request#sync_request.ok_reply),
+                          {true, unused};
+                      false ->
+                          false
+                  end
+          end, unused, Requests),
 
-              case HasVoted of
-                  true ->
-                      ok;
-                  false ->
-                      sync_quorum_handle_vote(Peer, failed, Request, Data)
-              end
-      end, ets:tab2list(Tab)).
+    Data#data{sync_requests = NewRequests}.
 
-sync_quorum_on_config_update(AddedPeers0, #data{sync_requests = Tab} = Data) ->
-    QuorumPeers = lists:usort(Data#data.quorum_peers),
-    AddedPeers = lists:usort(AddedPeers0),
-    AddedQuorumPeers = ordsets:intersection(QuorumPeers, AddedPeers),
+sync_quorum_reply_not_leader(#data{sync_requests = SyncRequests} = Data) ->
+    chronicle_utils:queue_foreach(
+      fun (#sync_request{reply_to = ReplyTo}) ->
+              reply_not_leader(ReplyTo)
+      end, SyncRequests),
 
-    lists:foldl(
-      fun (#sync_request{ref = Ref} = Request, AccData) ->
-              %% We might have a quorum in the new configuration. If that's
-              %% the case, reply to the request immediately.
-              case sync_quorum_maybe_reply(Request, AccData) of
-                  done ->
-                      ets:delete(Tab, Ref),
-                      AccData;
-                  continue ->
-                      %% If there are new peers, we need to send extra
-                      %% ensure_term requests to them. Otherwise, we might not
-                      %% ever get enough responses to reach quorum.
-                      send_ensure_term(AddedQuorumPeers,
-                                       {sync_quorum, Ref}, AccData)
-              end
-      end, Data, ets:tab2list(Tab)).
-
-sync_quorum_reply_not_leader(#data{sync_requests = Tab}) ->
-    lists:foreach(
-      fun (#sync_request{ref = Ref, reply_to = ReplyTo}) ->
-              reply_not_leader(ReplyTo),
-              ets:delete(Tab, Ref)
-      end, ets:tab2list(Tab)).
+    Data#data{sync_requests = queue:new()}.
 
 handle_catchup_result(Peer, Result, proposing = State, Data) ->
     case Result of
@@ -1044,7 +972,7 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
                             keep_state_and_data;
                         not_found ->
                             {keep_state,
-                             send_request_peer_position(Peer, Data)}
+                             send_heartbeat(Peer, Data)}
                     end;
                 false ->
                     ?INFO("Peer ~p is not in peers:~n~p", [Peer, Peers]),
@@ -1077,7 +1005,6 @@ handle_down(MRef, Pid, Reason, State, Data) ->
                 establish_term ->
                     handle_down_establish_term(Peer, State, NewData);
                 proposing ->
-                    sync_quorum_handle_peer_down(Peer, NewData),
                     {keep_state, NewData}
             end
     end.
@@ -1154,26 +1081,17 @@ handle_sync_quorum(ReplyTo, proposing, Data) ->
     start_sync_quorum(ReplyTo, ok, Data).
 
 start_sync_quorum(ReplyTo, OkReply,
-                  #data{quorum_peers = QuorumPeers,
+                  #data{sync_round = Round,
                         sync_requests = SyncRequests} = Data) ->
-    %% TODO: timeouts
-    LiveQuorumPeers = get_live_peers(QuorumPeers),
-    DeadQuorumPeers = QuorumPeers -- LiveQuorumPeers,
-
-    Ref = make_ref(),
-    Request = #sync_request{ref = Ref,
-                            reply_to = ReplyTo,
+    NewRound = Round + 1,
+    Request = #sync_request{reply_to = ReplyTo,
                             ok_reply = OkReply,
-                            votes = [],
-                            failed_votes = DeadQuorumPeers},
-    case sync_quorum_maybe_reply(Request, Data) of
-        continue ->
-            ets:insert_new(SyncRequests, Request),
-            {keep_state,
-             send_ensure_term(LiveQuorumPeers, {sync_quorum, Ref}, Data)};
-        done ->
-            keep_state_and_data
-    end.
+                            round = NewRound},
+    NewSyncRequests = queue:in(Request, SyncRequests),
+    NewData = Data#data{sync_round = NewRound,
+                        sync_requests = NewSyncRequests},
+
+    {keep_state, send_heartbeat(NewData)}.
 
 handle_get_config(ReplyTo, #data{config = Config,
                                  config_revision = Revision} = Data) ->
@@ -1259,15 +1177,19 @@ handle_new_peers(#data{peers = OldPeers},
     RemovedPeers = OldPeers -- NewPeers,
     AddedPeers = NewPeers -- OldPeers,
 
-    handle_added_peers(AddedPeers, handle_removed_peers(RemovedPeers, NewData)).
+    %% If some quorum peers were removed, we might have enough votes in the
+    %% new quorum.
+    NewData1 = check_sync_round_advanced(NewData),
+
+    handle_added_peers(AddedPeers,
+                       handle_removed_peers(RemovedPeers, NewData1)).
 
 handle_removed_peers(Peers, Data) ->
     remove_peer_statuses(Peers, Data),
     demonitor_agents(Peers, Data).
 
 handle_added_peers(Peers, Data) ->
-    NewData = send_request_position(Peers, Data),
-    sync_quorum_on_config_update(Peers, NewData).
+    send_heartbeat(Peers, Data).
 
 log_entry_revision(#log_entry{history_id = HistoryId,
                               term = Term, seqno = Seqno}) ->
@@ -1322,15 +1244,31 @@ update_peer_status(Peer, Fun, #data{peer_statuses = Tab} = Data) ->
     ets:insert(Tab, {Peer, Fun(PeerStatus)}).
 
 set_peer_status_requested(Peer, Data) ->
-    set_peers_status_requested([Peer], Data).
+    true = do_set_peer_status_requested(Peer, Data).
 
-set_peers_status_requested(Peers, #data{peer_statuses = Tab}) ->
-    PeerStatus = #peer_status{state = status_requested},
-    true = ets:insert_new(Tab, [{Peer, PeerStatus} || Peer <- Peers]).
+maybe_set_peer_status_requested(Peer, Data) ->
+    _ = do_set_peer_status_requested(Peer, Data),
+    ok.
+
+do_set_peer_status_requested(Peer, #data{peer_statuses = Tab}) ->
+    PeerStatus = #peer_status{state = status_requested,
+                              sent_sync_round = 0,
+                              acked_sync_round = 0},
+    ets:insert_new(Tab, {Peer, PeerStatus}).
+
+maybe_set_peer_active(Peer, Metadata, Data) ->
+    {ok, PeerState} = get_peer_state(Peer, Data),
+    case PeerState of
+        status_requested ->
+            set_peer_active(Peer, Metadata, Data);
+        _ ->
+            ok
+    end.
 
 set_peer_active(Peer, Metadata, #data{term = OurTerm} = Data) ->
+    {ok, PeerStatus} = get_peer_status(Peer, Data),
     %% We should never overwrite an existing peer status.
-    {ok, status_requested} = get_peer_state(Peer, Data),
+    status_requested = PeerStatus#peer_status.state,
 
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
@@ -1367,13 +1305,13 @@ set_peer_active(Peer, Metadata, #data{term = OurTerm} = Data) ->
                 {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
         end,
 
-    PeerStatus = #peer_status{needs_sync = NeedsSync,
-                              acked_seqno = HighSeqno,
-                              sent_seqno = HighSeqno,
-                              acked_commit_seqno = CommittedSeqno,
-                              sent_commit_seqno = CommittedSeqno,
-                              state = active},
-    put_peer_status(Peer, PeerStatus, Data).
+    NewPeerStatus = PeerStatus#peer_status{needs_sync = NeedsSync,
+                                           acked_seqno = HighSeqno,
+                                           sent_seqno = HighSeqno,
+                                           acked_commit_seqno = CommittedSeqno,
+                                           sent_commit_seqno = CommittedSeqno,
+                                           state = active},
+    put_peer_status(Peer, NewPeerStatus, Data).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
@@ -1431,6 +1369,24 @@ set_peer_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
                                            state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
 
+set_peer_acked_sync_round(Peer, Round, Data) ->
+    update_peer_status(
+      Peer,
+      fun (#peer_status{sent_sync_round = SentRound,
+                        acked_sync_round = AckedRound} = PeerStatus) ->
+              true = (Round =< SentRound),
+              true = (Round >= AckedRound),
+              PeerStatus#peer_status{acked_sync_round = Round}
+      end, Data).
+
+set_peer_sent_sync_round(Peer, Round, Data) ->
+    update_peer_status(
+      Peer,
+      fun (#peer_status{sent_sync_round = SentRound} = PeerStatus) ->
+              true = (Round >= SentRound),
+              PeerStatus#peer_status{sent_sync_round = Round}
+      end, Data).
+
 remove_peer_status(Peer, Data) ->
     remove_peer_statuses([Peer], Data).
 
@@ -1473,8 +1429,9 @@ send_requests(Peers, Request, Data, Fun) ->
 
 send_local_establish_term(Metadata,
                           #data{history_id = HistoryId, term = Term} = Data) ->
-    Peers = [?SELF_PEER],
-    set_peers_status_requested(Peers, Data),
+    Peer = ?SELF_PEER,
+    Peers = [Peer],
+    set_peer_status_requested(Peer, Data),
     Position = get_position(Metadata),
 
     send_requests(
@@ -1610,20 +1567,13 @@ get_local_committed_seqno(Data) ->
 get_local_log(StartSeqno, EndSeqno) ->
     chronicle_agent:get_log_committed(StartSeqno, EndSeqno).
 
-send_ensure_term(Peers, Request, Data) ->
-    {NewData, []} = do_send_ensure_term(Peers, Request, [], Data),
-    NewData.
-
-maybe_send_ensure_term(Peers, Request, Data) ->
-    do_send_ensure_term(Peers, Request, [nosuspend], Data).
-
-do_send_ensure_term(Peers, Request, Options,
-                    #data{history_id = HistoryId, term = Term} = Data) ->
+send_ensure_term(Peers, Request,
+                 #data{history_id = HistoryId, term = Term} = Data) ->
     maybe_send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
               case chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term,
-                                               Options) of
+                                               [nosuspend]) of
                   ok ->
                       true;
                   nosuspend ->
@@ -1631,14 +1581,23 @@ do_send_ensure_term(Peers, Request, Options,
               end
       end).
 
-send_request_peer_position(Peer, Data) ->
-    send_request_position([Peer], Data).
+send_heartbeat(#data{quorum_peers = QuorumPeers} = Data) ->
+    send_heartbeat(QuorumPeers, Data).
 
-send_request_position(Peers, Data) ->
-    {NewData, BusyPeers} = maybe_send_ensure_term(Peers, peer_position, Data),
-    set_peers_status_requested(Peers -- BusyPeers, NewData),
-    log_busy_peers(request_position, BusyPeers),
-    NewData.
+send_heartbeat(Peers, #data{sync_round = Round} = Data) when is_list(Peers) ->
+    {NewData, BusyPeers} = send_ensure_term(Peers, {heartbeat, Round}, Data),
+    SentPeers = Peers -- BusyPeers,
+    log_busy_peers(heartbeat, BusyPeers),
+
+    lists:foreach(
+      fun (Peer) ->
+              maybe_set_peer_status_requested(Peer, NewData),
+              set_peer_sent_sync_round(Peer, Round, Data)
+      end, SentPeers),
+
+    NewData;
+send_heartbeat(Peer, Data) when is_atom(Peer) ->
+    send_heartbeat([Peer], Data).
 
 log_busy_peers(Op, BusyPeers) ->
     case BusyPeers of
@@ -1706,6 +1665,20 @@ get_peer_monitor(Peer, #data{monitors_peers = MPeers}) ->
         error ->
             not_found
     end.
+
+deduce_acked_sync_round(#data{quorum = Quorum, quorum_peers = Peers} = Data) ->
+    PeerRounds =
+        lists:filtermap(
+          fun (Peer) ->
+                  case get_peer_status(Peer, Data) of
+                      {ok, #peer_status{acked_sync_round = Round}} ->
+                          {true, {Peer, Round}};
+                      not_found ->
+                          false
+                  end
+          end, Peers),
+
+    deduce_quorum_value(PeerRounds, 0, Quorum).
 
 deduce_committed_seqno(#data{quorum = Quorum,
                              quorum_peers = Peers} = Data) ->
@@ -1798,7 +1771,7 @@ stop(Reason, ExtraEffects, State,
     NewData1 = demonitor_agents(Peers, NewData0),
 
     %% Reply to all in-flight sync_quorum requests
-    sync_quorum_reply_not_leader(Data),
+    NewData2 = sync_quorum_reply_not_leader(NewData1),
 
     case ConfigReplyTo of
         undefined ->
@@ -1807,7 +1780,7 @@ stop(Reason, ExtraEffects, State,
             reply_request(ConfigReplyTo, {error, {leader_error, leader_lost}})
     end,
 
-    NewData2 =
+    NewData3 =
         case State =:= proposing of
             true ->
                 %% Make an attempt to notify local agent about the latest
@@ -1817,13 +1790,13 @@ stop(Reason, ExtraEffects, State,
                 %% But this can be and needs to be done only if we've
                 %% established the term on a quorum of nodes (that is, our
                 %% state is 'proposing').
-                sync_local_agent(NewData1),
-                stop_catchup_process(NewData1);
+                sync_local_agent(NewData2),
+                stop_catchup_process(NewData2);
             false ->
-                NewData1
+                NewData2
         end,
 
-    {next_state, {stopped, Reason}, NewData2, Effects ++ ExtraEffects};
+    {next_state, {stopped, Reason}, NewData3, Effects ++ ExtraEffects};
 stop(_Reason, ExtraEffects, {stopped, _}, Data) ->
     {keep_state, Data, ExtraEffects}.
 
