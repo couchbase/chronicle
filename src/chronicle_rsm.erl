@@ -600,7 +600,7 @@ handle_command_result(Ref, Result, State,
 
 handle_term_established(HistoryId, Term, Seqno, #follower{}, Data) ->
     Status =
-        case Data#data.applied_seqno >= Seqno of
+        case Data#data.read_seqno >= Seqno of
             true ->
                 established;
             false ->
