@@ -423,12 +423,12 @@ terminate(_Reason, Data) ->
 handle_get_metadata(_State, Data) ->
     case check_provisioned(Data) of
         ok ->
-            {reply, {ok, state2metadata(Data)}, Data};
+            {reply, {ok, build_metadata(Data)}, Data};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
 
-state2metadata(Data) ->
+build_metadata(Data) ->
     #{?META_PEER := Peer,
       ?META_HISTORY_ID := HistoryId,
       ?META_TERM := Term,
@@ -744,7 +744,7 @@ handle_establish_term(HistoryId, Term, Position, _State, Data) ->
             NewData = store_meta(#{?META_TERM => Term}, Data),
             announce_term_established(Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
-            {reply, {ok, state2metadata(Data)}, NewData};
+            {reply, {ok, build_metadata(Data)}, NewData};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -778,7 +778,7 @@ handle_ensure_term(HistoryId, Term, _State, Data) ->
     case ?CHECK(check_history_id(HistoryId, Data),
                 check_not_earlier_term(Term, Data)) of
         ok ->
-            {reply, {ok, state2metadata(Data)}, Data};
+            {reply, {ok, build_metadata(Data)}, Data};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -853,7 +853,7 @@ complete_append(HistoryId, Term, Info, Data) ->
         true ->
             ok;
         false ->
-            announce_system_state(provisioned, state2metadata(NewData))
+            announce_system_state(provisioned, build_metadata(NewData))
     end,
 
     maybe_announce_term_established(Term, Data),
@@ -943,7 +943,7 @@ check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, Data) ->
 
                     %% There's a gap between what entries we've got and what
                     %% we were given. So the leader needs to send us more.
-                    {error, {missing_entries, state2metadata(Data)}};
+                    {error, {missing_entries, build_metadata(Data)}};
                 false ->
                     case EndSeqno < SafeHighSeqno of
                         true ->
@@ -1118,7 +1118,7 @@ check_committed_seqno_known(CommittedSeqno, HighSeqno, Data) ->
     case CommittedSeqno > HighSeqno of
         true ->
             %% TODO: add more information here?
-            {error, {missing_entries, state2metadata(Data)}};
+            {error, {missing_entries, build_metadata(Data)}};
         false ->
             ok
     end.
@@ -1205,7 +1205,7 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
                 true ->
                     ok;
                 false ->
-                    announce_system_state(provisioned, state2metadata(NewData))
+                    announce_system_state(provisioned, build_metadata(NewData))
             end,
 
             maybe_announce_term_established(Term, Data),
@@ -1213,7 +1213,7 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
             maybe_announce_committed_seqno(Data, NewData),
 
             {reply,
-             {ok, state2metadata(NewData)}, maybe_cancel_snapshot(NewData)};
+             {ok, build_metadata(NewData)}, maybe_cancel_snapshot(NewData)};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -1232,7 +1232,7 @@ check_snapshot_seqno(SnapshotSeqno, Data) ->
         true ->
             ok;
         false ->
-            {error, {snapshot_rejected, state2metadata(Data)}}
+            {error, {snapshot_rejected, build_metadata(Data)}}
     end.
 
 check_snapshot_config(Config, RSMSnapshots) ->
@@ -1270,7 +1270,7 @@ handle_store_branch(Branch, _State, Data) ->
             end,
 
             ?DEBUG("Stored a branch record:~n~p", [FinalBranch]),
-            {reply, {ok, state2metadata(NewData)}, NewData};
+            {reply, {ok, build_metadata(NewData)}, NewData};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -1491,7 +1491,7 @@ assert_valid_peer(_Coordinator) ->
 
 announce_new_history(Data) ->
     HistoryId = get_effective_history_id(Data),
-    Metadata = state2metadata(Data),
+    Metadata = build_metadata(Data),
     chronicle_events:sync_notify({new_history, HistoryId, Metadata}).
 
 maybe_announce_term_established(Term, Data) ->
@@ -1515,7 +1515,7 @@ maybe_announce_new_config(OldData, NewData) ->
     end.
 
 announce_new_config(Data) ->
-    Metadata = state2metadata(Data),
+    Metadata = build_metadata(Data),
     ConfigEntry = get_config(Data),
     Config = ConfigEntry#log_entry.value,
     chronicle_events:sync_notify({new_config, Config, Metadata}).
@@ -1543,11 +1543,11 @@ announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}).
 
 announce_system_provisioned(Data) ->
-    announce_system_state(provisioned, state2metadata(Data)).
+    announce_system_state(provisioned, build_metadata(Data)).
 
 announce_system_reprovisioned(Data) ->
     chronicle_events:sync_notify({system_event,
-                                  reprovisioned, state2metadata(Data)}).
+                                  reprovisioned, build_metadata(Data)}).
 
 storage_open() ->
     Storage0 = chronicle_storage:open(),
