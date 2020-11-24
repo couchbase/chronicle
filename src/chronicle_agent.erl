@@ -22,7 +22,6 @@
 -export_type([provision_result/0]).
 
 -behavior(gen_statem).
--include_lib("stdlib/include/ms_transform.hrl").
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3,
