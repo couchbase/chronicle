@@ -1604,7 +1604,7 @@ log_busy_peers(Op, BusyPeers) ->
         [] ->
             ok;
         _ ->
-            ?WARNING("Dind't send ~p request to some peers due "
+            ?WARNING("Didn't send ~p request to some peers due "
                      "to distribution connection being busy.~n"
                      "Peers:~n~p",
                      [Op, BusyPeers])
