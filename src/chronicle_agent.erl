@@ -708,12 +708,17 @@ check_provisioned(State) ->
             {error, not_provisioned}
     end.
 
-handle_wipe(#state{storage = Storage}) ->
+handle_wipe(State) ->
+    announce_system_state(unprovisioned),
+    {reply, ok, perform_wipe(State)}.
+
+perform_wipe(#state{storage = Storage}) ->
+    ?INFO("Wiping"),
     chronicle_storage:close(Storage),
     chronicle_storage:wipe(),
-    announce_system_state(unprovisioned),
-    ?DEBUG("Wiped successfully", []),
-    {reply, ok, init_state()}.
+    ?INFO("Wiped successfully"),
+
+    init_state().
 
 handle_establish_term(HistoryId, Term, Position, State) ->
     assert_valid_history_id(HistoryId),
