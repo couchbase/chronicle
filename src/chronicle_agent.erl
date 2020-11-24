@@ -344,7 +344,7 @@ callback_mode() ->
     handle_event_function.
 
 init([]) ->
-    {ok, unused, init_state()}.
+    {ok, unused, init_data()}.
 
 handle_event({call, From}, Call, State, Data) ->
     case handle_call(Call, From, State, Data) of
@@ -733,7 +733,7 @@ perform_wipe(Data) ->
     chronicle_storage:wipe(),
     ?INFO("Wiped successfully"),
 
-    init_state().
+    init_data().
 
 handle_establish_term(HistoryId, Term, Position, _State, Data) ->
     assert_valid_history_id(HistoryId),
@@ -1459,7 +1459,7 @@ check_log_range(StartSeqno, EndSeqno, Data) ->
             ok
     end.
 
-init_state() ->
+init_data() ->
     #data{storage = storage_open(),
           rsms_by_name = #{},
           rsms_by_mref = #{},
