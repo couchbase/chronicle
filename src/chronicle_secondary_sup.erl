@@ -67,11 +67,11 @@ child_specs(unprovisioned) ->
 
     [Leader];
 child_specs(provisioned) ->
-    Coordinator = #{id => chronicle_server,
-                    start => {chronicle_server, start_link, []},
-                    restart => permanent,
-                    shutdown => 5000,
-                    type => worker},
+    Server = #{id => chronicle_server,
+               start => {chronicle_server, start_link, []},
+               restart => permanent,
+               shutdown => 5000,
+               type => worker},
 
     Failover = #{id => chronicle_failover,
                  start => {chronicle_failover, start_link, []},
@@ -85,4 +85,4 @@ child_specs(provisioned) ->
                shutdown => infinity,
                type => supervisor},
 
-    child_specs(unprovisioned) ++ [Coordinator, Failover, RSMSup].
+    child_specs(unprovisioned) ++ [Server, Failover, RSMSup].
