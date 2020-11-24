@@ -710,6 +710,8 @@ check_provisioned(State) ->
 
 handle_wipe(State) ->
     announce_system_state(unprovisioned),
+    %% TODO: There might be snapshots held by some of the RSMs. Wiping without
+    %% ensuring that all of those are stopped is therefore unsafe.
     {reply, ok, perform_wipe(State)}.
 
 perform_wipe(#state{storage = Storage}) ->
