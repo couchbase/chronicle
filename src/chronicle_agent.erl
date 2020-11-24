@@ -714,9 +714,11 @@ handle_wipe(State) ->
     %% ensuring that all of those are stopped is therefore unsafe.
     {reply, ok, perform_wipe(State)}.
 
-perform_wipe(#state{storage = Storage}) ->
+perform_wipe(State) ->
+    NewState = maybe_cancel_snapshot(State),
+
     ?INFO("Wiping"),
-    chronicle_storage:close(Storage),
+    chronicle_storage:close(NewState#state.storage),
     chronicle_storage:wipe(),
     ?INFO("Wiped successfully"),
 
