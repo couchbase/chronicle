@@ -713,8 +713,6 @@ handle_provision(Machines0, From, State, Data) ->
                                    Data),
 
             announce_system_provisioned(NewData),
-            announce_new_config(NewData),
-            announce_committed_seqno(Seqno, NewData),
 
             {next_state, provisioned, NewData, {reply, From, ok}};
         provisioned ->
@@ -1156,7 +1154,7 @@ check_not_earlier_term(Term, Data) ->
     end.
 
 handle_local_mark_committed(HistoryId, Term,
-                            CommittedSeqno, From, _State, Data) ->
+                            CommittedSeqno, From, State, Data) ->
     case check_local_mark_committed(HistoryId, Term,
                                     CommittedSeqno, State, Data) of
         ok ->
