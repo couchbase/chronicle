@@ -360,11 +360,7 @@ handle_event({call, From}, Call, State, Data) ->
         {reply, Reply, NewData} ->
             {keep_state, NewData, {reply, From, Reply}};
         {reply, Reply, NewState, NewData} ->
-            {next_state, NewState, NewData, {reply, From, Reply}};
-        {noreply, NewData} ->
-            {keep_state, NewData};
-        {stop, Reason, NewData} ->
-            {stop, Reason, NewData}
+            {next_state, NewState, NewData, {reply, From, Reply}}
     end;
 handle_event(cast, {release_snapshot, Ref}, State, Data) ->
     handle_release_snapshot(Ref, State, Data);
