@@ -344,12 +344,23 @@ callback_mode() ->
     handle_event_function.
 
 init([]) ->
-    {ok, unused, init_data()}.
+    Data = init_data(),
+    State =
+        case is_provisioned(Data) of
+            true ->
+                provisioned;
+            false ->
+                not_provisioned
+        end,
+
+    {ok, State, Data}.
 
 handle_event({call, From}, Call, State, Data) ->
     case handle_call(Call, From, State, Data) of
         {reply, Reply, NewData} ->
             {keep_state, NewData, {reply, From, Reply}};
+        {reply, Reply, NewState, NewData} ->
+            {next_state, NewState, NewData, {reply, From, Reply}};
         {noreply, NewData} ->
             {keep_state, NewData};
         {stop, Reason, NewData} ->
@@ -420,8 +431,8 @@ terminate(_Reason, Data) ->
     maybe_cancel_snapshot(Data).
 
 %% internal
-handle_get_metadata(_State, Data) ->
-    case check_provisioned(Data) of
+handle_get_metadata(State, Data) ->
+    case check_provisioned(State) of
         ok ->
             {reply, {ok, build_metadata(Data)}, Data};
         {error, _} = Error ->
@@ -603,8 +614,8 @@ foreach_rsm(Fun, #data{rsms_by_name = RSMs}) ->
               Fun(Name, Pid)
       end, RSMs).
 
-handle_reprovision(_State, Data) ->
-    case check_reprovision(Data) of
+handle_reprovision(State, Data) ->
+    case check_reprovision(State, Data) of
         {ok, Config} ->
             #{?META_HISTORY_ID := HistoryId,
               ?META_TERM := Term} = get_meta(Data),
@@ -638,9 +649,9 @@ handle_reprovision(_State, Data) ->
             {reply, Error, Data}
     end.
 
-check_reprovision(Data) ->
-    case is_provisioned(Data) of
-        true ->
+check_reprovision(State, Data) ->
+    case check_provisioned(State) of
+        ok ->
             Peer = get_meta(?META_PEER, Data),
             ConfigEntry = get_config(Data),
             Config = ConfigEntry#log_entry.value,
@@ -656,13 +667,13 @@ check_reprovision(Data) ->
                 #transition{} ->
                     {error, {unstable_config, Config}}
             end;
-        false ->
-            {error, not_provisioned}
+        Error ->
+            Error
     end.
 
-handle_provision(Machines0, _State, Data) ->
-    case check_not_provisioned(Data) of
-        ok ->
+handle_provision(Machines0, State, Data) ->
+    case State of
+        not_provisioned ->
             Peer = get_peer_name(),
             HistoryId = chronicle_utils:random_uuid(),
             Term = next_term(?NO_TERM, Peer),
@@ -695,27 +706,19 @@ handle_provision(Machines0, _State, Data) ->
             announce_new_config(NewData),
             announce_committed_seqno(Seqno, NewData),
 
-            {reply, ok, NewData};
-        {error, _} = Error ->
-            {reply, Error, Data}
+            {reply, ok, provisioned, NewData};
+        provisioned ->
+            {reply, {error, already_provisioned}, Data}
     end.
 
 is_provisioned(Data) ->
     get_config(Data) =/= undefined.
 
-check_not_provisioned(Data) ->
-    case is_provisioned(Data) of
-        true ->
-            {error, already_provisioned};
-        false ->
-            ok
-    end.
-
-check_provisioned(Data) ->
-    case is_provisioned(Data) of
-        true ->
+check_provisioned(State) ->
+    case State of
+        provisioned ->
             ok;
-        false ->
+        _ ->
             {error, not_provisioned}
     end.
 
@@ -723,7 +726,7 @@ handle_wipe(_State, Data) ->
     announce_system_state(unprovisioned),
     %% TODO: There might be snapshots held by some of the RSMs. Wiping without
     %% ensuring that all of those are stopped is therefore unsafe.
-    {reply, ok, perform_wipe(Data)}.
+    {reply, ok, not_provisioned, perform_wipe(Data)}.
 
 perform_wipe(Data) ->
     NewData = maybe_cancel_snapshot(Data),
@@ -784,14 +787,14 @@ handle_ensure_term(HistoryId, Term, _State, Data) ->
     end.
 
 handle_append(HistoryId, Term,
-              CommittedSeqno, AtSeqno, Entries, _State, Data) ->
+              CommittedSeqno, AtSeqno, Entries, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
     case check_append(HistoryId, Term,
                       CommittedSeqno, AtSeqno, Entries, Data) of
         {ok, Info} ->
-            complete_append(HistoryId, Term, Info, Data);
+            complete_append(HistoryId, Term, Info, State, Data);
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -809,14 +812,14 @@ extract_latest_config(Entries) ->
               end
       end, false, Entries).
 
-complete_append(HistoryId, Term, Info, Data) ->
+complete_append(HistoryId, Term, Info, State, Data) ->
     #{entries := Entries,
       start_seqno := StartSeqno,
       end_seqno := EndSeqno,
       committed_seqno := NewCommittedSeqno,
       truncate := Truncate} = Info,
 
-    WasProvisioned = is_provisioned(Data),
+    WasProvisioned = (State =:= provisioned),
     Peer =
         case WasProvisioned of
             true ->
@@ -849,12 +852,14 @@ complete_append(HistoryId, Term, Info, Data) ->
     NewData = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
                              PostMetadata, Truncate, Atomic, Data),
 
-    case WasProvisioned of
-        true ->
-            ok;
-        false ->
-            announce_system_state(provisioned, build_metadata(NewData))
-    end,
+    NewState =
+        case WasProvisioned of
+            true ->
+                State;
+            false ->
+                announce_system_state(provisioned, build_metadata(NewData)),
+                provisioned
+        end,
 
     maybe_announce_term_established(Term, Data),
     maybe_announce_new_config(Data, NewData),
@@ -873,7 +878,7 @@ complete_append(HistoryId, Term, Info, Data) ->
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 
-    {reply, ok, maybe_initiate_snapshot(NewData)}.
+    {reply, ok, NewState, maybe_initiate_snapshot(NewData)}.
 
 check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, Data) ->
     ?CHECK(check_append_history_id(HistoryId, Entries, Data),
@@ -1172,11 +1177,11 @@ check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) ->
            end).
 
 handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
-                        ConfigEntry, RSMSnapshots, _State, Data) ->
+                        ConfigEntry, RSMSnapshots, State, Data) ->
     case check_install_snapshot(HistoryId, Term, SnapshotSeqno,
                                 ConfigEntry, RSMSnapshots, Data) of
         ok ->
-            WasProvisioned = is_provisioned(Data),
+            WasProvisioned = (State =:= provisioned),
             Peer =
                 case WasProvisioned of
                     true ->
@@ -1201,19 +1206,24 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
             NewData = install_snapshot(SnapshotSeqno, ConfigEntry,
                                        RSMSnapshots, Metadata, Data),
 
-            case WasProvisioned of
-                true ->
-                    ok;
-                false ->
-                    announce_system_state(provisioned, build_metadata(NewData))
-            end,
+            NewState =
+                case WasProvisioned of
+                    true ->
+                        State;
+                    false ->
+                        announce_system_state(provisioned,
+                                              build_metadata(NewData)),
+                        provisioned
+                end,
 
             maybe_announce_term_established(Term, Data),
             maybe_announce_new_config(Data, NewData),
             maybe_announce_committed_seqno(Data, NewData),
 
             {reply,
-             {ok, build_metadata(NewData)}, maybe_cancel_snapshot(NewData)};
+             {ok, build_metadata(NewData)},
+             NewState,
+             maybe_cancel_snapshot(NewData)};
         {error, _} = Error ->
             {reply, Error, Data}
     end.
@@ -1251,10 +1261,10 @@ check_snapshot_config(Config, RSMSnapshots) ->
                      {missing_snapshots, Config, MissingRSMs}}}
     end.
 
-handle_store_branch(Branch, _State, Data) ->
+handle_store_branch(Branch, State, Data) ->
     assert_valid_branch(Branch),
 
-    case ?CHECK(check_provisioned(Data),
+    case ?CHECK(check_provisioned(State),
                 check_branch_compatible(Branch, Data),
                 check_branch_coordinator(Branch, Data)) of
         {ok, FinalBranch} ->
