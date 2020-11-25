@@ -356,12 +356,7 @@ init([]) ->
     {ok, State, Data}.
 
 handle_event({call, From}, Call, State, Data) ->
-    case handle_call(Call, From, State, Data) of
-        {reply, Reply, NewData} ->
-            {keep_state, NewData, {reply, From, Reply}};
-        {reply, Reply, NewState, NewData} ->
-            {next_state, NewState, NewData, {reply, From, Reply}}
-    end;
+    handle_call(Call, From, State, Data);
 handle_event(cast, {release_snapshot, Ref}, State, Data) ->
     handle_release_snapshot(Ref, State, Data);
 handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
@@ -376,64 +371,70 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
-handle_call(get_metadata, _From, State, Data) ->
-    handle_get_metadata(State, Data);
-handle_call(get_log, _From, _State, Data) ->
+handle_call(get_metadata, From, State, Data) ->
+    handle_get_metadata(From, State, Data);
+handle_call(get_log, From, _State, _Data) ->
     %% TODO: get rid of this
-    {reply, {ok, chronicle_storage:get_log()}, Data};
+    {keep_state_and_data,
+     {reply, From, {ok, chronicle_storage:get_log()}}};
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
-            _From, State, Data) ->
-    handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, State, Data);
-handle_call({register_rsm, Name, Pid}, _From, State, Data) ->
-    handle_register_rsm(Name, Pid, State, Data);
-handle_call({get_latest_snapshot, Pid}, _From, State, Data) ->
-    handle_get_latest_snapshot(Pid, State, Data);
-handle_call({provision, Machines}, _From, State, Data) ->
-    handle_provision(Machines, State, Data);
-handle_call(reprovision, _From, State, Data) ->
-    handle_reprovision(State, Data);
-handle_call(wipe, _From, State, Data) ->
-    handle_wipe(State, Data);
-handle_call({establish_term, HistoryId, Term}, _From, State, Data) ->
+            From, State, Data) ->
+    handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data);
+handle_call({register_rsm, Name, Pid}, From, State, Data) ->
+    handle_register_rsm(Name, Pid, From, State, Data);
+handle_call({get_latest_snapshot, Pid}, From, State, Data) ->
+    handle_get_latest_snapshot(Pid, From, State, Data);
+handle_call({provision, Machines}, From, State, Data) ->
+    handle_provision(Machines, From, State, Data);
+handle_call(reprovision, From, State, Data) ->
+    handle_reprovision(From, State, Data);
+handle_call(wipe, From, State, Data) ->
+    handle_wipe(From, State, Data);
+handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
     Position = {get_meta(?META_TERM_VOTED, Data), get_high_seqno(Data)},
-    handle_establish_term(HistoryId, Term, Position, State, Data);
-handle_call({establish_term, HistoryId, Term, Position}, _From, State, Data) ->
-    handle_establish_term(HistoryId, Term, Position, State, Data);
-handle_call({ensure_term, HistoryId, Term}, _From, State, Data) ->
-    handle_ensure_term(HistoryId, Term, State, Data);
+    handle_establish_term(HistoryId, Term, Position, From, State, Data);
+handle_call({establish_term, HistoryId, Term, Position}, From, State, Data) ->
+    handle_establish_term(HistoryId, Term, Position, From, State, Data);
+handle_call({ensure_term, HistoryId, Term}, From, State, Data) ->
+    handle_ensure_term(HistoryId, Term, From, State, Data);
 handle_call({append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
-            _From, State, Data) ->
+            From, State, Data) ->
     handle_append(HistoryId, Term,
-                  CommittedSeqno, AtSeqno, Entries, State, Data);
+                  CommittedSeqno, AtSeqno, Entries, From, State, Data);
 handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
-            _From, State, Data) ->
-    handle_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data);
+            From, State, Data) ->
+    handle_local_mark_committed(HistoryId, Term,
+                                CommittedSeqno, From, State, Data);
 handle_call({install_snapshot,
              HistoryId, Term, Seqno, ConfigEntry, RSMSnapshotsMeta},
-            _From, State, Data) ->
+            From, State, Data) ->
     handle_install_snapshot(HistoryId, Term, Seqno,
-                            ConfigEntry, RSMSnapshotsMeta, State, Data);
-handle_call({store_branch, Branch}, _From, State, Data) ->
-    handle_store_branch(Branch, State, Data);
-handle_call({undo_branch, BranchId}, _From, State, Data) ->
-    handle_undo_branch(BranchId, State, Data);
-handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, _From, State, Data) ->
-    handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, State, Data);
-handle_call(_Call, _From, _State, Data) ->
-    {reply, nack, Data}.
+                            ConfigEntry, RSMSnapshotsMeta, From, State, Data);
+handle_call({store_branch, Branch}, From, State, Data) ->
+    handle_store_branch(Branch, From, State, Data);
+handle_call({undo_branch, BranchId}, From, State, Data) ->
+    handle_undo_branch(BranchId, From, State, Data);
+handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, From, State, Data) ->
+    handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, From, State, Data);
+handle_call(_Call, From, _State, _Data) ->
+    {keep_state_and_data,
+     {reply, From, nack}}.
 
 terminate(_Reason, Data) ->
     maybe_cancel_snapshot(Data).
 
 %% internal
-handle_get_metadata(State, Data) ->
-    case check_provisioned(State) of
-        ok ->
-            {reply, {ok, build_metadata(Data)}, Data};
-        {error, _} = Error ->
-            {reply, Error, Data}
-    end.
+handle_get_metadata(From, State, Data) ->
+    Reply =
+        case check_provisioned(State) of
+            ok ->
+                {ok, build_metadata(Data)};
+            {error, _} = Error ->
+                Error
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 build_metadata(Data) ->
     #{?META_PEER := Peer,
@@ -462,26 +463,30 @@ build_metadata(Data) ->
               config_revision = ConfigRevision,
               pending_branch = PendingBranch}.
 
-handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, _State, Data) ->
-    case check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) of
-        ok ->
-            Entries = chronicle_storage:get_log(StartSeqno, EndSeqno),
-            {reply, {ok, Entries}, Data};
-        {error, _} = Error ->
-            {reply, Error, Data}
-    end.
+handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, _State, Data) ->
+    Reply =
+        case check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) of
+            ok ->
+                Entries = chronicle_storage:get_log(StartSeqno, EndSeqno),
+                {ok, Entries};
+            {error, _} = Error ->
+                Error
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) ->
     ?CHECK(check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            check_log_range(StartSeqno, EndSeqno, Data)).
 
-handle_register_rsm(Name, Pid, _State,
+handle_register_rsm(Name, Pid, From, _State,
                     #data{rsms_by_name = RSMs,
                           rsms_by_mref = MRefs} = Data) ->
     case maps:find(Name, RSMs) of
         {ok, {OtherPid, _}} ->
-            {reply, {error, {already_registered, Name, OtherPid}}, Data};
+            {keep_state_and_data,
+             {reply, From, {error, {already_registered, Name, OtherPid}}}};
         error ->
             ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
 
@@ -498,22 +503,31 @@ handle_register_rsm(Name, Pid, _State,
                             Info0
                     end,
 
-            {reply, {ok, Info1},
-             Data#data{rsms_by_name = NewRSMs,
-                       rsms_by_mref = NewMRefs}}
+            Reply = {ok, Info1},
+            NewData = Data#data{rsms_by_name = NewRSMs,
+                                rsms_by_mref = NewMRefs},
+
+            {keep_state,
+             NewData,
+             {reply, From, Reply}}
     end.
 
-handle_get_latest_snapshot(Pid, _State,
+handle_get_latest_snapshot(Pid, From, _State,
                            #data{snapshot_readers = Readers,
                                  storage = Storage} = Data) ->
     case get_and_hold_latest_snapshot(Data) of
-        {{Seqno, Config}, NewData} ->
+        {{Seqno, Config}, NewData0} ->
             MRef = erlang:monitor(process, Pid),
             NewReaders = Readers#{MRef => Seqno},
-            {reply, {ok, MRef, Seqno, Config, Storage},
-             NewData#data{snapshot_readers = NewReaders}};
+            NewData = NewData0#data{snapshot_readers = NewReaders},
+            Reply = {ok, MRef, Seqno, Config, Storage},
+
+            {keep_state,
+             NewData,
+             {reply, From, Reply}};
         no_snapshot ->
-            {reply, {error, no_snapshot}, Data}
+            {keep_state_and_data,
+             {reply, From, {error, no_snapshot}}}
     end.
 
 handle_release_snapshot(MRef, _State,
@@ -610,7 +624,7 @@ foreach_rsm(Fun, #data{rsms_by_name = RSMs}) ->
               Fun(Name, Pid)
       end, RSMs).
 
-handle_reprovision(State, Data) ->
+handle_reprovision(From, State, Data) ->
     case check_reprovision(State, Data) of
         {ok, Config} ->
             #{?META_HISTORY_ID := HistoryId,
@@ -640,9 +654,9 @@ handle_reprovision(State, Data) ->
             announce_new_config(NewData),
             announce_committed_seqno(Seqno, NewData),
 
-            {reply, ok, NewData};
+            {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_reprovision(State, Data) ->
@@ -667,7 +681,7 @@ check_reprovision(State, Data) ->
             Error
     end.
 
-handle_provision(Machines0, State, Data) ->
+handle_provision(Machines0, From, State, Data) ->
     case State of
         not_provisioned ->
             Peer = get_peer_name(),
@@ -702,9 +716,10 @@ handle_provision(Machines0, State, Data) ->
             announce_new_config(NewData),
             announce_committed_seqno(Seqno, NewData),
 
-            {reply, ok, provisioned, NewData};
+            {next_state, provisioned, NewData, {reply, From, ok}};
         provisioned ->
-            {reply, {error, already_provisioned}, Data}
+            {keep_state_and_data,
+             {reply, From, {error, already_provisioned}}}
     end.
 
 is_provisioned(Data) ->
@@ -718,11 +733,13 @@ check_provisioned(State) ->
             {error, not_provisioned}
     end.
 
-handle_wipe(_State, Data) ->
+handle_wipe(From, _State, Data) ->
     announce_system_state(unprovisioned),
     %% TODO: There might be snapshots held by some of the RSMs. Wiping without
     %% ensuring that all of those are stopped is therefore unsafe.
-    {reply, ok, not_provisioned, perform_wipe(Data)}.
+    {next_state,
+     not_provisioned, perform_wipe(Data),
+     {reply, From, ok}}.
 
 perform_wipe(Data) ->
     NewData = maybe_cancel_snapshot(Data),
@@ -734,7 +751,7 @@ perform_wipe(Data) ->
 
     init_data().
 
-handle_establish_term(HistoryId, Term, Position, _State, Data) ->
+handle_establish_term(HistoryId, Term, Position, From, _State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
@@ -743,9 +760,11 @@ handle_establish_term(HistoryId, Term, Position, _State, Data) ->
             NewData = store_meta(#{?META_TERM => Term}, Data),
             announce_term_established(Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
-            {reply, {ok, build_metadata(Data)}, NewData};
+
+            Reply = {ok, build_metadata(Data)},
+            {keep_state, NewData, {reply, From, Reply}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_establish_term(HistoryId, Term, Position, Data) ->
@@ -773,26 +792,29 @@ check_peer_current(Position, Data) ->
             ok
     end.
 
-handle_ensure_term(HistoryId, Term, _State, Data) ->
-    case ?CHECK(check_history_id(HistoryId, Data),
-                check_not_earlier_term(Term, Data)) of
-        ok ->
-            {reply, {ok, build_metadata(Data)}, Data};
-        {error, _} = Error ->
-            {reply, Error, Data}
-    end.
+handle_ensure_term(HistoryId, Term, From, _State, Data) ->
+    Reply =
+        case ?CHECK(check_history_id(HistoryId, Data),
+                    check_not_earlier_term(Term, Data)) of
+            ok ->
+                {ok, build_metadata(Data)};
+            {error, _} = Error ->
+                Error
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_append(HistoryId, Term,
-              CommittedSeqno, AtSeqno, Entries, State, Data) ->
+              CommittedSeqno, AtSeqno, Entries, From, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
     case check_append(HistoryId, Term,
                       CommittedSeqno, AtSeqno, Entries, Data) of
         {ok, Info} ->
-            complete_append(HistoryId, Term, Info, State, Data);
+            complete_append(HistoryId, Term, Info, From, State, Data);
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 extract_latest_config(Entries) ->
@@ -808,7 +830,7 @@ extract_latest_config(Entries) ->
               end
       end, false, Entries).
 
-complete_append(HistoryId, Term, Info, State, Data) ->
+complete_append(HistoryId, Term, Info, From, State, Data) ->
     #{entries := Entries,
       start_seqno := StartSeqno,
       end_seqno := EndSeqno,
@@ -874,7 +896,9 @@ complete_append(HistoryId, Term, Info, State, Data) ->
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 
-    {reply, ok, NewState, maybe_initiate_snapshot(NewData)}.
+    {next_state,
+     NewState, maybe_initiate_snapshot(NewData),
+     {reply, From, ok}}.
 
 check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, Data) ->
     ?CHECK(check_append_history_id(HistoryId, Entries, Data),
@@ -1133,7 +1157,8 @@ check_not_earlier_term(Term, Data) ->
             {error, {conflicting_term, CurrentTerm}}
     end.
 
-handle_local_mark_committed(HistoryId, Term, CommittedSeqno, _State, Data) ->
+handle_local_mark_committed(HistoryId, Term,
+                            CommittedSeqno, From, _State, Data) ->
     case check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) of
         ok ->
             OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
@@ -1152,9 +1177,9 @@ handle_local_mark_committed(HistoryId, Term, CommittedSeqno, _State, Data) ->
                         NewData0
                 end,
 
-            {reply, ok, NewData};
+            {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) ->
@@ -1173,7 +1198,7 @@ check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) ->
            end).
 
 handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
-                        ConfigEntry, RSMSnapshots, State, Data) ->
+                        ConfigEntry, RSMSnapshots, From, State, Data) ->
     case check_install_snapshot(HistoryId, Term, SnapshotSeqno,
                                 ConfigEntry, RSMSnapshots, Data) of
         ok ->
@@ -1216,12 +1241,11 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
             maybe_announce_new_config(Data, NewData),
             maybe_announce_committed_seqno(Data, NewData),
 
-            {reply,
-             {ok, build_metadata(NewData)},
-             NewState,
-             maybe_cancel_snapshot(NewData)};
+            {next_state,
+             NewState, maybe_cancel_snapshot(NewData),
+             {reply, From, {ok, build_metadata(NewData)}}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_install_snapshot(HistoryId, Term,
@@ -1257,7 +1281,7 @@ check_snapshot_config(Config, RSMSnapshots) ->
                      {missing_snapshots, Config, MissingRSMs}}}
     end.
 
-handle_store_branch(Branch, State, Data) ->
+handle_store_branch(Branch, From, State, Data) ->
     assert_valid_branch(Branch),
 
     case ?CHECK(check_provisioned(State),
@@ -1276,9 +1300,11 @@ handle_store_branch(Branch, State, Data) ->
             end,
 
             ?DEBUG("Stored a branch record:~n~p", [FinalBranch]),
-            {reply, {ok, build_metadata(NewData)}, NewData};
+            {keep_state,
+             NewData,
+             {reply, From, {ok, build_metadata(NewData)}}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_branch_compatible(NewBranch, Data) ->
@@ -1318,7 +1344,7 @@ check_branch_coordinator(Branch, Data) ->
             {error, {coordinator_not_in_peers, Coordinator, Peers}}
     end.
 
-handle_undo_branch(BranchId, _State, Data) ->
+handle_undo_branch(BranchId, From, _State, Data) ->
     assert_valid_history_id(BranchId),
     case check_branch_id(BranchId, Data) of
         ok ->
@@ -1326,19 +1352,22 @@ handle_undo_branch(BranchId, _State, Data) ->
             announce_new_history(NewData),
 
             ?DEBUG("Undid branch ~p", [BranchId]),
-            {reply, ok, NewData};
+            {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
-            {reply, Error, Data}
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
-handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, _State, Data) ->
+handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, From, _State, Data) ->
     case need_rsm_snapshot(RSM, Seqno, Data) of
         true ->
             {Pid, NewData} =
                 spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno, Data),
-            {reply, {ok, Pid}, NewData};
+            {keep_state,
+             NewData,
+             {reply, From, {ok, Pid}}};
         false ->
-            {reply, {error, rejected}, Data}
+            {keep_state_and_data,
+             {reply, From, {error, rejected}}}
     end.
 
 spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno,
