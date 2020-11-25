@@ -346,13 +346,12 @@ callback_mode() ->
 init([]) ->
     Data = init_data(),
     State =
-        case is_provisioned(Data) of
-            true ->
+        case get_meta(?META_STATE, Data) of
+            ?META_STATE_PROVISIONED ->
                 provisioned;
-            false ->
+            ?META_STATE_NOT_PROVISIONED ->
                 not_provisioned
         end,
-
     {ok, State, Data}.
 
 handle_event({call, From}, Call, State, Data) ->
@@ -705,7 +704,8 @@ handle_provision(Machines0, From, State, Data) ->
                    [HistoryId, Config]),
 
             NewData = append_entry(ConfigEntry,
-                                   #{?META_PEER => Peer,
+                                   #{?META_STATE => ?META_STATE_PROVISIONED,
+                                     ?META_PEER => Peer,
                                      ?META_HISTORY_ID => HistoryId,
                                      ?META_TERM => Term,
                                      ?META_TERM_VOTED => Term,
@@ -721,9 +721,6 @@ handle_provision(Machines0, From, State, Data) ->
             {keep_state_and_data,
              {reply, From, {error, already_provisioned}}}
     end.
-
-is_provisioned(Data) ->
-    get_config(Data) =/= undefined.
 
 check_provisioned(State) ->
     case State of
@@ -862,7 +859,8 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
           ?META_TERM_VOTED => Term,
           ?META_PENDING_BRANCH => undefined,
           ?META_PEER => Peer},
-    PostMetadata = #{?META_COMMITTED_SEQNO => NewCommittedSeqno},
+    PostMetadata = #{?META_STATE => ?META_STATE_PROVISIONED,
+                     ?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
     %% When resolving a branch, we must never delete the branch record without
     %% also logging a new config. Therefore the update needs to be atomic.
@@ -1217,7 +1215,8 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
                         get_peer_name()
                 end,
 
-            Metadata = #{?META_HISTORY_ID => HistoryId,
+            Metadata = #{?META_STATE => ?META_STATE_PROVISIONED,
+                         ?META_HISTORY_ID => HistoryId,
                          ?META_TERM => Term,
                          ?META_TERM_VOTED => Term,
                          ?META_PENDING_BRANCH => undefined,
@@ -1592,7 +1591,8 @@ storage_open() ->
             true ->
                 Storage0;
             false ->
-                SeedMeta = #{?META_PEER => ?NO_PEER,
+                SeedMeta = #{?META_STATE => not_provisioned,
+                             ?META_PEER => ?NO_PEER,
                              ?META_HISTORY_ID => ?NO_HISTORY,
                              ?META_TERM => ?NO_TERM,
                              ?META_TERM_VOTED => ?NO_TERM,

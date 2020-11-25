@@ -140,6 +140,10 @@
 -define(CRC_BITS, 32).
 -define(CRC_BYTES, (?CRC_BITS bsr 3)).
 
+-define(META_STATE_PROVISIONED, provisioned).
+-define(META_STATE_NOT_PROVISIONED, not_provisioned).
+
+-define(META_STATE, state).
 -define(META_PEER, peer).
 -define(META_HISTORY_ID, history_id).
 -define(META_TERM, term).

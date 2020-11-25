@@ -33,7 +33,10 @@
 -define(MAX_LOG_SEGMENTS, 20).
 -define(MAX_SNAPSHOTS, 2).
 
--type meta() :: #{ ?META_PEER => chronicle:peer(),
+-type meta_state() :: ?META_STATE_PROVISIONED
+                    | ?META_STATE_NOT_PROVISIONED.
+-type meta() :: #{ ?META_STATE => meta_state(),
+                   ?META_PEER => chronicle:peer(),
                    ?META_HISTORY_ID => chronicle:history_id(),
                    ?META_TERM => chronicle:leader_term(),
                    ?META_TERM_VOTED => chronicle:leader_term(),
