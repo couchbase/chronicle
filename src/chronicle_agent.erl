@@ -746,14 +746,14 @@ perform_wipe(Data) ->
 
     init_data().
 
-handle_establish_term(HistoryId, Term, Position, From, _State, Data) ->
+handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
     case check_establish_term(HistoryId, Term, Position, Data) of
         ok ->
             NewData = store_meta(#{?META_TERM => Term}, Data),
-            announce_term_established(Term),
+            announce_term_established(State, Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
 
             Reply = {ok, build_metadata(Data)},
@@ -869,15 +869,15 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     NewState =
         case WasProvisioned of
             true ->
+                maybe_announce_term_established(Term, Data),
+                maybe_announce_new_config(Data, NewData),
+                maybe_announce_committed_seqno(Data, NewData),
+
                 State;
             false ->
                 announce_system_state(provisioned, build_metadata(NewData)),
                 provisioned
         end,
-
-    maybe_announce_term_established(Term, Data),
-    maybe_announce_new_config(Data, NewData),
-    maybe_announce_committed_seqno(Data, NewData),
 
     ?DEBUG("Appended entries.~n"
            "History id: ~p~n"
@@ -1229,16 +1229,16 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
             NewState =
                 case WasProvisioned of
                     true ->
+                        maybe_announce_term_established(Term, Data),
+                        maybe_announce_new_config(Data, NewData),
+                        maybe_announce_committed_seqno(Data, NewData),
+
                         State;
                     false ->
                         announce_system_state(provisioned,
                                               build_metadata(NewData)),
                         provisioned
                 end,
-
-            maybe_announce_term_established(Term, Data),
-            maybe_announce_new_config(Data, NewData),
-            maybe_announce_committed_seqno(Data, NewData),
 
             {next_state,
              NewState, maybe_cancel_snapshot(NewData),
@@ -1535,6 +1535,14 @@ maybe_announce_term_established(Term, Data) ->
             ok;
         false ->
             announce_term_established(Term)
+    end.
+
+announce_term_established(State, Term) ->
+    case State of
+        provisioned ->
+            announce_term_established(Term);
+        _ ->
+            ok
     end.
 
 announce_term_established(Term) ->
