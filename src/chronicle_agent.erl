@@ -1157,7 +1157,8 @@ check_not_earlier_term(Term, Data) ->
 
 handle_local_mark_committed(HistoryId, Term,
                             CommittedSeqno, From, _State, Data) ->
-    case check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) of
+    case check_local_mark_committed(HistoryId, Term,
+                                    CommittedSeqno, State, Data) of
         ok ->
             OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
             NewData =
@@ -1180,10 +1181,11 @@ handle_local_mark_committed(HistoryId, Term,
             {keep_state_and_data, {reply, From, Error}}
     end.
 
-check_local_mark_committed(HistoryId, Term, CommittedSeqno, Data) ->
+check_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data) ->
     HighSeqno = get_high_seqno(Data),
 
-    ?CHECK(check_history_id(HistoryId, Data),
+    ?CHECK(check_provisioned(State),
+           check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            case check_committed_seqno(Term, CommittedSeqno, HighSeqno, Data) of
                {ok, FinalCommittedSeqno} ->
