@@ -1217,12 +1217,12 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
                         get_peer_name()
                 end,
 
-            Metadata = #{history_id => HistoryId,
-                         term => Term,
-                         term_voted => Term,
-                         pending_branch => undefined,
-                         peer => Peer,
-                         committed_seqno => SnapshotSeqno},
+            Metadata = #{?META_HISTORY_ID => HistoryId,
+                         ?META_TERM => Term,
+                         ?META_TERM_VOTED => Term,
+                         ?META_PENDING_BRANCH => undefined,
+                         ?META_PEER => Peer,
+                         ?META_COMMITTED_SEQNO => SnapshotSeqno},
 
             NewData = install_snapshot(SnapshotSeqno, ConfigEntry,
                                        RSMSnapshots, Metadata, Data),
