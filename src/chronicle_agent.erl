@@ -475,7 +475,8 @@ handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, _State, Data) ->
     {keep_state_and_data, {reply, From, Reply}}.
 
 check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) ->
-    ?CHECK(check_history_id(HistoryId, Data),
+    ?CHECK(check_provisioned(State),
+           check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            check_log_range(StartSeqno, EndSeqno, Data)).
 
