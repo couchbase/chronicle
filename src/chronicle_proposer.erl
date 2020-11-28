@@ -107,8 +107,8 @@ stop(Pid) ->
 sync_quorum(Pid, ReplyTo) ->
     gen_statem:cast(Pid, {sync_quorum, ReplyTo}).
 
-get_config(Pid, ReplyTo) ->
-    gen_statem:cast(Pid, {get_config, ReplyTo}).
+query(Pid, ReplyTo, Query) ->
+    gen_statem:cast(Pid, {query, ReplyTo, Query}).
 
 cas_config(Pid, ReplyTo, NewConfig, Revision) ->
     gen_statem:cast(Pid, {cas_config, ReplyTo, NewConfig, Revision}).
@@ -182,13 +182,13 @@ handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
 handle_event(cast, {sync_quorum, ReplyTo}, State, Data) ->
     handle_sync_quorum(ReplyTo, State, Data);
-handle_event(cast, {get_config, ReplyTo} = Request, proposing, Data) ->
+handle_event(cast, {query, ReplyTo, Query} = Request, proposing, Data) ->
     maybe_postpone_config_request(
       Request, Data,
       fun () ->
-              handle_get_config(ReplyTo, Data)
+              handle_query(ReplyTo, Query, Data)
       end);
-handle_event(cast, {get_config, ReplyTo}, {stopped, _}, _Data) ->
+handle_event(cast, {query, ReplyTo, _}, {stopped, _}, _Data) ->
     reply_not_leader(ReplyTo),
     keep_state_and_data;
 handle_event(cast,
@@ -1092,6 +1092,14 @@ start_sync_quorum(ReplyTo, OkReply,
                         sync_requests = NewSyncRequests},
 
     {keep_state, send_heartbeat(NewData)}.
+
+handle_query(ReplyTo, Query, Data) ->
+    case Query of
+        get_config ->
+            handle_get_config(ReplyTo, Data);
+        _ ->
+            reply_request(ReplyTo, {error, unknown_query})
+    end.
 
 handle_get_config(ReplyTo, #data{config = Config,
                                  config_revision = Revision} = Data) ->

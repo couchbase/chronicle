@@ -48,7 +48,10 @@ register_rsm(Name, Pid) ->
     gen_statem:call(?SERVER, {register_rsm, Name, Pid}, 10000).
 
 get_config(Leader, Timeout) ->
-    call(?SERVER(Leader), get_config, Timeout).
+    leader_query(Leader, get_config, Timeout).
+
+leader_query(Leader, Query, Timeout) ->
+    call(?SERVER(Leader), {leader_query, Query}, Timeout).
 
 %% TODO: think more about what CasRevision should be.
 %%
@@ -113,8 +116,8 @@ handle_event(info, {proposer_msg, Msg}, #leader{} = State, Data) ->
     handle_proposer_msg(Msg, State, Data);
 handle_event(info, {batch_ready, BatchField}, State, Data) ->
     handle_batch_ready(BatchField, State, Data);
-handle_event({call, From}, get_config, State, Data) ->
-    handle_get_config(From, State, Data);
+handle_event({call, From}, {leader_query, Query}, State, Data) ->
+    handle_leader_query(Query, From, State, Data);
 handle_event({call, From}, {cas_config, NewConfig, Revision}, State, Data) ->
     handle_cas_config(NewConfig, Revision, From, State, Data);
 handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
@@ -327,7 +330,7 @@ deliver_syncs(Syncs, #data{proposer = Proposer}) ->
 deliver_commands(Commands, #data{proposer = Proposer}) ->
     chronicle_proposer:append_commands(Proposer, Commands).
 
-handle_get_config(From, State, Data) ->
+handle_leader_query(Query, From, State, Data) ->
     ReplyTo = {from, From},
     handle_leader_request(
       any, ReplyTo, State,
@@ -335,13 +338,13 @@ handle_get_config(From, State, Data) ->
               postpone_if_not_ready(
                 State,
                 fun () ->
-                        deliver_get_config(ReplyTo, Data),
+                        deliver_leader_query(Query, ReplyTo, Data),
                         keep_state_and_data
                 end)
       end).
 
-deliver_get_config(ReplyTo, #data{proposer = Proposer}) ->
-    chronicle_proposer:get_config(Proposer, ReplyTo).
+deliver_leader_query(Query, ReplyTo, #data{proposer = Proposer}) ->
+    chronicle_proposer:query(Proposer, ReplyTo, Query).
 
 handle_cas_config(NewConfig, Revision, From, State, Data) ->
     ReplyTo = {from, From},
