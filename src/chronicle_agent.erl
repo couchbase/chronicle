@@ -462,9 +462,10 @@ build_metadata(Data) ->
               config_revision = ConfigRevision,
               pending_branch = PendingBranch}.
 
-handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, _State, Data) ->
+handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data) ->
     Reply =
-        case check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) of
+        case check_get_log(HistoryId, Term,
+                           StartSeqno, EndSeqno, State, Data) of
             ok ->
                 Entries = chronicle_storage:get_log(StartSeqno, EndSeqno),
                 {ok, Entries};
@@ -474,7 +475,7 @@ handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, _State, Data) ->
 
     {keep_state_and_data, {reply, From, Reply}}.
 
-check_get_log(HistoryId, Term, StartSeqno, EndSeqno, Data) ->
+check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State, Data) ->
     ?CHECK(check_provisioned(State),
            check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
