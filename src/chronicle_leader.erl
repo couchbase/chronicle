@@ -145,10 +145,10 @@ init([]) ->
     ok = chronicle_ets:register_writer([leader_info]),
 
     Data =
-        case chronicle_agent:get_metadata() of
-            {ok, Metadata} ->
+        case chronicle_agent:get_system_state() of
+            {provisioned, Metadata} ->
                 metadata2data(Metadata);
-            {error, not_provisioned} ->
+            not_provisioned ->
                 #data{}
         end,
 
@@ -630,7 +630,7 @@ election_worker() ->
     exit({shutdown, {election_result, Result}}).
 
 do_election_worker() ->
-    {ok, Metadata} = chronicle_agent:get_metadata(),
+    Metadata = chronicle_agent:get_metadata(),
 
     LatestTerm = Metadata#metadata.term,
     HistoryId = chronicle_agent:get_history_id(Metadata),

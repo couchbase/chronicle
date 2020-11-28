@@ -46,7 +46,13 @@ init([]) ->
               end
       end),
 
-    State = chronicle_agent:get_system_state(),
+    State =
+        case chronicle_agent:get_system_state() of
+            {provisioned, _} ->
+                provisioned;
+            not_provisioned ->
+                unprovisioned
+        end,
 
     %% TODO: reconsider the strategy
     Flags = #{strategy => one_for_all,

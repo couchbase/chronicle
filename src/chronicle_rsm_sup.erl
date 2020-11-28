@@ -44,7 +44,7 @@ init([]) ->
               end
       end),
 
-    {ok, Metadata} = chronicle_agent:get_metadata(),
+    Metadata = chronicle_agent:get_metadata(),
 
     %% TODO: reconsider the strategy
     Flags = #{strategy => one_for_one,

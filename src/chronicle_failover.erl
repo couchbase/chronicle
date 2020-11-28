@@ -58,25 +58,21 @@ handle_failover(RemainingPeers, State) ->
     {reply, prepare_branch(HistoryId, RemainingPeers), State}.
 
 handle_retry_failover(HistoryId, State) ->
-    case chronicle_agent:get_metadata() of
-        {ok, Metadata} ->
-            #metadata{peer = Self,
-                      pending_branch = Branch} = Metadata,
-            case Branch of
-                #branch{coordinator = Coordinator,
-                        history_id = BranchId,
-                        status = Status}
-                  when Coordinator =:= Self
-                       andalso Status =:= unknown
-                       andalso BranchId =:= HistoryId ->
-                    {reply, prepare_branch_on_followers(Metadata, Branch)};
-                _ ->
-                    %% TODO: consider making the error more specific to the
-                    %% exact cause of failure
-                    {reply, {error, {bad_failover, Branch}}, State}
-            end;
-        {error, _} = Error ->
-            {reply, {failed_to_get_metadata, Error}, State}
+    Metadata = chronicle_agent:get_metadata(),
+    #metadata{peer = Self,
+              pending_branch = Branch} = Metadata,
+    case Branch of
+        #branch{coordinator = Coordinator,
+                history_id = BranchId,
+                status = Status}
+          when Coordinator =:= Self
+               andalso Status =:= unknown
+               andalso BranchId =:= HistoryId ->
+            {reply, prepare_branch_on_followers(Metadata, Branch)};
+        _ ->
+            %% TODO: consider making the error more specific to the
+            %% exact cause of failure
+            {reply, {error, {bad_failover, Branch}}, State}
     end.
 
 prepare_branch(HistoryId, Peers) ->

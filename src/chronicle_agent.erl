@@ -86,21 +86,20 @@ start_link() ->
 monitor(Peer) ->
     chronicle_utils:monitor_process(?SERVER(Peer)).
 
--spec get_system_state() -> provisioned | unprovisioned.
+-spec get_system_state() ->
+          not_provisioned |
+          {provisioned, #metadata{}}.
 get_system_state() ->
-    case get_metadata() of
-        {ok, _} ->
-            provisioned;
-        {error, not_provisioned} ->
-            unprovisioned
-    end.
+    call(?SERVER, get_system_state).
 
--type get_metadata_result() :: {ok, #metadata{}} |
-                               {error, not_provisioned}.
-
--spec get_metadata() -> get_metadata_result().
+-spec get_metadata() -> #metadata{}.
 get_metadata() ->
-    call(?SERVER, get_metadata).
+    case get_system_state() of
+        {provisioned, Metadata} ->
+            Metadata;
+        _ ->
+            exit(not_provisioned)
+    end.
 
 check_grant_vote(HistoryId, Position) ->
     call(?SERVER, {check_grant_vote, HistoryId, Position}).
@@ -377,8 +376,8 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
-handle_call(get_metadata, From, State, Data) ->
-    handle_get_metadata(From, State, Data);
+handle_call(get_system_state, From, State, Data) ->
+    handle_get_system_state(From, State, Data);
 handle_call({check_grant_vote, PeerHistoryId, PeerPosition},
             From, State, Data) ->
     handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data);
@@ -436,13 +435,13 @@ terminate(_Reason, Data) ->
     maybe_cancel_snapshot(Data).
 
 %% internal
-handle_get_metadata(From, State, Data) ->
+handle_get_system_state(From, State, Data) ->
     Reply =
-        case check_provisioned(State) of
-            ok ->
-                {ok, build_metadata(Data)};
-            {error, _} = Error ->
-                Error
+        case State of
+            provisioned ->
+                {provisioned, build_metadata(Data)};
+            not_provisioned ->
+                not_provisioned
         end,
 
     {keep_state_and_data, {reply, From, Reply}}.
