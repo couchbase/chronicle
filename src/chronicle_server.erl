@@ -545,24 +545,29 @@ prepare_vnode_dir() ->
 teardown_vnet(_) ->
     vnet:stop().
 
-simple_test__(Nodes) ->
-    Machines = [{kv, chronicle_kv, []}],
-    {ok, ClusterInfo} =
-        rpc_node(a,
-                 fun () ->
-                         ok = chronicle:provision(Machines),
-                         chronicle:get_cluster_info()
-                 end),
-
-    OtherNodes = Nodes -- [a],
-    ok = rpc_nodes(OtherNodes,
+add_voters(ViaNode, Voters) ->
+    {ok, ClusterInfo} = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
+    ok = rpc_nodes(Voters,
                    fun () ->
                            ok = chronicle_agent:prepare_join(ClusterInfo)
                    end),
+    ok = rpc_node(ViaNode,
+                  fun () ->
+                          chronicle:add_voters(Voters)
+                  end).
+
+simple_test__(Nodes) ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          chronicle:provision(Machines)
+                  end),
+
+    OtherNodes = Nodes -- [a],
+    add_voters(a, OtherNodes),
 
     ok = rpc_node(a,
                   fun () ->
-                          ok = chronicle:add_voters(OtherNodes),
                           ok = chronicle:remove_peer(d),
                           {ok, Voters} = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
@@ -682,21 +687,14 @@ leader_transfer_test_() ->
 
 leader_transfer_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
-    {ok, ClusterInfo} =
-        rpc_node(a,
-                 fun () ->
-                         ok = chronicle:provision(Machines),
-                         chronicle:get_cluster_info()
-                 end),
-    ok = rpc_nodes(Nodes -- [a],
-                   fun () ->
-                           ok = chronicle_agent:prepare_join(ClusterInfo)
-                   end),
-
+    ok = rpc_node(a,
+                  fun () ->
+                          chronicle:provision(Machines)
+                  end),
+    add_voters(a, Nodes -- [a]),
     {ok, Leader} =
         rpc_node(a,
                  fun () ->
-                         ok = chronicle:add_voters(Nodes),
                          {L, _} = chronicle_leader:wait_for_leader(),
                          {ok, L}
                  end),
@@ -787,22 +785,16 @@ partition_test_() ->
 
 partition_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
-    {ok, ClusterInfo} =
-        rpc_node(a,
-                 fun () ->
-                         ok = chronicle:provision(Machines),
-                         chronicle:get_cluster_info()
-                 end),
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines)
+                  end),
 
     OtherNodes = Nodes -- [a],
-    ok = rpc_nodes(OtherNodes,
-                   fun () ->
-                           ok = chronicle_agent:prepare_join(ClusterInfo)
-                   end),
+    add_voters(a, OtherNodes),
 
     ok = rpc_node(a,
                   fun () ->
-                          ok = chronicle:add_voters(OtherNodes),
                           {ok, _} = chronicle_kv:set(kv, a, 42),
                           {a, _} = chronicle_leader:get_leader(),
                           ok
