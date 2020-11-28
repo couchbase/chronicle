@@ -670,7 +670,7 @@ handle_snapshot_timeout(_State, #data{snapshot_state = SnapshotState} = Data) ->
 
 handle_retry_snapshot(_State, Data) ->
     {retry, _} = Data#data.snapshot_state,
-    {reply, initiate_snapshot(Data#data{snapshot_state = undefined})}.
+    {keep_state, initiate_snapshot(Data#data{snapshot_state = undefined})}.
 
 foreach_rsm(Fun, #data{rsms_by_name = RSMs}) ->
     chronicle_utils:maps_foreach(
