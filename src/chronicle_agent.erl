@@ -760,7 +760,7 @@ check_provisioned(State) ->
     end.
 
 handle_wipe(From, _State, Data) ->
-    announce_system_state(unprovisioned),
+    announce_system_state(not_provisioned),
     %% TODO: There might be snapshots held by some of the RSMs. Wiping without
     %% ensuring that all of those are stopped is therefore unsafe.
     {next_state,

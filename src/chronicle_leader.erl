@@ -325,8 +325,8 @@ is_interesting_event({new_config, _, _}) ->
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({system_state, unprovisioned, _}, State, Data) ->
-    handle_unprovisioned(State, Data);
+handle_chronicle_event({system_state, not_provisioned, _}, State, Data) ->
+    handle_not_provisioned(State, Data);
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
 handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
@@ -338,8 +338,8 @@ handle_chronicle_event({new_history, HistoryId, Metadata}, State, Data) ->
 handle_chronicle_event({term_established, Term}, State, Data) ->
     handle_new_term(Term, State, Data).
 
-handle_unprovisioned(_State, Data) ->
-    ?INFO("System became unprovisioned."),
+handle_not_provisioned(_State, Data) ->
+    ?INFO("System became not provisioned."),
     NewData = Data#data{peers = [],
                         history_id = ?NO_HISTORY,
                         established_term = ?NO_TERM,

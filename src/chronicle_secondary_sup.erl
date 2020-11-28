@@ -51,7 +51,7 @@ init([]) ->
             {provisioned, _} ->
                 provisioned;
             not_provisioned ->
-                unprovisioned
+                not_provisioned
         end,
 
     %% TODO: reconsider the strategy
@@ -64,7 +64,7 @@ handle_event({state, NewState}, _) ->
     {noreply, NewState}.
 
 %% TODO: revise shutdown specifications
-child_specs(unprovisioned) ->
+child_specs(not_provisioned) ->
     Leader = #{id => chronicle_leader,
                start => {chronicle_leader, start_link, []},
                restart => permanent,
@@ -91,4 +91,4 @@ child_specs(provisioned) ->
                shutdown => infinity,
                type => supervisor},
 
-    child_specs(unprovisioned) ++ [Server, Failover, RSMSup].
+    child_specs(not_provisioned) ++ [Server, Failover, RSMSup].
