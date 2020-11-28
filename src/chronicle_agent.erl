@@ -958,7 +958,7 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% state machines get deleted.
 
     {next_state,
-     NewState, maybe_initiate_snapshot(NewData),
+     NewState, maybe_initiate_snapshot(NewState, NewData),
      {reply, From, ok}}.
 
 check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State, Data) ->
@@ -1788,6 +1788,16 @@ release_snapshot(Seqno, #data{storage = Storage} = Data) ->
 
 get_log_entry(Seqno, #data{storage = Storage}) ->
     chronicle_storage:get_log_entry(Seqno, Storage).
+
+maybe_initiate_snapshot(State, Data) ->
+    case State of
+        provisioned ->
+            maybe_initiate_snapshot(Data);
+        _ ->
+            %% State machines aren't running before the agent moves to state
+            %% 'provisioned'.
+            Data
+    end.
 
 maybe_initiate_snapshot(#data{snapshot_state = #snapshot_state{}} = Data) ->
     Data;
