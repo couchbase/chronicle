@@ -161,7 +161,7 @@ config_api(Req, #state{domain=config, op=provision}) ->
     case chronicle:provision(Machines) of
         ok ->
             ok;
-        {error, already_provisioned} ->
+        {error, provisioned} ->
             ok
     end,
     cowboy_req:reply(200, #{

@@ -88,6 +88,7 @@ monitor(Peer) ->
 
 -spec get_system_state() ->
           not_provisioned |
+          {joining_cluster, chronicle:history_id()} |
           {provisioned, #metadata{}}.
 get_system_state() ->
     call(?SERVER, get_system_state).
@@ -208,7 +209,7 @@ get_history_id(#metadata{pending_branch =
                              #branch{history_id = PendingHistoryId}}) ->
     PendingHistoryId.
 
--type provision_result() :: ok | {error, already_provisioned}.
+-type provision_result() :: ok | {error, joining_cluster | provisioned}.
 -spec provision([Machine]) -> provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 provision(Machines) ->
@@ -361,6 +362,8 @@ init([]) ->
         case get_meta(?META_STATE, Data) of
             ?META_STATE_PROVISIONED ->
                 provisioned;
+            ?META_STATE_PREPARE_JOIN ->
+                prepare_join;
             ?META_STATE_NOT_PROVISIONED ->
                 not_provisioned
         end,
@@ -443,14 +446,25 @@ terminate(_Reason, Data) ->
 %% internal
 handle_get_system_state(From, State, Data) ->
     Reply =
-        case State of
-            provisioned ->
-                {provisioned, build_metadata(Data)};
-            not_provisioned ->
-                not_provisioned
+        case get_external_state(State) of
+            provisioned = ExtState ->
+                {ExtState, build_metadata(Data)};
+            joining_cluster = ExtState ->
+                {ExtState, get_effective_history_id(Data)};
+            ExtState ->
+                ExtState
         end,
-
     {keep_state_and_data, {reply, From, Reply}}.
+
+get_external_state(State) ->
+    case State of
+        provisioned ->
+            provisioned;
+        prepare_join ->
+            joining_cluster;
+        not_provisioned ->
+            not_provisioned
+    end.
 
 build_metadata(Data) ->
     #{?META_PEER := Peer,
@@ -479,23 +493,27 @@ build_metadata(Data) ->
               config_revision = ConfigRevision,
               pending_branch = PendingBranch}.
 
-handle_check_grant_vote(PeerHistoryId, PeerPosition, From, _State, Data) ->
+handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->
     OurHistoryId = get_effective_history_id(Data),
     Reply =
-        case OurHistoryId of
-            ?NO_HISTORY ->
-                {error, no_history};
-            _ ->
-                case ?CHECK(check_history_id(PeerHistoryId, OurHistoryId),
-                            check_peer_current(PeerPosition, Data)) of
-                    ok ->
-                        {ok, get_meta(?META_TERM, Data)};
-                    {error, _} = Error ->
-                        Error
-                end
+        case ?CHECK(check_prepared(State),
+                    check_history_id(PeerHistoryId, OurHistoryId),
+                    check_peer_current(PeerPosition, Data)) of
+            ok ->
+                {ok, get_meta(?META_TERM, Data)};
+            {error, _} = Error ->
+                Error
         end,
 
     {keep_state_and_data, {reply, From, Reply}}.
+
+check_prepared(State) ->
+    case State of
+        not_provisioned ->
+            {error, not_provisioned};
+        _ ->
+            ok
+    end.
 
 handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data) ->
     Reply =
@@ -718,8 +736,8 @@ check_reprovision(State, Data) ->
     end.
 
 handle_provision(Machines0, From, State, Data) ->
-    case State of
-        not_provisioned ->
+    case check_not_provisioned(State) of
+        ok ->
             Peer = get_peer_name(),
             HistoryId = chronicle_utils:random_uuid(),
             Term = next_term(?NO_TERM, Peer),
@@ -752,9 +770,17 @@ handle_provision(Machines0, From, State, Data) ->
             announce_system_provisioned(NewData),
 
             {next_state, provisioned, NewData, {reply, From, ok}};
-        provisioned ->
+        {error, _} = Error ->
             {keep_state_and_data,
-             {reply, From, {error, already_provisioned}}}
+             {reply, From, Error}}
+    end.
+
+check_not_provisioned(State) ->
+    case State of
+        not_provisioned ->
+            ok;
+        _ ->
+            {error, get_external_state(State)}
     end.
 
 check_provisioned(State) ->
@@ -784,27 +810,29 @@ perform_wipe(Data) ->
     init_data().
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
-    case State of
-        not_provisioned ->
+    case check_not_provisioned(State) of
+        ok ->
             case ClusterInfo of
                 #{history_id := HistoryId} ->
                     NewData =
-                        store_meta(#{?META_HISTORY_ID => HistoryId}, Data),
-                    {keep_state, NewData, {reply, From, ok}};
+                        store_meta(#{?META_HISTORY_ID => HistoryId,
+                                     ?META_STATE => ?META_STATE_PREPARE_JOIN},
+                                   Data),
+                    announce_joining_cluster(NewData),
+                    {next_state, prepare_join, NewData, {reply, From, ok}};
                 _ ->
                     {keep_state_and_data,
                      {reply, From, {error, bad_cluster_info}}}
             end;
-        provisioned ->
-            {keep_state_and_data,
-             {reply, From, {error, provisioned}}}
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
-    case check_establish_term(HistoryId, Term, Position, Data) of
+    case check_establish_term(HistoryId, Term, Position, State, Data) of
         ok ->
             NewData = store_meta(#{?META_TERM => Term}, Data),
             announce_term_established(State, Term),
@@ -816,8 +844,9 @@ handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
-check_establish_term(HistoryId, Term, Position, Data) ->
-    ?CHECK(check_history_id(HistoryId, Data),
+check_establish_term(HistoryId, Term, Position, State, Data) ->
+    ?CHECK(check_prepared(State),
+           check_history_id(HistoryId, Data),
            check_later_term(Term, Data),
            check_peer_current(Position, Data)).
 
@@ -841,9 +870,10 @@ check_peer_current(Position, Data) ->
             ok
     end.
 
-handle_ensure_term(HistoryId, Term, From, _State, Data) ->
+handle_ensure_term(HistoryId, Term, From, State, Data) ->
     Reply =
-        case ?CHECK(check_history_id(HistoryId, Data),
+        case ?CHECK(check_prepared(State),
+                    check_history_id(HistoryId, Data),
                     check_not_earlier_term(Term, Data)) of
             ok ->
                 {ok, build_metadata(Data)};
@@ -859,7 +889,7 @@ handle_append(HistoryId, Term,
     assert_valid_term(Term),
 
     case check_append(HistoryId, Term,
-                      CommittedSeqno, AtSeqno, Entries, Data) of
+                      CommittedSeqno, AtSeqno, Entries, State, Data) of
         {ok, Info} ->
             complete_append(HistoryId, Term, Info, From, State, Data);
         {error, _} = Error ->
@@ -950,8 +980,9 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
      NewState, maybe_initiate_snapshot(NewData),
      {reply, From, ok}}.
 
-check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, Data) ->
-    ?CHECK(check_append_history_id(HistoryId, Entries, Data),
+check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State, Data) ->
+    ?CHECK(check_prepared(State),
+           check_append_history_id(HistoryId, Entries, Data),
            check_not_earlier_term(Term, Data),
            check_append_obsessive(Term, CommittedSeqno,
                                   AtSeqno, Entries, Data)).
@@ -1252,7 +1283,7 @@ check_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data) ->
 handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
                         ConfigEntry, RSMSnapshots, From, State, Data) ->
     case check_install_snapshot(HistoryId, Term, SnapshotSeqno,
-                                ConfigEntry, RSMSnapshots, Data) of
+                                ConfigEntry, RSMSnapshots, State, Data) of
         ok ->
             WasProvisioned = (State =:= provisioned),
             Peer =
@@ -1302,8 +1333,9 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
     end.
 
 check_install_snapshot(HistoryId, Term,
-                       SnapshotSeqno, ConfigEntry, RSMSnapshots, Data) ->
-    ?CHECK(check_history_id(HistoryId, Data),
+                       SnapshotSeqno, ConfigEntry, RSMSnapshots, State, Data) ->
+    ?CHECK(check_prepared(State),
+           check_history_id(HistoryId, Data),
            check_not_earlier_term(Term, Data),
            check_snapshot_seqno(SnapshotSeqno, Data),
            check_snapshot_config(ConfigEntry, RSMSnapshots)).
@@ -1640,6 +1672,11 @@ announce_system_state(SystemState) ->
 
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}).
+
+announce_joining_cluster(Data) ->
+    HistoryId = get_effective_history_id(Data),
+    true = (HistoryId =/= ?NO_HISTORY),
+    announce_system_state(joining_cluster, HistoryId).
 
 announce_system_provisioned(Data) ->
     announce_system_state(provisioned, build_metadata(Data)).

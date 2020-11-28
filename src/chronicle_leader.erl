@@ -148,6 +148,8 @@ init([]) ->
         case chronicle_agent:get_system_state() of
             {provisioned, Metadata} ->
                 metadata2data(Metadata);
+            {joining_cluster, HistoryId} ->
+                #data{history_id = HistoryId};
             not_provisioned ->
                 #data{}
         end,
@@ -329,6 +331,9 @@ handle_chronicle_event({system_state, not_provisioned, _}, State, Data) ->
     handle_not_provisioned(State, Data);
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
+handle_chronicle_event({system_state, joining_cluster, HistoryId},
+                       State, Data) ->
+    handle_joining_cluster(HistoryId, State, Data);
 handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
     handle_reprovisioned(Metadata, State, Data);
 handle_chronicle_event({new_config, Config, Metadata}, State, Data) ->
@@ -358,6 +363,10 @@ handle_provisioned(Metadata, State, Data) ->
                 State
         end,
     {next_state, NewState, NewData}.
+
+handle_joining_cluster(HistoryId, _State, Data) ->
+    ?INFO("Node's joining cluster in history ~p", [HistoryId]),
+    {keep_state, Data#data{history_id = HistoryId}}.
 
 handle_reprovisioned(Metadata, _State, Data) ->
     ?INFO("System reprovisioned."),

@@ -125,6 +125,8 @@
         ?CHECK(Cond1, ?CHECK(Cond2, Cond3))).
 -define(CHECK(Cond1, Cond2, Cond3, Cond4),
         ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4))).
+-define(CHECK(Cond1, Cond2, Cond3, Cond4, Cond5),
+        ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4, Cond5))).
 
 -define(FLUSH(Pattern),
         (fun __Loop(__N) ->
@@ -142,6 +144,7 @@
 
 -define(META_STATE_PROVISIONED, provisioned).
 -define(META_STATE_NOT_PROVISIONED, not_provisioned).
+-define(META_STATE_PREPARE_JOIN, prepare_join).
 
 -define(META_STATE, state).
 -define(META_PEER, peer).

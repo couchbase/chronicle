@@ -39,7 +39,8 @@ init([]) ->
     chronicle_events:subscribe(
       fun (Event) ->
               case Event of
-                  {system_state, NewState, _} ->
+                  {system_state, NewState, _}
+                    when NewState =/= joining_cluster ->
                       dynamic_supervisor:send_event(Self, {state, NewState});
                   _ ->
                       ok
@@ -50,7 +51,7 @@ init([]) ->
         case chronicle_agent:get_system_state() of
             {provisioned, _} ->
                 provisioned;
-            not_provisioned ->
+            _ ->
                 not_provisioned
         end,
 
