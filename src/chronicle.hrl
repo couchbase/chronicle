@@ -19,19 +19,6 @@
 -define(START_NAME(Name), {via, vnet, Name}).
 -define(SERVER_NAME(Name), {via, vnet, Name}).
 -define(SERVER_NAME(Peer, Name), {via, vnet, {Peer, Name}}).
--define(SEND(Name, Msg, _Options),
-        begin
-            {via, vnet, _} = Name,
-            try
-                vnet:send(element(3, Name), Msg)
-            catch
-                exit:{badarg, {_, _}} ->
-                    %% vnet:send() may fail with this error when Name can't be
-                    %% resolved. This is different from how erlang:send/3
-                    %% behaves, so we are just catching the error.
-                    ok
-            end
-        end).
 -define(ETS_TABLE(Name), list_to_atom("ets-"
                                       ++ atom_to_list(vnet:vnode())
                                       ++ "-"
@@ -41,11 +28,8 @@
 -define(START_NAME(Name), {local, Name}).
 -define(SERVER_NAME(Name), Name).
 -define(SERVER_NAME(Peer, Name), {Name, Peer}).
--define(SEND(Name, Msg, Options), erlang:send(Name, Msg, Options)).
 -define(ETS_TABLE(Name), Name).
 -endif.
-
--define(SEND(Name, Msg), ?SEND(Name, Msg, [])).
 
 -define(SELF_PEER, 'self@nohost').
 -define(NO_PEER, 'nonode@nohost').
