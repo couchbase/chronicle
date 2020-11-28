@@ -44,6 +44,7 @@
 -define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 -define(STORE_BRANCH_TIMEOUT, 15000).
+-define(PREPARE_JOIN_TIMEOUT, 10000).
 
 -define(INSTALL_SNAPSHOT_TIMEOUT, 120000).
 
@@ -234,6 +235,9 @@ wipe() ->
             Other
     end.
 
+prepare_join(ClusterInfo) ->
+    call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
+
 -type establish_term_result() ::
         {ok, #metadata{}} |
         {error, establish_term_error()}.
@@ -389,6 +393,8 @@ handle_call(reprovision, From, State, Data) ->
     handle_reprovision(From, State, Data);
 handle_call(wipe, From, State, Data) ->
     handle_wipe(From, State, Data);
+handle_call({prepare_join, ClusterInfo}, From, State, Data) ->
+    handle_prepare_join(ClusterInfo, From, State, Data);
 handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
     Position = {get_meta(?META_TERM_VOTED, Data), get_high_seqno(Data)},
@@ -747,6 +753,23 @@ perform_wipe(Data) ->
     ?INFO("Wiped successfully"),
 
     init_data().
+
+handle_prepare_join(ClusterInfo, From, State, Data) ->
+    case State of
+        not_provisioned ->
+            case ClusterInfo of
+                #{history_id := HistoryId} ->
+                    NewData =
+                        store_meta(#{?META_HISTORY_ID => HistoryId}, Data),
+                    {keep_state, NewData, {reply, From, ok}};
+                _ ->
+                    {keep_state_and_data,
+                     {reply, From, {error, bad_cluster_info}}}
+            end;
+        provisioned ->
+            {keep_state_and_data,
+             {reply, From, {error, provisioned}}}
+    end.
 
 handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
     assert_valid_history_id(HistoryId),
@@ -1455,9 +1478,10 @@ check_branch_id(BranchId, Data) ->
             end
     end.
 
-check_history_id(HistoryId, Data) ->
+check_history_id(HistoryId, #data{} = Data) ->
     OurHistoryId = get_effective_history_id(Data),
-    case OurHistoryId =:= ?NO_HISTORY orelse HistoryId =:= OurHistoryId of
+    true = (OurHistoryId =/= ?NO_HISTORY),
+    case HistoryId =:= OurHistoryId of
         true ->
             ok;
         false ->

@@ -541,14 +541,22 @@ teardown_vnet(_) ->
 
 simple_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
-    ok = rpc_node(a,
-                  fun () ->
-                          ok = chronicle:provision(Machines)
-                  end),
+    {ok, ClusterInfo} =
+        rpc_node(a,
+                 fun () ->
+                         ok = chronicle:provision(Machines),
+                         chronicle:get_cluster_info()
+                 end),
+
+    OtherNodes = Nodes -- [a],
+    ok = rpc_nodes(OtherNodes,
+                   fun () ->
+                           ok = chronicle_agent:prepare_join(ClusterInfo)
+                   end),
 
     ok = rpc_node(a,
                   fun () ->
-                          ok = chronicle:add_voters(Nodes),
+                          ok = chronicle:add_voters(OtherNodes),
                           ok = chronicle:remove_peer(d),
                           {ok, Voters} = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
@@ -652,6 +660,12 @@ simple_test__(Nodes) ->
 rpc_node(Node, Fun) ->
     vnet:rpc(Node, erlang, apply, [Fun, []]).
 
+rpc_nodes(Nodes, Fun) ->
+    lists:foreach(
+      fun (N) ->
+              rpc_node(N, Fun)
+      end, Nodes).
+
 leader_transfer_test_() ->
     Nodes = [a, b],
 
@@ -662,10 +676,20 @@ leader_transfer_test_() ->
 
 leader_transfer_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
-    {ok, Leader} =
+    {ok, ClusterInfo} =
         rpc_node(a,
                  fun () ->
                          ok = chronicle:provision(Machines),
+                         chronicle:get_cluster_info()
+                 end),
+    ok = rpc_nodes(Nodes -- [a],
+                   fun () ->
+                           ok = chronicle_agent:prepare_join(ClusterInfo)
+                   end),
+
+    {ok, Leader} =
+        rpc_node(a,
+                 fun () ->
                          ok = chronicle:add_voters(Nodes),
                          {L, _} = chronicle_leader:wait_for_leader(),
                          {ok, L}
@@ -753,20 +777,32 @@ partition_test_() ->
      %% we have to rely on check_peers() logic in chronicle_proposer to
      %% attempt to reestablish connection to the partitioned node. But that
      %% only happens at 5 second intervals.
-     {timeout, 20, fun partition_test__/0}}.
+     {timeout, 20, fun () -> partition_test__(Nodes) end}}.
 
-partition_test__() ->
+partition_test__(Nodes) ->
     Machines = [{kv, chronicle_kv, []}],
+    {ok, ClusterInfo} =
+        rpc_node(a,
+                 fun () ->
+                         ok = chronicle:provision(Machines),
+                         chronicle:get_cluster_info()
+                 end),
+
+    OtherNodes = Nodes -- [a],
+    ok = rpc_nodes(OtherNodes,
+                   fun () ->
+                           ok = chronicle_agent:prepare_join(ClusterInfo)
+                   end),
+
     ok = rpc_node(a,
                   fun () ->
-                          ok = chronicle:provision(Machines),
-                          ok = chronicle:add_voters([a, b, c, d]),
+                          ok = chronicle:add_voters(OtherNodes),
                           {ok, _} = chronicle_kv:set(kv, a, 42),
                           {a, _} = chronicle_leader:get_leader(),
                           ok
                   end),
 
-    [ok = vnet:disconnect(a, N) || N <- [b, c, d]],
+    [ok = vnet:disconnect(a, N) || N <- OtherNodes],
 
     Pid = rpc_node(a,
                    fun () ->
@@ -800,7 +836,7 @@ partition_test__() ->
 
     chronicle_utils:terminate_and_wait(Pid, shutdown),
 
-    [ok = vnet:connect(a, N) || N <- [b, c, d]],
+    [ok = vnet:connect(a, N) || N <- OtherNodes],
 
     ok = rpc_node(a,
                   fun () ->

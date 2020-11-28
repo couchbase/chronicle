@@ -20,6 +20,7 @@
 -import(chronicle_utils, [with_leader/2]).
 
 -export([provision/1, reprovision/0]).
+-export([get_cluster_info/0, get_cluster_info/1]).
 -export([get_peers/0, get_peers/1,
          get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
 -export([add_voter/1, add_voter/2, add_voters/1, add_voters/2,
@@ -205,3 +206,14 @@ validate_peers(Peers) ->
                       error(badarg)
               end
       end, Peers).
+
+get_cluster_info() ->
+    get_cluster_info(?DEFAULT_TIMEOUT).
+
+get_cluster_info(Timeout) ->
+    %% TODO: do I need a dedicated call for this?
+    get_config(Timeout,
+               fun (_Config, {HistoryId, _, _}) ->
+                       Info = #{history_id => HistoryId},
+                       {ok, Info}
+               end).
