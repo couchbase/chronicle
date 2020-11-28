@@ -814,8 +814,10 @@ handle_prepare_join(ClusterInfo, From, State, Data) ->
         ok ->
             case ClusterInfo of
                 #{history_id := HistoryId} ->
+                    Peer = get_peer_name(),
                     NewData =
                         store_meta(#{?META_HISTORY_ID => HistoryId,
+                                     ?META_PEER => Peer,
                                      ?META_STATE => ?META_STATE_PREPARE_JOIN},
                                    Data),
                     announce_joining_cluster(NewData),
@@ -916,33 +918,12 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
       committed_seqno := NewCommittedSeqno,
       truncate := Truncate} = Info,
 
-    WasProvisioned = (State =:= provisioned),
-    Peer =
-        case WasProvisioned of
-            true ->
-                get_meta(?META_PEER, Data);
-            false ->
-                PeerName = get_peer_name(),
-
-                %% TODO: This assumes that there's going to be a config among
-                %% entries when node is auto-provisioned. This is a bit
-                %% questionable. But should also be resolved once there's an
-                %% install_snapshot step.
-                Config = extract_latest_config(Entries),
-                Peers = config_peers(Config#log_entry.value),
-                true = lists:member(PeerName, Peers),
-
-                PeerName
-        end,
-
     PreMetadata =
         #{?META_HISTORY_ID => HistoryId,
           ?META_TERM => Term,
           ?META_TERM_VOTED => Term,
-          ?META_PENDING_BRANCH => undefined,
-          ?META_PEER => Peer},
-    PostMetadata = #{?META_STATE => ?META_STATE_PROVISIONED,
-                     ?META_COMMITTED_SEQNO => NewCommittedSeqno},
+          ?META_PENDING_BRANCH => undefined},
+    PostMetadata = #{?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
     %% When resolving a branch, we must never delete the branch record without
     %% also logging a new config. Therefore the update needs to be atomic.
@@ -951,14 +932,14 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
                              PostMetadata, Truncate, Atomic, Data),
 
     NewState =
-        case WasProvisioned of
-            true ->
+        case State of
+            provisioned ->
                 maybe_announce_term_established(Term, Data),
                 maybe_announce_new_config(Data, NewData),
                 maybe_announce_committed_seqno(Data, NewData),
 
                 State;
-            false ->
+            _ ->
                 announce_system_state(provisioned, build_metadata(NewData)),
                 provisioned
         end,
@@ -1285,41 +1266,24 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
     case check_install_snapshot(HistoryId, Term, SnapshotSeqno,
                                 ConfigEntry, RSMSnapshots, State, Data) of
         ok ->
-            WasProvisioned = (State =:= provisioned),
-            Peer =
-                case WasProvisioned of
-                    true ->
-                        get_meta(?META_PEER, Data);
-                    false ->
-                        %% TODO: Not checking peer name against the config
-                        %% entry passed to us. That's because this is just the
-                        %% config as of the snapshot, not necessarily the
-                        %% latest config. So we may not be part of the
-                        %% topology yet. It feels that assigning the peer name
-                        %% (and history?) should be an explicit separate step.
-                        get_peer_name()
-                end,
-
-            Metadata = #{?META_STATE => ?META_STATE_PROVISIONED,
-                         ?META_HISTORY_ID => HistoryId,
+            Metadata = #{?META_HISTORY_ID => HistoryId,
                          ?META_TERM => Term,
                          ?META_TERM_VOTED => Term,
                          ?META_PENDING_BRANCH => undefined,
-                         ?META_PEER => Peer,
                          ?META_COMMITTED_SEQNO => SnapshotSeqno},
 
             NewData = install_snapshot(SnapshotSeqno, ConfigEntry,
                                        RSMSnapshots, Metadata, Data),
 
             NewState =
-                case WasProvisioned of
-                    true ->
+                case State of
+                    provisioned ->
                         maybe_announce_term_established(Term, Data),
                         maybe_announce_new_config(Data, NewData),
                         maybe_announce_committed_seqno(Data, NewData),
 
                         State;
-                    false ->
+                    _ ->
                         announce_system_state(provisioned,
                                               build_metadata(NewData)),
                         provisioned
