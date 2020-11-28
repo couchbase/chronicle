@@ -21,8 +21,7 @@
 -behavior(gen_statem).
 -compile(export_all).
 
--import(chronicle_utils, [compare_positions/2,
-                          get_establish_peers/1,
+-import(chronicle_utils, [get_establish_peers/1,
                           get_establish_quorum/1,
                           get_position/1,
                           get_all_peers/1,
@@ -577,48 +576,9 @@ check_consider_granting_vote(State) ->
 check_grant_vote(HistoryId, PeerPosition, State) ->
     case check_consider_granting_vote(State) of
         ok ->
-            case chronicle_agent:get_metadata() of
-                {ok, Metadata} ->
-                    case ?CHECK(check_history_id(HistoryId, Metadata),
-                                check_peer_position(PeerPosition, Metadata)) of
-                        ok ->
-                            {ok, Metadata#metadata.term};
-                        {error, _} = Error ->
-                            Error
-                    end;
-                {error, not_provisioned} ->
-                    %% When the node is unprovisioned, it'll vote for any
-                    %% leader. This is important when the node is in the
-                    %% process of being added to the cluster. If no votes are
-                    %% granted while the node is unprovisioned, it's possible
-                    %% to wound up in the state where no leader can be
-                    %% elected.
-                    %%
-                    %% Consider the following case.
-                    %%
-                    %% 1. Node A is the only node in a cluster. So node A is a
-                    %% leader.
-                    %% 2. Node B is being added to the cluster. Node B is
-                    %% unprovisioned.
-                    %% 3. Node A writes a transitional configuration
-                    %% locally. From this point on, in order for a new leader
-                    %% to be elected, it needs to get votes from both A and B.
-                    %% 4. So if node A restarts and needs to reelect itself a
-                    %% leader, it'll fail to do so, because B won't grant it a
-                    %% vote.
-                    {ok, ?NO_TERM}
-            end;
+            chronicle_agent:check_grant_vote(HistoryId, PeerPosition);
         {error, _} = Error ->
             Error
-    end.
-
-check_peer_position(PeerPosition, Metadata) ->
-    OurPosition = get_position(Metadata),
-    case compare_positions(PeerPosition, OurPosition) of
-        lt ->
-            {error, {behind, OurPosition}};
-        _ ->
-            ok
     end.
 
 handle_wait_for_leader(Incarnation, Timeout, From, State, Data) ->
@@ -778,12 +738,10 @@ maybe_publish_leader(OldState, State, Data) ->
     end.
 
 check_history_id(HistoryId, #data{history_id = OurHistoryId}) ->
-    do_check_history_id(HistoryId, OurHistoryId);
-check_history_id(HistoryId, #metadata{} = Metadata) ->
-    do_check_history_id(HistoryId, chronicle_agent:get_history_id(Metadata)).
+    do_check_history_id(HistoryId, OurHistoryId).
 
 do_check_history_id(TheirHistoryId, OurHistoryId) ->
-    case OurHistoryId =:= ?NO_HISTORY orelse TheirHistoryId =:= OurHistoryId of
+    case TheirHistoryId =:= OurHistoryId of
         true ->
             ok;
         false ->

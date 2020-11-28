@@ -102,6 +102,9 @@ get_system_state() ->
 get_metadata() ->
     call(?SERVER, get_metadata).
 
+check_grant_vote(HistoryId, Position) ->
+    call(?SERVER, {check_grant_vote, HistoryId, Position}).
+
 register_rsm(Name, Pid) ->
     call(?SERVER, {register_rsm, Name, Pid}, 10000).
 
@@ -376,6 +379,9 @@ handle_event(Type, Event, _State, _Data) ->
 
 handle_call(get_metadata, From, State, Data) ->
     handle_get_metadata(From, State, Data);
+handle_call({check_grant_vote, PeerHistoryId, PeerPosition},
+            From, State, Data) ->
+    handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data);
 handle_call(get_log, From, _State, _Data) ->
     %% TODO: get rid of this
     {keep_state_and_data,
@@ -467,6 +473,24 @@ build_metadata(Data) ->
               config = Config,
               config_revision = ConfigRevision,
               pending_branch = PendingBranch}.
+
+handle_check_grant_vote(PeerHistoryId, PeerPosition, From, _State, Data) ->
+    OurHistoryId = get_effective_history_id(Data),
+    Reply =
+        case OurHistoryId of
+            ?NO_HISTORY ->
+                {error, no_history};
+            _ ->
+                case ?CHECK(check_history_id(PeerHistoryId, OurHistoryId),
+                            check_peer_current(PeerPosition, Data)) of
+                    ok ->
+                        {ok, get_meta(?META_TERM, Data)};
+                    {error, _} = Error ->
+                        Error
+                end
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data) ->
     Reply =
@@ -1481,6 +1505,8 @@ check_branch_id(BranchId, Data) ->
 check_history_id(HistoryId, #data{} = Data) ->
     OurHistoryId = get_effective_history_id(Data),
     true = (OurHistoryId =/= ?NO_HISTORY),
+    check_history_id(HistoryId, OurHistoryId);
+check_history_id(HistoryId, OurHistoryId) ->
     case HistoryId =:= OurHistoryId of
         true ->
             ok;
