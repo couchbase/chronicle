@@ -211,9 +211,7 @@ get_cluster_info() ->
     get_cluster_info(?DEFAULT_TIMEOUT).
 
 get_cluster_info(Timeout) ->
-    %% TODO: do I need a dedicated call for this?
-    get_config(Timeout,
-               fun (_Config, {HistoryId, _, _}) ->
-                       Info = #{history_id => HistoryId},
-                       {ok, Info}
-               end).
+    with_leader(Timeout,
+                fun (TRef, Leader, _LeaderInfo) ->
+                        chronicle_server:get_cluster_info(Leader, TRef)
+                end).

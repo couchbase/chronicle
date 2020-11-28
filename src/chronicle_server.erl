@@ -50,6 +50,9 @@ register_rsm(Name, Pid) ->
 get_config(Leader, Timeout) ->
     leader_query(Leader, get_config, Timeout).
 
+get_cluster_info(Leader, Timeout) ->
+    leader_query(Leader, get_cluster_info, Timeout).
+
 leader_query(Leader, Query, Timeout) ->
     call(?SERVER(Leader), {leader_query, Query}, Timeout).
 

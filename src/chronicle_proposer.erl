@@ -1097,6 +1097,8 @@ handle_query(ReplyTo, Query, Data) ->
     case Query of
         get_config ->
             handle_get_config(ReplyTo, Data);
+        get_cluster_info ->
+            handle_get_cluster_info(ReplyTo, Data);
         _ ->
             reply_request(ReplyTo, {error, unknown_query})
     end.
@@ -1107,6 +1109,16 @@ handle_get_config(ReplyTo, #data{config = Config,
     #config{} = Config,
     Reply = {ok, Config, Revision},
     start_sync_quorum(ReplyTo, Reply, Data).
+
+handle_get_cluster_info(ReplyTo,
+                        #data{history_id = HistoryId,
+                              config = Config,
+                              committed_seqno = CommittedSeqno} = Data) ->
+    true = is_config_committed(Data),
+    Info = #{history_id => HistoryId,
+             committed_seqno => CommittedSeqno,
+             peers => chronicle_utils:config_peers(Config)},
+    start_sync_quorum(ReplyTo, {ok, Info}, Data).
 
 handle_cas_config(ReplyTo, NewConfig, CasRevision,
                   #data{config = Config,
