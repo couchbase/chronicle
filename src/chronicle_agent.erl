@@ -219,7 +219,13 @@ provision(Machines) ->
             Other
     end.
 
--spec reprovision() -> provision_result().
+-type reprovision_result() :: ok
+                            | {error, reprovision_error()}.
+-type reprovision_error() :: not_provisioned
+                           | {unstable_config, #transition{}}
+                           | {bad_config, peer(), [peer()], [peer()]}.
+
+-spec reprovision() -> reprovision_result().
 reprovision() ->
     case call(?SERVER, reprovision, ?PROVISION_TIMEOUT) of
         ok ->
