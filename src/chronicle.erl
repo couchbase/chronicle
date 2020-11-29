@@ -21,6 +21,7 @@
 
 -export([provision/1, reprovision/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
+-export([prepare_join/1, join_cluster/1]).
 -export([get_peers/0, get_peers/1,
          get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
 -export([add_voter/1, add_voter/2, add_voters/1, add_voters/2,
@@ -28,7 +29,8 @@
          remove_peer/1, remove_peer/2, remove_peers/1, remove_peers/2]).
 
 -export_type([uuid/0, peer/0, history_id/0,
-              leader_term/0, seqno/0, peer_position/0, revision/0]).
+              leader_term/0, seqno/0, peer_position/0,
+              revision/0, cluster_info/0]).
 
 -define(DEFAULT_TIMEOUT, 15000).
 
@@ -221,3 +223,11 @@ get_cluster_info(Timeout) ->
                 fun (TRef, Leader, _LeaderInfo) ->
                         chronicle_server:get_cluster_info(Leader, TRef)
                 end).
+
+-spec prepare_join(cluster_info()) -> chronicle_agent:prepare_join_result().
+prepare_join(ClusterInfo) ->
+    chronicle_agent:prepare_join(ClusterInfo).
+
+-spec join_cluster(cluster_info()) -> chronicle_agent:join_cluster_result().
+join_cluster(ClusterInfo) ->
+    chronicle_agent:join_cluster(ClusterInfo).

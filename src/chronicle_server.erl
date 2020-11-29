@@ -549,7 +549,7 @@ add_voters(ViaNode, Voters) ->
     PreClusterInfo = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
     ok = rpc_nodes(Voters,
                    fun () ->
-                           ok = chronicle_agent:prepare_join(PreClusterInfo)
+                           ok = chronicle:prepare_join(PreClusterInfo)
                    end),
     ok = rpc_node(ViaNode,
                   fun () ->
@@ -558,7 +558,7 @@ add_voters(ViaNode, Voters) ->
     PostClusterInfo = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
     ok = rpc_nodes(Voters,
                    fun () ->
-                           ok = chronicle_agent:join_cluster(PostClusterInfo)
+                           ok = chronicle:join_cluster(PostClusterInfo)
                    end).
 
 simple_test__(Nodes) ->
