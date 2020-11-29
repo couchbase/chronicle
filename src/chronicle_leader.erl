@@ -299,8 +299,8 @@ get_election_timeout(State, Data) ->
             50 * HeartbeatInterval;
         _ ->
             %% This is the amount of time that it will take followers or nodes
-            %% that graned their vote to decide that the leader is missing and
-            %% move to the observer state.
+            %% that granted their vote to decide that the leader is missing
+            %% and move to the observer state.
             20 * HeartbeatInterval
     end.
 
