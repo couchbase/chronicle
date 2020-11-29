@@ -247,9 +247,20 @@ wipe() ->
             Other
     end.
 
+-type prepare_join_result() :: ok | {error, prepare_join_error()}.
+-type prepare_join_error() :: provisioned
+                            | joining_cluster
+                            | bad_cluster_info.
+-spec prepare_join(chronicle:cluster_info()) -> prepare_join_result().
 prepare_join(ClusterInfo) ->
     call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
 
+-type join_cluster_result() :: ok | {error, join_cluster_error()}.
+-type join_cluster_error() :: not_prepared
+                            | {history_mismatch, chronicle:history_id()}
+                            | {not_in_peers,
+                               chronicle:peer(), [chronicle:peer()]}.
+-spec join_cluster(chronicle:cluster_info()) -> join_cluster_result().
 join_cluster(ClusterInfo) ->
     case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
         ok ->
@@ -892,7 +903,7 @@ check_join_cluster(ClusterInfo, State, Data) ->
                     {error, bad_cluster_info}
             end;
         _ ->
-            {error, get_external_state(State)}
+            {error, not_prepared}
     end.
 
 check_peer(Peers, Data) ->
