@@ -41,6 +41,10 @@
 -type peer_position() :: {TermVoted :: leader_term(), HighSeqno :: seqno()}.
 -type revision() :: {history_id(), seqno()}.
 
+-type cluster_info() :: #{history_id := history_id(),
+                          committed_seqno := seqno(),
+                          peers := [peer()]}.
+
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 provision(Machines) ->
@@ -207,9 +211,11 @@ validate_peers(Peers) ->
               end
       end, Peers).
 
+-spec get_cluster_info() -> cluster_info().
 get_cluster_info() ->
     get_cluster_info(?DEFAULT_TIMEOUT).
 
+-spec get_cluster_info(Timeout::non_neg_integer()) -> cluster_info().
 get_cluster_info(Timeout) ->
     with_leader(Timeout,
                 fun (TRef, Leader, _LeaderInfo) ->

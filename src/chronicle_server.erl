@@ -546,7 +546,7 @@ teardown_vnet(_) ->
     vnet:stop().
 
 add_voters(ViaNode, Voters) ->
-    {ok, PreClusterInfo} = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
+    PreClusterInfo = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
     ok = rpc_nodes(Voters,
                    fun () ->
                            ok = chronicle_agent:prepare_join(PreClusterInfo)
@@ -555,7 +555,7 @@ add_voters(ViaNode, Voters) ->
                   fun () ->
                           chronicle:add_voters(Voters)
                   end),
-    {ok, PostClusterInfo} = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
+    PostClusterInfo = rpc_node(ViaNode, fun chronicle:get_cluster_info/0),
     ok = rpc_nodes(Voters,
                    fun () ->
                            ok = chronicle_agent:join_cluster(PostClusterInfo)

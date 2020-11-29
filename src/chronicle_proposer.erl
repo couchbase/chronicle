@@ -1118,7 +1118,7 @@ handle_get_cluster_info(ReplyTo,
     Info = #{history_id => HistoryId,
              committed_seqno => CommittedSeqno,
              peers => chronicle_utils:config_peers(Config)},
-    start_sync_quorum(ReplyTo, {ok, Info}, Data).
+    start_sync_quorum(ReplyTo, Info, Data).
 
 handle_cas_config(ReplyTo, NewConfig, CasRevision,
                   #data{config = Config,
