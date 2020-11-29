@@ -19,7 +19,7 @@
 
 -compile(export_all).
 
--export_type([provision_result/0, reprovision_result/0,
+-export_type([provision_result/0, reprovision_result/0, wipe_result/0,
               prepare_join_result/0, join_cluster_result/0]).
 
 -behavior(gen_statem).
@@ -239,7 +239,8 @@ reprovision() ->
             Other
     end.
 
--spec wipe() -> ok.
+-type wipe_result() :: ok.
+-spec wipe() -> wipe_result().
 wipe() ->
     case call(?SERVER, wipe) of
         ok ->

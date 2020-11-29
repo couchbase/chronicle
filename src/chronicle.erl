@@ -19,7 +19,7 @@
 
 -import(chronicle_utils, [with_leader/2]).
 
--export([provision/1, reprovision/0]).
+-export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
 -export([get_peers/0, get_peers/1,
@@ -55,6 +55,10 @@ provision(Machines) ->
 -spec reprovision() -> chronicle_agent:reprovision_result().
 reprovision() ->
     chronicle_agent:reprovision().
+
+-spec wipe() -> chronicle_agent:wipe_result().
+wipe() ->
+    chronicle_agent:wipe().
 
 remove_peer(Peer) ->
     remove_peer(Peer, ?DEFAULT_TIMEOUT).
