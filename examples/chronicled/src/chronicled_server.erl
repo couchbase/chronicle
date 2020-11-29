@@ -242,21 +242,35 @@ add_nodes(Nodes, Type) ->
         [] ->
             {false, <<"nodes already added">>};
         _ ->
-            case [N || N <- ToAdd, net_kernel:connect_node(N) =:= false] of
-                [] ->
+            case call_nodes(ToAdd, prepare_join) of
+                true ->
                     ?LOG_DEBUG("nodes ~p", [nodes()]),
-                    Result = do_add_nodes(ToAdd, Type),
-                    ?LOG_DEBUG("Result of ~p addition: ~p", [Type, Result]),
-                    case Result of
-                        ok ->
+                    ok = do_add_nodes(ToAdd, Type),
+                    case call_nodes(ToAdd, join_cluster) of
+                        true ->
                             {true, <<"nodes added">>};
-                        _ ->
-                            {false, <<"nodes could not be added">>}
+                        false ->
+                            {false, <<"join_cluster failed">>}
                     end;
-                CantConnect ->
-                    ?LOG_DEBUG("Can't connect to nodes: ~p", [CantConnect]),
-                    {false, <<"can't connect to some nodes to be added">>}
+                false ->
+                    {false, <<"prepare_join failed">>}
             end
+    end.
+
+call_nodes(Nodes, Call) ->
+    ClusterInfo = chronicle:get_cluster_info(),
+    {Results, BadNodes} = rpc:multicall(Nodes,
+                                        chronicle, Call, [ClusterInfo]),
+    BadResults =
+        [{N, R} || {N, R} <- Results, R =/= ok] ++
+        [{N, down} || N <- BadNodes],
+
+    case BadResults of
+        [] ->
+            true;
+        _ ->
+            ?LOG_DEBUG("~p failed on some nodes:~n~p", [Call, BadResults]),
+            false
     end.
 
 remove_nodes(Nodes) ->
