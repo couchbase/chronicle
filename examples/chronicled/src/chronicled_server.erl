@@ -58,6 +58,7 @@ get_options() ->
                                                          op=removenode}},
                   {"/config/provision", ?MODULE, #state{domain=config,
                                                         op=provision}},
+                  {"/node/wipe", ?MODULE, #state{domain=node, op=wipe}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
                  ]}
           ]),
@@ -69,8 +70,10 @@ init(Req, State) ->
             Method = method_to_atom(cowboy_req:method(Req)),
             ?LOG_DEBUG("Method: ~p", [Method]),
             {cowboy_rest, Req, State#state{op = Method}};
-        _ ->
-            {ok, config_api(Req, State), State}
+        #state{domain=config} ->
+            {ok, config_api(Req, State), State};
+        #state{domain=node} ->
+            {ok, node_api(Req, State), State}
     end.
 
 allowed_methods(Req, State) ->
@@ -159,6 +162,10 @@ config_api(Req, #state{domain=config, op=provision}) ->
             ok
     end,
     reply_json(200, <<"provisioned">>, Req).
+
+node_api(Req, #state{domain=node, op=wipe}) ->
+    ok = chronicle:wipe(),
+    reply_json(200, <<"ok">>, Req).
 
 %% internal module functions
 reply_json(Status, Response, Req) ->
