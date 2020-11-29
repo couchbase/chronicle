@@ -595,20 +595,21 @@ handle_wait_for_leader(Incarnation, Timeout, From, State, Data) ->
         {_Leader, _LeaderIncarnation} = Reply ->
             {keep_state_and_data, {reply, From, Reply}};
         no_leader ->
-            NewData = add_leader_waiter(Timeout, From, Data),
+            NewData = add_leader_waiter(Incarnation, Timeout, From, Data),
             {keep_state, NewData}
     end.
 
 handle_leader_wait_timeout(TRef, State,
                            #data{leader_waiters = Waiters} = Data) ->
-    no_leader = state_leader(State),
-    {From, NewWaiters} = maps:take(TRef, Waiters),
+    {{From, Incarnation}, NewWaiters} = maps:take(TRef, Waiters),
+    no_leader = check_leader_incarnation(Incarnation, state_leader(State)),
     gen_statem:reply(From, no_leader),
     {keep_state, Data#data{leader_waiters = NewWaiters}}.
 
-add_leader_waiter(Timeout, From, #data{leader_waiters = Waiters} = Data) ->
+add_leader_waiter(Incarnation, Timeout,
+                  From, #data{leader_waiters = Waiters} = Data) ->
     TRef = erlang:start_timer(Timeout, self(), leader_wait),
-    NewWaiters = Waiters#{TRef => From},
+    NewWaiters = Waiters#{TRef => {From, Incarnation}},
     Data#data{leader_waiters = NewWaiters}.
 
 maybe_reply_to_leader_waiters(LeaderInfo, Data) ->
@@ -621,7 +622,7 @@ maybe_reply_to_leader_waiters(LeaderInfo, Data) ->
 
 reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
     chronicle_utils:maps_foreach(
-      fun (TRef, From) ->
+      fun (TRef, {From, _}) ->
               gen_statem:reply(From, Reply),
               _ = erlang:cancel_timer(TRef),
               ?FLUSH({timeout, TRef, _})
