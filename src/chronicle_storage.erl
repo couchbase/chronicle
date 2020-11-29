@@ -35,7 +35,8 @@
 
 -type meta_state() :: ?META_STATE_PROVISIONED
                     | ?META_STATE_NOT_PROVISIONED
-                    | ?META_STATE_PREPARE_JOIN.
+                    | ?META_STATE_PREPARE_JOIN
+                    | {?META_STATE_JOIN_CLUSTER, chronicle:seqno()}.
 -type meta() :: #{ ?META_STATE => meta_state(),
                    ?META_PEER => chronicle:peer(),
                    ?META_HISTORY_ID => chronicle:history_id(),

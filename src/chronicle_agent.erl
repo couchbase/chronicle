@@ -45,6 +45,7 @@
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 -define(STORE_BRANCH_TIMEOUT, 15000).
 -define(PREPARE_JOIN_TIMEOUT, 10000).
+-define(JOIN_CLUSTER_TIMEOUT, 120000).
 
 -define(INSTALL_SNAPSHOT_TIMEOUT, 120000).
 
@@ -66,6 +67,8 @@
 
                           remaining_rsms,
                           savers }).
+
+-record(join_cluster, { from, seqno }).
 
 %% TODO: get rid of the duplication between #data{} and #metadata{}.
 -record(data, { storage,
@@ -247,6 +250,17 @@ wipe() ->
 prepare_join(ClusterInfo) ->
     call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
 
+join_cluster(ClusterInfo) ->
+    join_cluster(ClusterInfo, ?JOIN_CLUSTER_TIMEOUT).
+
+join_cluster(ClusterInfo, Timeout) ->
+    case call(?SERVER, {join_cluster, ClusterInfo}, Timeout) of
+        ok ->
+            ok = chronicle_secondary_sup:sync_system_state_change();
+        Other ->
+            Other
+    end.
+
 -type establish_term_result() ::
         {ok, #metadata{}} |
         {error, establish_term_error()}.
@@ -364,10 +378,23 @@ init([]) ->
                 provisioned;
             ?META_STATE_PREPARE_JOIN ->
                 prepare_join;
+            {?META_STATE_JOIN_CLUSTER, Seqno} ->
+                #join_cluster{seqno = Seqno};
             ?META_STATE_NOT_PROVISIONED ->
                 not_provisioned
         end,
-    {ok, State, Data}.
+
+    {FinalState, FinalData} =
+        case State of
+            #join_cluster{} ->
+                %% It's possible the agent crashed right before logging that
+                %% we got provisioned. So we need to check again.
+                check_join_cluster_done(State, Data);
+            _ ->
+                {State, Data}
+        end,
+
+    {ok, FinalState, FinalData}.
 
 handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
@@ -409,6 +436,8 @@ handle_call(wipe, From, State, Data) ->
     handle_wipe(From, State, Data);
 handle_call({prepare_join, ClusterInfo}, From, State, Data) ->
     handle_prepare_join(ClusterInfo, From, State, Data);
+handle_call({join_cluster, ClusterInfo}, From, State, Data) ->
+    handle_join_cluster(ClusterInfo, From, State, Data);
 handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
     Position = {get_meta(?META_TERM_VOTED, Data), get_high_seqno(Data)},
@@ -461,6 +490,8 @@ get_external_state(State) ->
         provisioned ->
             provisioned;
         prepare_join ->
+            joining_cluster;
+        #join_cluster{} ->
             joining_cluster;
         not_provisioned ->
             not_provisioned
@@ -830,6 +861,78 @@ handle_prepare_join(ClusterInfo, From, State, Data) ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
+handle_join_cluster(ClusterInfo, From, State, Data) ->
+    case check_join_cluster(ClusterInfo, State, Data) of
+        {ok, Seqno} ->
+            Meta = #{?META_STATE => {?META_STATE_JOIN_CLUSTER, Seqno}},
+            NewData = store_meta(Meta, Data),
+            NewState = #join_cluster{from = From, seqno = Seqno},
+
+            %% We might already have all entries we need.
+            {FinalState, FinalData} =
+                check_join_cluster_done(NewState, NewData),
+
+            {next_state, FinalState, FinalData};
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
+    end.
+
+check_join_cluster(ClusterInfo, State, Data) ->
+    case State of
+        prepare_join ->
+            case ClusterInfo of
+                #{history_id := HistoryId,
+                  committed_seqno := CommittedSeqno,
+                  peers := Peers} ->
+                    case ?CHECK(check_history_id(HistoryId, Data),
+                                check_peer(Peers, Data)) of
+                        ok ->
+                            {ok, CommittedSeqno};
+                        {error, _} = Error ->
+                            Error
+                    end;
+                _ ->
+                    {error, bad_cluster_info}
+            end;
+        _ ->
+            {error, get_external_state(State)}
+    end.
+
+check_peer(Peers, Data) ->
+    Peer = get_meta(?META_PEER, Data),
+    true = (Peer =/= ?NO_PEER),
+    case lists:member(Peer, Peers) of
+        true ->
+            ok;
+        false ->
+            {error, {not_in_peers, Peer, Peers}}
+    end.
+
+check_join_cluster_done(State, Data) ->
+    case State of
+        #join_cluster{seqno = WaitedSeqno, from = From} ->
+            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            case CommittedSeqno >= WaitedSeqno of
+                true ->
+                    NewData = store_meta(#{?META_STATE =>
+                                               ?META_STATE_PROVISIONED}, Data),
+                    announce_system_state(provisioned, build_metadata(NewData)),
+
+                    case From =/= undefined of
+                        true ->
+                            gen_statem:reply(From, ok);
+                        false ->
+                            ok
+                    end,
+
+                    {provisioned, NewData};
+                false ->
+                    {State, Data}
+            end;
+        _ ->
+            {State, Data}
+    end.
+
 handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
@@ -928,21 +1031,8 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% When resolving a branch, we must never delete the branch record without
     %% also logging a new config. Therefore the update needs to be atomic.
     Atomic = (get_meta(?META_PENDING_BRANCH, Data) =/= undefined),
-    NewData = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
-                             PostMetadata, Truncate, Atomic, Data),
-
-    NewState =
-        case State of
-            provisioned ->
-                maybe_announce_term_established(Term, Data),
-                maybe_announce_new_config(Data, NewData),
-                maybe_announce_committed_seqno(Data, NewData),
-
-                State;
-            _ ->
-                announce_system_state(provisioned, build_metadata(NewData)),
-                provisioned
-        end,
+    NewData0 = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
+                              PostMetadata, Truncate, Atomic, Data),
 
     ?DEBUG("Appended entries.~n"
            "History id: ~p~n"
@@ -952,10 +1042,23 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
            "Entries: ~p~n"
            "Config: ~p",
            [HistoryId, Term, EndSeqno,
-            NewCommittedSeqno, Entries, get_config(NewData)]),
+            NewCommittedSeqno, Entries, get_config(NewData0)]),
 
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
+
+    {NewState, NewData} =
+        case State of
+            provisioned ->
+                maybe_announce_term_established(Term, Data),
+                maybe_announce_new_config(Data, NewData0),
+                maybe_announce_committed_seqno(Data, NewData0),
+
+                {State, NewData0};
+            _ ->
+                check_join_cluster_done(State, NewData0)
+        end,
+
 
     {next_state,
      NewState, maybe_initiate_snapshot(NewState, NewData),
@@ -1272,25 +1375,23 @@ handle_install_snapshot(HistoryId, Term, SnapshotSeqno,
                          ?META_PENDING_BRANCH => undefined,
                          ?META_COMMITTED_SEQNO => SnapshotSeqno},
 
-            NewData = install_snapshot(SnapshotSeqno, ConfigEntry,
-                                       RSMSnapshots, Metadata, Data),
+            NewData0 = install_snapshot(SnapshotSeqno, ConfigEntry,
+                                        RSMSnapshots, Metadata, Data),
 
-            NewState =
+            {NewState, NewData} =
                 case State of
                     provisioned ->
                         maybe_announce_term_established(Term, Data),
-                        maybe_announce_new_config(Data, NewData),
-                        maybe_announce_committed_seqno(Data, NewData),
+                        maybe_announce_new_config(Data, NewData0),
+                        maybe_announce_committed_seqno(Data, NewData0),
 
-                        State;
+                        {State, maybe_cancel_snapshot(NewData0)};
                     _ ->
-                        announce_system_state(provisioned,
-                                              build_metadata(NewData)),
-                        provisioned
+                        check_join_cluster_done(State, NewData0)
                 end,
 
             {next_state,
-             NewState, maybe_cancel_snapshot(NewData),
+             NewState, NewData,
              {reply, From, {ok, build_metadata(NewData)}}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
