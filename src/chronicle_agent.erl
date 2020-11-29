@@ -251,10 +251,7 @@ prepare_join(ClusterInfo) ->
     call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
 
 join_cluster(ClusterInfo) ->
-    join_cluster(ClusterInfo, ?JOIN_CLUSTER_TIMEOUT).
-
-join_cluster(ClusterInfo, Timeout) ->
-    case call(?SERVER, {join_cluster, ClusterInfo}, Timeout) of
+    case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
         ok ->
             ok = chronicle_secondary_sup:sync_system_state_change();
         Other ->
