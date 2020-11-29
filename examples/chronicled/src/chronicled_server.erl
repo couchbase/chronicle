@@ -127,9 +127,7 @@ json_api(Req, #state{domain=kv, op=put}=State) ->
 
 config_api(Req, #state{domain=config, op=info}) ->
     {ok, Peers} = chronicle:get_peers(),
-    cowboy_req:reply(200, #{
-                       <<"content-type">> => <<"application/json">>
-                      }, jiffy:encode(Peers), Req);
+    reply_json(200, jiffy:encode(Peers), Req);
 config_api(Req, #state{domain=config, op={addnode, Type}}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
     ?LOG_DEBUG("read content: ~p", [Body]),
@@ -140,9 +138,7 @@ config_api(Req, #state{domain=config, op={addnode, Type}}) ->
                                 {false, Msg}
                         end,
     Status = case Result of true -> 200; _ -> 400 end,
-    cowboy_req:reply(Status, #{
-                       <<"content-type">> => <<"application/json">>
-                      }, Message, Req1);
+    reply_json(Status, Message, Req1);
 config_api(Req, #state{domain=config, op=removenode}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
     ?LOG_DEBUG("read content: ~p", [Body]),
@@ -153,9 +149,7 @@ config_api(Req, #state{domain=config, op=removenode}) ->
                                 {false, Msg}
                         end,
     Status = case Result of true -> 200; _ -> 400 end,
-    cowboy_req:reply(Status, #{
-                       <<"content-type">> => <<"application/json">>
-                      }, Message, Req1);
+    reply_json(Status, Message, Req1);
 config_api(Req, #state{domain=config, op=provision}) ->
     Machines = [{kv, chronicle_kv, []}],
     case chronicle:provision(Machines) of
@@ -164,11 +158,13 @@ config_api(Req, #state{domain=config, op=provision}) ->
         {error, provisioned} ->
             ok
     end,
-    cowboy_req:reply(200, #{
-                       <<"content-type">> => <<"application/json">>
-                      }, <<"provisioned">>, Req).
+    reply_json(200, <<"provisioned">>, Req).
 
 %% internal module functions
+reply_json(Status, Response, Req) ->
+    cowboy_req:reply(Status,
+                     #{<<"content-type">> => <<"application/json">>},
+                     Response, Req).
 
 method_to_atom(<<"GET">>) ->
     get;
