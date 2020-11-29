@@ -266,13 +266,12 @@ remove_nodes(Nodes) ->
         Nodes ->
             Result = chronicle:remove_peers(Nodes),
             ?LOG_DEBUG("Result of voter addition: ~p", [Result]),
-            Message = case Result of
-                          ok ->
-                              <<"nodes removed">>;
-                          _ ->
-                              <<"nodes could not be removed">>
-                      end,
-            {Result, Message};
+            case Result of
+                ok ->
+                    {true, <<"nodes removed">>};
+                _ ->
+                    {false, <<"nodes could not be removed">>}
+            end;
         _ ->
             {false, <<"some nodes not part of cluster">>}
     end.
