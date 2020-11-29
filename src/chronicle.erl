@@ -50,7 +50,7 @@
 provision(Machines) ->
     chronicle_agent:provision(Machines).
 
--spec reprovision() -> chronicle_agent:provision_result().
+-spec reprovision() -> chronicle_agent:reprovision_result().
 reprovision() ->
     chronicle_agent:reprovision().
 

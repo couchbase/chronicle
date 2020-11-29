@@ -19,7 +19,7 @@
 
 -compile(export_all).
 
--export_type([provision_result/0]).
+-export_type([provision_result/0, reprovision_result/0]).
 
 -behavior(gen_statem).
 -include("chronicle.hrl").
