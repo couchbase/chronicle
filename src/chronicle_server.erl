@@ -822,7 +822,7 @@ partition_test__(Nodes) ->
                           case chronicle_leader:get_leader() of
                               {a, Incarnation} ->
                                   {_, _} = chronicle_leader:wait_for_leader(
-                                             Incarnation, 1000),
+                                             Incarnation, 4000),
                                   ok;
                               _ ->
                                   ok
