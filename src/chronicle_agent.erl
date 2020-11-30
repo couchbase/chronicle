@@ -325,7 +325,7 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
 -type append_error() ::
         not_provisioned |
         {history_mismatch, chronicle:history_id()} |
-        {conflicting_term, chorincle:leader_term()} |
+        {conflicting_term, chronicle:leader_term()} |
         {missing_entries, #metadata{}} |
         {protocol_error, any()}.
 
