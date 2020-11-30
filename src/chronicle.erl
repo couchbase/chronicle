@@ -179,6 +179,26 @@ get_replicas(Timeout) ->
                        {ok, Config#config.replicas}
                end).
 
+-spec get_cluster_info() -> cluster_info().
+get_cluster_info() ->
+    get_cluster_info(?DEFAULT_TIMEOUT).
+
+-spec get_cluster_info(timeout()) -> cluster_info().
+get_cluster_info(Timeout) ->
+    with_leader(Timeout,
+                fun (TRef, Leader, _LeaderInfo) ->
+                        chronicle_server:get_cluster_info(Leader, TRef)
+                end).
+
+-spec prepare_join(cluster_info()) -> chronicle_agent:prepare_join_result().
+prepare_join(ClusterInfo) ->
+    chronicle_agent:prepare_join(ClusterInfo).
+
+-spec join_cluster(cluster_info()) -> chronicle_agent:join_cluster_result().
+join_cluster(ClusterInfo) ->
+    chronicle_agent:join_cluster(ClusterInfo).
+
+%% internal
 get_config(Timeout, Fun) ->
     with_leader(Timeout,
                 fun (TRef, Leader, _LeaderInfo) ->
@@ -264,22 +284,3 @@ validate_peers(Peers) ->
                       error(badarg)
               end
       end, Peers).
-
--spec get_cluster_info() -> cluster_info().
-get_cluster_info() ->
-    get_cluster_info(?DEFAULT_TIMEOUT).
-
--spec get_cluster_info(Timeout::non_neg_integer()) -> cluster_info().
-get_cluster_info(Timeout) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        chronicle_server:get_cluster_info(Leader, TRef)
-                end).
-
--spec prepare_join(cluster_info()) -> chronicle_agent:prepare_join_result().
-prepare_join(ClusterInfo) ->
-    chronicle_agent:prepare_join(ClusterInfo).
-
--spec join_cluster(cluster_info()) -> chronicle_agent:join_cluster_result().
-join_cluster(ClusterInfo) ->
-    chronicle_agent:join_cluster(ClusterInfo).
