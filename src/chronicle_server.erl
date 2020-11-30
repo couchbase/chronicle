@@ -208,14 +208,31 @@ handle_leader_status(LeaderInfo, State, Data) ->
              Data}
     end.
 
-handle_process_exit(Pid, Reason, _State, #data{proposer = Proposer} = Data) ->
+handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
     case Pid =:= Proposer of
         true ->
-            ?INFO("Proposer terminated with reason ~p", [Reason]),
-            {stop, {proposer_terminated, Reason},
-             Data#data{proposer = undefined}};
+            handle_proposer_exit(Pid, Reason, State, Data);
         false ->
             {stop, {linked_process_died, Pid, Reason}}
+    end.
+
+handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
+    ?INFO("Proposer ~p terminated with reason ~p", [Pid, Reason]),
+
+    NewData = Data#data{proposer = undefined},
+    case Status of
+        not_ready ->
+            %% The proposer terminated before fully initializing, and before
+            %% any requests were sent to it. This is not abnormal and may
+            %% happen if the proposer fails to get enough votes when
+            %% establishing the term. There's no reason to terminate
+            %% chronicle_server in such case.
+            {next_state, #follower{}, NewData};
+        ready ->
+            %% Some requests may have never been processed by the proposer and
+            %% the only way to indicate to the callers that something went
+            %% wrong is to terminate chronicle_server.
+            {stop, {proposer_terminated, Reason}, NewData}
     end.
 
 handle_proposer_msg({proposer_ready, HistoryId, Term, HighSeqno},
