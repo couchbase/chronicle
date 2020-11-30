@@ -344,6 +344,21 @@ append(Peer, Opaque, HistoryId, Term,
                {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
                Options).
 
+-type install_snapshot_result() :: ok | {error, install_snapshot_error()}.
+-type install_snapshot_error() ::
+        not_provisioned |
+        {history_mismatch, chronicle:history_id()} |
+        {conflicting_term, chronicle:leader_term()} |
+        {snapshot_rejected, #metadata{}} |
+        {protocol_error, any()}.
+
+-spec install_snapshot(peer(),
+                       chronicle:history_id(),
+                       chronicle:leader_term(),
+                       chronicle:seqno(),
+                       ConfigEntry::#log_entry{},
+                       #{RSM::atom() => RSMSnapshot::binary()}) ->
+          install_snapshot_result().
 install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
     call(?SERVER(Peer),
          {install_snapshot, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots},
