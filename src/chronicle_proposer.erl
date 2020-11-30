@@ -948,8 +948,7 @@ is_revision_committed({_, _, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
     Seqno =< CommittedSeqno.
 
 replicate(#data{peers = Peers} = Data) ->
-    LivePeers = get_live_peers(Peers),
-    replicate(LivePeers, Data).
+    replicate(Peers, Data).
 
 replicate(Peers, Data) when is_list(Peers) ->
     #data{committed_seqno = CommittedSeqno, high_seqno = HighSeqno} = Data,
@@ -1937,18 +1936,6 @@ translate_quorum({joint, Quorum1, Quorum2}, Self) ->
     {joint,
      translate_quorum(Quorum1, Self),
      translate_quorum(Quorum2, Self)}.
-
-get_live_peers(Peers) ->
-    LivePeers = sets:from_list(chronicle_peers:get_live_peers()),
-    lists:filter(
-      fun (Peer) ->
-              case Peer of
-                  ?SELF_PEER ->
-                      true;
-                  _ ->
-                      sets:is_element(Peer, LivePeers)
-              end
-      end, Peers).
 
 config_needs_transition(#config{voters = NewVoters},
                         #config{voters = OldVoters}) ->
