@@ -414,7 +414,6 @@ handle_establish_term_result(Peer,
             set_peer_active(Peer, Metadata, Data),
             establish_term_handle_vote(Peer, {ok, CommittedSeqno}, State, Data);
         {error, Error} ->
-            remove_peer_status(Peer, Data),
             case handle_common_error(Peer, Error, Data) of
                 {stop, Reason} ->
                     stop(Reason, State, Data);
@@ -424,20 +423,30 @@ handle_establish_term_result(Peer,
                              "on peer ~p: ~p",
                              [Term, HistoryId, Position, Peer, Error]),
 
-                    case Error of
-                        {behind, _} ->
-                            %% We keep going despite the fact we're behind
-                            %% this peer because we still might be able to get
-                            %% a majority of votes.
+                    Ignore =
+                        case Error of
+                            {behind, _} ->
+                                %% We keep going despite the fact we're behind
+                                %% this peer because we still might be able to
+                                %% get a majority of votes.
+                                true;
+                            {conflicting_term, _} ->
+                                %% Some conflicting_term errors are ignored by
+                                %% handle_common_error. If we hit one, we
+                                %% record a failed vote, but keep going.
+                                true;
+                            not_provisioned ->
+                                true;
+                            _ ->
+                                false
+                        end,
+
+                    case Ignore of
+                        true ->
+                            remove_peer_status(Peer, Data),
                             establish_term_handle_vote(Peer,
                                                        failed, State, Data);
-                        {conflicting_term, _} ->
-                            %% Some conflicting_term errors are ignored by
-                            %% handle_common_error. If we hit one, we record a
-                            %% failed vote, but keep going.
-                            establish_term_handle_vote(Peer,
-                                                       failed, State, Data);
-                        _ ->
+                        false ->
                             stop({unexpected_error, Peer, Error}, State, Data)
                     end
             end
@@ -656,7 +665,20 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
             stop(Reason, State, Data);
         ignored ->
             ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
-            stop({unexpected_error, Peer, Error}, State, Data)
+
+            case Error of
+                not_provisioned
+                  when Peer =/= ?SELF_PEER ->
+                    %% The peer may have gotten wiped or didn't get
+                    %% initialized properly before being added to the
+                    %% cluster. Attempting to ingore under the assumption that
+                    %% eventually the condition that lead to the error will
+                    %% get resolved.
+                    remove_peer_status(Peer, Data),
+                    {keep_state, demonitor_agents([Peer], Data)};
+                _ ->
+                    stop({unexpected_error, Peer, Error}, State, Data)
+            end
     end.
 
 handle_append_ok(Peer, PeerHighSeqno,
@@ -739,8 +761,26 @@ handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
             check_committed_seqno_advanced(
               #{must_replicate_to => Peer}, State, NewData);
         {error, Error} ->
-            {stop, Reason} = handle_common_error(Peer, Error, Data),
-            stop(Reason, State, Data)
+            case handle_common_error(Peer, Error, Data) of
+                {stop, Reason} ->
+                    stop(Reason, State, Data);
+                ignored ->
+                    case Error of
+                        not_provisioned
+                          when Peer =/= ?SELF_PEER ->
+                            maybe_cancel_peer_catchup(Peer, Data),
+                            remove_peer_status(Peer, Data),
+
+                            %% TODO: maybe_cancel_peer_catchup() is currently
+                            %% asynchronous, so demonitor_agents() is needed
+                            %% to ignore a potential catchup response that
+                            %% gets delivered to us.
+                            NewData = demonitor_agents([Peer], Data),
+                            {keep_state, NewData};
+                        _ ->
+                            stop({unexpected_error, Peer, Error}, State, Data)
+                    end
+            end
     end.
 
 check_sync_round_advanced(#data{acked_sync_round = AckedRound} = Data) ->
