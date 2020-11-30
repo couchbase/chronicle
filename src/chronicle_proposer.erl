@@ -790,8 +790,21 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
                 ignored ->
                     ?ERROR("Catchup to peer ~p failed with error: ~p",
                            [Peer, Error]),
-                    remove_peer_status(Peer, Data),
-                    {keep_state, Data}
+                    case Error of
+                        {catchup_failed, _} ->
+                            %% Catchup failed for an unknown reason, attempt
+                            %% to ignore.
+                            remove_peer_status(Peer, Data),
+                            {keep_state, Data};
+                        {snapshot_rejected, Metadata} ->
+                            %% Not something expected to happen frequently,
+                            %% but it's possible that the old leader caught up
+                            %% the peer before we managed to.
+                            set_peer_catchup_rejected(Peer, Metadata, Data),
+                            {keep_state, replicate(Peer, Data)};
+                        _ ->
+                            stop({unexpected_error, Peer, Error}, State, Data)
+                    end
             end
     end.
 
@@ -1285,11 +1298,13 @@ maybe_set_peer_active(Peer, Metadata, Data) ->
             ok
     end.
 
-set_peer_active(Peer, Metadata, #data{term = OurTerm} = Data) ->
+set_peer_active(Peer, Metadata, Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     %% We should never overwrite an existing peer status.
     status_requested = PeerStatus#peer_status.state,
+    do_set_peer_active(Peer, PeerStatus, Metadata, Data).
 
+do_set_peer_active(Peer, PeerStatus, Metadata, #data{term = OurTerm} = Data) ->
     #metadata{term_voted = PeerTermVoted,
               committed_seqno = PeerCommittedSeqno,
               high_seqno = PeerHighSeqno} = Metadata,
@@ -1388,6 +1403,11 @@ set_peer_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
                                            sent_commit_seqno = CommittedSeqno,
                                            state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
+
+set_peer_catchup_rejected(Peer, Metadata, Data) ->
+    {ok, PeerStatus} = get_peer_status(Peer, Data),
+    catchup = PeerStatus#peer_status.state,
+    do_set_peer_active(Peer, PeerStatus, Metadata, Data).
 
 set_peer_acked_sync_round(Peer, Round, Data) ->
     update_peer_status(
