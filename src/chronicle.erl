@@ -22,6 +22,7 @@
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
+-export([acquire_lock/0, acquire_lock/1]).
 -export([get_peers/0, get_peers/1,
          get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
 -export([add_voter/1, add_voter/2, add_voters/1, add_voters/2,
@@ -60,16 +61,39 @@ reprovision() ->
 wipe() ->
     chronicle_agent:wipe().
 
-remove_peer(Peer) ->
-    remove_peer(Peer, ?DEFAULT_TIMEOUT).
+acquire_lock() ->
+    acquire_lock(?DEFAULT_TIMEOUT).
 
-remove_peer(Peer, Timeout) ->
-    remove_peers([Peer], Timeout).
+acquire_lock(Timeout) ->
+    Lock = chronicle_utils:random_uuid(),
+    Result = update_config(
+               fun (Config) ->
+                       {ok, Config#config{lock = Lock}}
+               end, Timeout),
+
+    case Result of
+        ok ->
+            {ok, Lock};
+        _ ->
+            Result
+    end.
+
+remove_peer(Peer) ->
+    remove_peer(undefined, Peer).
+
+remove_peer(Lock, Peer) ->
+    remove_peer(Lock, Peer, ?DEFAULT_TIMEOUT).
+
+remove_peer(Lock, Peer, Timeout) ->
+    remove_peers(Lock, [Peer], Timeout).
 
 remove_peers(Peers) ->
-    remove_peers(Peers, ?DEFAULT_TIMEOUT).
+    remove_peers(undefined, Peers).
 
-remove_peers(Peers, Timeout) ->
+remove_peers(Lock, Peers) ->
+    remove_peers(Lock, Peers, ?DEFAULT_TIMEOUT).
+
+remove_peers(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
       fun (Voters, Replicas) ->
@@ -77,43 +101,55 @@ remove_peers(Peers, Timeout) ->
               NewReplicas = Replicas -- Peers,
 
               {NewVoters, NewReplicas}
-      end, Timeout).
+      end, Lock, Timeout).
 
 add_voter(Peer) ->
-    add_voter(Peer, ?DEFAULT_TIMEOUT).
+    add_voter(undefined, Peer).
 
-add_voter(Peer, Timeout) ->
-    add_voters([Peer], Timeout).
+add_voter(Lock, Peer) ->
+    add_voter(Lock, Peer, ?DEFAULT_TIMEOUT).
+
+add_voter(Lock, Peer, Timeout) ->
+    add_voters(Lock, [Peer], Timeout).
 
 add_voters(Peers) ->
-    add_voters(Peers, ?DEFAULT_TIMEOUT).
+    add_voters(undefined, Peers).
 
-add_voters(Peers, Timeout) ->
+add_voters(Lock, Peers) ->
+    add_voters(Lock, Peers, ?DEFAULT_TIMEOUT).
+
+add_voters(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
       fun (Voters, Replicas) ->
               NewVoters = lists:usort(Voters ++ Peers),
               NewReplicas = Replicas -- Peers,
               {NewVoters, NewReplicas}
-      end, Timeout).
+      end, Lock, Timeout).
 
 add_replica(Peer) ->
-    add_replica(Peer, ?DEFAULT_TIMEOUT).
+    add_replica(undefind, Peer).
 
-add_replica(Peer, Timeout) ->
-    add_replicas([Peer], Timeout).
+add_replica(Lock, Peer) ->
+    add_replica(Lock, Peer, ?DEFAULT_TIMEOUT).
+
+add_replica(Lock, Peer, Timeout) ->
+    add_replicas(Lock, [Peer], Timeout).
 
 add_replicas(Peers) ->
-    add_replicas(Peers, ?DEFAULT_TIMEOUT).
+    add_replicas(undefind, Peers).
 
-add_replicas(Peers, Timeout) ->
+add_replicas(Lock, Peers) ->
+    add_replicas(Lock, Peers, ?DEFAULT_TIMEOUT).
+
+add_replicas(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
       fun (Voters, Replicas) ->
               NewVoters = Voters -- Peers,
               NewReplicas = lists:usort(Replicas ++ Peers),
               {NewVoters, NewReplicas}
-      end, Timeout).
+      end, Lock, Timeout).
 
 get_peers() ->
     get_peers(?DEFAULT_TIMEOUT).
@@ -157,7 +193,7 @@ get_config(Leader, TRef, Fun) ->
             Error
     end.
 
-update_peers(Fun, Timeout) ->
+update_peers(Fun, Lock, Timeout) ->
     update_config(
       fun (#config{voters = Voters, replicas = Replicas} = Config) ->
               {NewVoters, NewReplicas} = Fun(Voters, Replicas),
@@ -173,33 +209,45 @@ update_peers(Fun, Timeout) ->
                                                 replicas = NewReplicas},
                       {ok, NewConfig}
               end
-      end, Timeout).
+      end, Lock, Timeout).
 
 update_config(Fun, Timeout) ->
+    update_config(Fun, undefined, Timeout).
+
+update_config(Fun, Lock, Timeout) ->
     with_leader(Timeout,
                 fun (TRef, Leader, _LeaderInfo) ->
-                        update_config_loop(Fun, Leader, TRef)
+                        update_config_loop(Fun, Lock, Leader, TRef)
                 end).
 
-update_config_loop(Fun, Leader, TRef) ->
+update_config_loop(Fun, Lock, Leader, TRef) ->
     get_config(
       Leader, TRef,
       fun (Config, ConfigRevision) ->
-              case Fun(Config) of
-                  {ok, NewConfig} when Config =:= NewConfig ->
-                      ok;
-                  {ok, NewConfig} ->
-                      case cas_config(Leader, NewConfig,
-                                      ConfigRevision, TRef) of
-                          {ok, _} ->
+              ConfigLock = Config#config.lock,
+
+              case Lock =:= undefined orelse ConfigLock =:= Lock of
+                  true ->
+                      case Fun(Config) of
+                          {ok, NewConfig}
+                            when Config =:= NewConfig ->
                               ok;
-                          {error, {cas_failed, _}} ->
-                              update_config_loop(Fun, Leader, TRef);
-                          {error, _} = Error ->
-                              Error
+                          {ok, NewConfig} ->
+                              case cas_config(Leader, NewConfig,
+                                              ConfigRevision, TRef) of
+                                  {ok, _} ->
+                                      ok;
+                                  {error, {cas_failed, _}} ->
+                                      update_config_loop(Fun,
+                                                         Lock, Leader, TRef);
+                                  {error, _} = Error ->
+                                      Error
+                              end;
+                          {stop, Return} ->
+                              Return
                       end;
-                  {stop, Return} ->
-                      Return
+                  false ->
+                      {error, {lock_revoked, Lock, ConfigLock}}
               end
       end).
 

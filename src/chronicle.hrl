@@ -39,7 +39,8 @@
 
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
--record(config, { voters :: [chronicle:peer()],
+-record(config, { lock :: undefined | binary(),
+                  voters :: [chronicle:peer()],
                   replicas :: [chronicle:peer()],
                   state_machines :: #{atom() => #rsm_config{} }}).
 -record(transition,
