@@ -276,6 +276,7 @@ join_cluster(ClusterInfo) ->
         {error, establish_term_error()}.
 
 -type establish_term_error() ::
+        not_provisioned |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {behind, chronicle:peer_position()}.
@@ -305,6 +306,7 @@ establish_term(Peer, Opaque, HistoryId, Term, Position, Options) ->
         {error, ensure_term_error()}.
 
 -type ensure_term_error() ::
+        not_provisioned |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()}.
 
@@ -321,6 +323,7 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
+        not_provisioned |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chorincle:leader_term()} |
         {missing_entries, #metadata{}} |
@@ -349,6 +352,7 @@ install_snapshot(Peer, HistoryId, Term, Seqno, ConfigEntry, RSMSnapshots) ->
 -type local_mark_committed_result() ::
         ok | {error, local_mark_committed_error()}.
 -type local_mark_committed_error() ::
+        not_provisioned |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
@@ -364,7 +368,11 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
 
 -type store_branch_result() ::
         {ok, #metadata{}} |
-        {error, {concurrent_branch, OurBranch::#branch{}}}.
+        {error, store_branch_error()}.
+-type store_branch_error() ::
+        not_provisioned |
+        {coordinator_not_in_peers, chronicle:peer(), [chronicle:peer()]} |
+        {concurrent_branch, OurBranch::#branch{}}.
 
 -spec store_branch(peer(), #branch{}) -> store_branch_result().
 store_branch(Peer, Branch) ->
