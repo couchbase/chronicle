@@ -128,7 +128,7 @@ add_voters(Lock, Peers, Timeout) ->
       end, Lock, Timeout).
 
 add_replica(Peer) ->
-    add_replica(undefind, Peer).
+    add_replica(undefined, Peer).
 
 add_replica(Lock, Peer) ->
     add_replica(Lock, Peer, ?DEFAULT_TIMEOUT).
@@ -137,7 +137,7 @@ add_replica(Lock, Peer, Timeout) ->
     add_replicas(Lock, [Peer], Timeout).
 
 add_replicas(Peers) ->
-    add_replicas(undefind, Peers).
+    add_replicas(undefined, Peers).
 
 add_replicas(Lock, Peers) ->
     add_replicas(Lock, Peers, ?DEFAULT_TIMEOUT).
