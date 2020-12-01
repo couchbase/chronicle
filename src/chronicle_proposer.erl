@@ -951,7 +951,7 @@ reset_peers(#data{config = Config} = Data) ->
 is_config_committed(#data{config_revision = ConfigRevision} = Data) ->
     is_revision_committed(ConfigRevision, Data).
 
-is_revision_committed({_, _, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
+is_revision_committed({_, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
     Seqno =< CommittedSeqno.
 
 replicate(#data{peers = Peers} = Data) ->
@@ -1270,10 +1270,6 @@ handle_removed_peers(Peers, Data) ->
 handle_added_peers(Peers, Data) ->
     send_heartbeat(Peers, Data).
 
-log_entry_revision(#log_entry{history_id = HistoryId,
-                              term = Term, seqno = Seqno}) ->
-    {HistoryId, Term, Seqno}.
-
 force_propose_config(Config, #data{config_change_reply_to =
                                        undefined} = Data) ->
     %% This function doesn't check that the current config is committed, which
@@ -1291,7 +1287,7 @@ do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
                                          pending_entries = Entries} = Data) ->
     Seqno = HighSeqno + 1,
     LogEntry = make_log_entry(Seqno, Config, Data),
-    Revision = log_entry_revision(LogEntry),
+    Revision = chronicle_utils:log_entry_revision(LogEntry),
 
     NewEntries = queue:in(LogEntry, Entries),
     NewData = Data#data{pending_entries = NewEntries,

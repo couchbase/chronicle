@@ -845,3 +845,6 @@ queue_dropwhile_test() ->
     Test(lists:seq(6,10), 5),
     Test([], 42).
 -endif.
+
+log_entry_revision(#log_entry{history_id = HistoryId, seqno = Seqno}) ->
+    {HistoryId, Seqno}.

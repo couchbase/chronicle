@@ -56,9 +56,6 @@ get_cluster_info(Leader, Timeout) ->
 leader_query(Leader, Query, Timeout) ->
     call(?SERVER(Leader), {leader_query, Query}, Timeout).
 
-%% TODO: think more about what CasRevision should be.
-%%
-%% Specifically, should it or should it not include a term number.
 cas_config(Leader, NewConfig, CasRevision, Timeout) ->
     call(?SERVER(Leader), {cas_config, NewConfig, CasRevision}, Timeout).
 

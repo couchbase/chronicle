@@ -544,7 +544,7 @@ build_metadata(Data) ->
             undefined ->
                 {undefined, undefined};
             #log_entry{value = Value} ->
-                {Value, chronicle_proposer:log_entry_revision(ConfigEntry)}
+                {Value, chronicle_utils:log_entry_revision(ConfigEntry)}
         end,
 
     #metadata{peer = Peer,
@@ -552,7 +552,7 @@ build_metadata(Data) ->
               term = Term,
               term_voted = TermVoted,
               high_seqno = get_high_seqno(Data),
-              committed_seqno  = CommittedSeqno,
+              committed_seqno = CommittedSeqno,
               config = Config,
               config_revision = ConfigRevision,
               pending_branch = PendingBranch}.
