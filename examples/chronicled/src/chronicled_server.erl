@@ -59,6 +59,7 @@ get_options() ->
                   {"/config/provision", ?MODULE, #state{domain=config,
                                                         op=provision}},
                   {"/node/wipe", ?MODULE, #state{domain=node, op=wipe}},
+                  {"/node/status", ?MODULE, #state{domain=node, op=status}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
                  ]}
           ]),
@@ -165,7 +166,10 @@ config_api(Req, #state{domain=config, op=provision}) ->
 
 node_api(Req, #state{domain=node, op=wipe}) ->
     ok = chronicle:wipe(),
-    reply_json(200, <<"ok">>, Req).
+    reply_json(200, <<"ok">>, Req);
+node_api(Req, #state{domain=node, op=status}) ->
+    Status = #{leader => get_leader_info()},
+    reply_json(200, Status, Req).
 
 %% internal module functions
 reply_json(Status, Response, Req) ->
@@ -311,4 +315,14 @@ do_add_nodes(Nodes, Type) ->
             chronicle:add_voters(Nodes);
         replica ->
             chronicle:add_replicas(Nodes)
+    end.
+
+get_leader_info() ->
+    case chronicle_leader:get_leader() of
+        {Leader, {HistoryId, {Term, _}}} ->
+            #{node => Leader,
+              history_id => HistoryId,
+              term => Term};
+        no_leader ->
+            null
     end.
