@@ -288,6 +288,7 @@ update_config(Fun, Lock, Timeout) ->
                 end).
 
 update_config_loop(Fun, Lock, Leader, TRef) ->
+    validate_lock(Lock),
     get_config(
       Leader, TRef,
       fun (Config, ConfigRevision) ->
@@ -331,3 +332,13 @@ validate_peers(Peers) ->
                       error(badarg)
               end
       end, Peers).
+
+validate_lock(Lock) ->
+    case Lock of
+        unlocked ->
+            ok;
+        _ when is_binary(Lock) ->
+            ok;
+        _ ->
+            error(badarg)
+    end.
