@@ -130,7 +130,7 @@ json_api(Req, #state{domain=kv, op=put}=State) ->
 
 config_api(Req, #state{domain=config, op=info}) ->
     {ok, Peers} = chronicle:get_peers(),
-    reply_json(200, jiffy:encode(Peers), Req);
+    reply_json(200, Peers, Req);
 config_api(Req, #state{domain=config, op={addnode, Type}}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
     ?LOG_DEBUG("read content: ~p", [Body]),
@@ -171,7 +171,7 @@ node_api(Req, #state{domain=node, op=wipe}) ->
 reply_json(Status, Response, Req) ->
     cowboy_req:reply(Status,
                      #{<<"content-type">> => <<"application/json">>},
-                     Response, Req).
+                     jiffy:encode(Response), Req).
 
 method_to_atom(<<"GET">>) ->
     get;
