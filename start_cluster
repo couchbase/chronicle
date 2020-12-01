@@ -39,6 +39,9 @@ def start_node(i, hostname, ebin_path, data_dir, app):
     log_path = path.join(node_dir, 'log')
     log_file = open(log_path, 'a')
 
+    script = '''
+    {{ok, _}} = application:ensure_all_started({}, permanent)
+    '''.format(app)
     args = ['erl', '-pa'] + ebin_path + \
            ['+Bd',
             '+sbwt', 'none',
@@ -47,8 +50,7 @@ def start_node(i, hostname, ebin_path, data_dir, app):
             '-kernel', 'logger_level', 'debug',
             '-chronicle', 'data_dir', '"{}"'.format(node_data_dir),
             '-{}'.format(app), 'instance', '{}'.format(i),
-            '-eval',
-            '{{ok, _}} = application:ensure_all_started({}).'.format(app)]
+            '-eval', script]
     process = subprocess.Popen(args, stdin=None,
                                stdout=log_file, stderr=log_file)
     atexit.register(lambda: kill_node(process))
