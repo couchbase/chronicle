@@ -370,15 +370,22 @@ handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
            [Term, ?ESTABLISH_TERM_TIMEOUT]),
     {stop, establish_term_timeout}.
 
-check_peers(#data{peers = Peers} = Data) ->
+check_peers(#data{peers = Peers,
+                  sync_round = SyncRound,
+                  acked_sync_round = AckedSyncRound} = Data) ->
     erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
 
     PeersToCheck =
         lists:filter(
           fun (Peer) ->
                   case get_peer_status(Peer, Data) of
-                      {ok, _} ->
-                          false;
+                      {ok, #peer_status{sent_sync_round = PeerSentSyncRound}} ->
+                          %% If we failed to send a heartbeat to the node due
+                          %% to it being busy AND we haven't got enough
+                          %% responses from other nodes, then we'll try
+                          %% sending another heartbeat here.
+                          PeerSentSyncRound < SyncRound
+                              andalso SyncRound =/= AckedSyncRound;
                       not_found ->
                           true
                   end
