@@ -87,6 +87,46 @@ server: Cowboy
 {"rev":{"history_id":"6e4d2640cbe41b818bb5af4407142be9","seqno":2},"value":1}
 ```
 
+## Get the key with varying read consistency levels
+
+Chronicle supports 3 read consistency levels:
+
+1. local - read from the local replicated state machine (RSM) copy (this is
+   the default)
+2. leader - reads from the leader's RSM copy
+3. quorum - performs a quorum read
+
+Local reads are performed against the local replicated state machine and don't
+involve any network round trips. They are fast and for clients that always
+read against a single chronicle node, give sequential consistency.
+
+Quorum reads are fully linearizable and generally incur (1) one network round
+trip to the leader (2) a "quorum sync" (wherein the leader must confirm from a
+quorum of nodes that it is currently the leader) plus the time take to sync the
+replicated log to the local node (so that read-your-own-writes semantics are
+preserved).
+
+Leader reads involve a network round-trip to the chronicle leader but skip the
+quorum sync. They're faster than quorum reads and under stable leadership
+provide linearizable semantics and even in changing leadership conditions 
+provide sequentially consistent semantics as long as the client always reads
+against the same chronicle node. However, if the client performs leader reads
+against different chronicle nodes, reads may be seen to go "back in time". This
+non-linearizable behavior of leader reads in systems like chronicle (and etcd)
+is well described in this [etcd issue](https://github.com/etcd-io/etcd/issues/741).
+
+Local reads are the default but can be explicitly run as follows:
+ 
+    curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key?consistency=local
+
+For quorum reads, run:
+
+    curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key?consistency=quorum
+
+For leader reads, run:
+
+    curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key?consistency=leader
+
 ## Update a value
 
 Run:
