@@ -87,6 +87,38 @@ server: Cowboy
 {"rev":{"history_id":"6e4d2640cbe41b818bb5af4407142be9","seqno":2},"value":1}
 ```
 
+## Get the key with varying read consistency levels
+
+Chronicle supports 3 read consistency levels:
+
+1. local - read from the local replicated state machine (RSM) copy (this is
+   the default)
+2. leader - reads from the leaders RSM copy
+3. quorum - performs a quorum rea
+
+Local reads are performed against the local replicated state machine and don't
+involve any network round trips. They are fast and for clients that always
+read against a single chronicle node give sequential consistency.
+
+Quorum reads are fully linearizable and generally incur (1) one network round
+trip to the leader (2) a "quorum sync" (wherein the leader must confirm from a
+quorum of nodes that it is currently the leader) plus the time take to sync the
+replicated log to the local node (so that read-your-own-writes semantics are
+preserved.
+
+Leader reads involve a network round-trip to the chronicle leader but skip the
+quorum sync. They're faster than quorum reads and under stable leadership
+provide linearizable semantics but can only guarantee sequentially consistent
+semantics.
+
+Local reads are the default. For quorum reads, run:
+
+    curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key?read_consistency=quorum
+
+For leader reads, run:
+
+    curl -i -H "Content-Type: application/json" 127.0.0.1:8080/kv/key?read_consistency=leader
+
 ## Update a value
 
 Run:

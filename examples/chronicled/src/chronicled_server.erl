@@ -188,12 +188,22 @@ get_value(Req) ->
             not_found;
         BinKey ->
             Key = binary_to_list(BinKey),
-            do_get_value(Key)
+            Qs = cowboy_req:parse_qs(Req),
+            Consistency =
+                case proplists:get_value(<<"read_consistency">>, Qs, <<"local">>) of
+                    <<"quorum">> ->
+                        quorum;
+                    <<"leader">> ->
+                        leader;
+                    <<"local">> ->
+                        local
+                end,
+            do_get_value(Key, #{read_consistency => Consistency})
     end.
 
-do_get_value(Key) ->
-    ?LOG_DEBUG("key: ~p", [Key]),
-    Result = chronicle_kv:get(kv, Key),
+do_get_value(Key, Opts) ->
+    ?LOG_DEBUG("key: ~p, Opts: ~p", [Key, Opts]),
+    Result = chronicle_kv:get(kv, Key, Opts),
     case Result of
         {ok, Value} ->
             {ok, Value};
