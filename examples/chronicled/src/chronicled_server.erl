@@ -192,12 +192,34 @@ get_value(Req) ->
             not_found;
         BinKey ->
             Key = binary_to_list(BinKey),
-            do_get_value(Key)
+            Consistency = get_consistency(Req),
+            do_get_value(Key, Consistency)
     end.
 
-do_get_value(Key) ->
+get_consistency(Req) ->
+    #{consistency := Consistency} =
+        cowboy_req:match_qs(
+          [{consistency, [fun consistency_constraint/2], local}],
+          Req),
+    Consistency.
+
+consistency_constraint(forward, Value) ->
+    case Value of
+        <<"local">> ->
+            {ok, local};
+        <<"leader">> ->
+            {ok, leader};
+        <<"quorum">> ->
+            {ok, quorum};
+        _ ->
+            {error, bad_consistency}
+    end;
+consistency_constraint(format_error, _Error) ->
+    "consistency must be one of 'local', 'leader' or 'quorum'".
+
+do_get_value(Key, Consistency) ->
     ?LOG_DEBUG("key: ~p", [Key]),
-    Result = chronicle_kv:get(kv, Key),
+    Result = chronicle_kv:get(kv, Key, #{read_consistency => Consistency}),
     case Result of
         {ok, Value} ->
             {ok, Value};
