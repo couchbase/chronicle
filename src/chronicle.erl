@@ -37,6 +37,7 @@
 
 -type uuid() :: binary().
 -type peer() :: atom().
+-type peers() :: [peer()].
 -type history_id() :: binary().
 
 -type leader_term() :: {non_neg_integer(), peer()}.
@@ -46,7 +47,10 @@
 
 -type cluster_info() :: #{history_id := history_id(),
                           committed_seqno := seqno(),
-                          peers := [peer()]}.
+                          peers := peers()}.
+
+-type lock() :: binary().
+-type lockreq() :: lock() | unlocked.
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
@@ -61,9 +65,12 @@ reprovision() ->
 wipe() ->
     chronicle_agent:wipe().
 
+-type acquire_lock_result() :: {ok, lock()}.
+-spec acquire_lock() -> acquire_lock_result().
 acquire_lock() ->
     acquire_lock(?DEFAULT_TIMEOUT).
 
+-spec acquire_lock(timeout()) -> acquire_lock_result().
 acquire_lock(Timeout) ->
     Lock = chronicle_utils:random_uuid(),
     Result = update_config(
@@ -78,21 +85,35 @@ acquire_lock(Timeout) ->
             Result
     end.
 
+-type no_voters_left_error() :: no_voters_left.
+-type lock_revoked_error() ::
+        {lock_revoked, ExpectedLock::lock(), ActualLock::lock()}.
+
+-type remove_peers_result() :: ok | {error, remove_peers_error()}.
+-type remove_peers_error() :: no_voters_left_error()
+                            | lock_revoked_error().
+
+-spec remove_peer(peer()) -> remove_peers_result().
 remove_peer(Peer) ->
     remove_peer(unlocked, Peer).
 
+-spec remove_peer(lockreq(), peer()) -> remove_peers_result().
 remove_peer(Lock, Peer) ->
     remove_peer(Lock, Peer, ?DEFAULT_TIMEOUT).
 
+-spec remove_peer(lockreq(), peer(), timeout()) -> remove_peers_result().
 remove_peer(Lock, Peer, Timeout) ->
     remove_peers(Lock, [Peer], Timeout).
 
+-spec remove_peers(peers()) -> remove_peers_result().
 remove_peers(Peers) ->
     remove_peers(unlocked, Peers).
 
+-spec remove_peers(lockreq(), peers()) -> remove_peers_result().
 remove_peers(Lock, Peers) ->
     remove_peers(Lock, Peers, ?DEFAULT_TIMEOUT).
 
+-spec remove_peers(lockreq(), peers(), timeout()) -> remove_peers_result().
 remove_peers(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
@@ -103,21 +124,29 @@ remove_peers(Lock, Peers, Timeout) ->
               {NewVoters, NewReplicas}
       end, Lock, Timeout).
 
+-type add_voters_result() :: ok | {error, lock_revoked_error()}.
+
+-spec add_voter(peer()) -> add_voters_result().
 add_voter(Peer) ->
     add_voter(unlocked, Peer).
 
+-spec add_voter(lockreq(), peer()) -> add_voters_result().
 add_voter(Lock, Peer) ->
     add_voter(Lock, Peer, ?DEFAULT_TIMEOUT).
 
+-spec add_voter(lockreq(), peer(), timeout()) -> add_voters_result().
 add_voter(Lock, Peer, Timeout) ->
     add_voters(Lock, [Peer], Timeout).
 
+-spec add_voters(peers()) -> add_voters_result().
 add_voters(Peers) ->
     add_voters(unlocked, Peers).
 
+-spec add_voters(lockreq(), peers()) -> add_voters_result().
 add_voters(Lock, Peers) ->
     add_voters(Lock, Peers, ?DEFAULT_TIMEOUT).
 
+-spec add_voters(lockreq(), peers(), timeout()) -> add_voters_result().
 add_voters(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
@@ -127,21 +156,31 @@ add_voters(Lock, Peers, Timeout) ->
               {NewVoters, NewReplicas}
       end, Lock, Timeout).
 
+-type add_replicas_result() :: ok | {error, add_replicas_error()}.
+-type add_replicas_error() :: no_voters_left_error()
+                            | lock_revoked_error().
+
+-spec add_replica(peer()) -> add_replicas_result().
 add_replica(Peer) ->
     add_replica(unlocked, Peer).
 
+-spec add_replica(lockreq(), peer()) -> add_replicas_result().
 add_replica(Lock, Peer) ->
     add_replica(Lock, Peer, ?DEFAULT_TIMEOUT).
 
+-spec add_replica(lockreq(), peer(), timeout()) -> add_replicas_result().
 add_replica(Lock, Peer, Timeout) ->
     add_replicas(Lock, [Peer], Timeout).
 
+-spec add_replicas(peers()) -> add_replicas_result().
 add_replicas(Peers) ->
     add_replicas(unlocked, Peers).
 
+-spec add_replicas(lockreq(), peers()) -> add_replicas_result().
 add_replicas(Lock, Peers) ->
     add_replicas(Lock, Peers, ?DEFAULT_TIMEOUT).
 
+-spec add_replicas(lockreq(), peers(), timeout()) -> add_replicas_result().
 add_replicas(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
@@ -151,9 +190,13 @@ add_replicas(Lock, Peers, Timeout) ->
               {NewVoters, NewReplicas}
       end, Lock, Timeout).
 
+-type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
+
+-spec get_peers() -> get_peers_result().
 get_peers() ->
     get_peers(?DEFAULT_TIMEOUT).
 
+-spec get_peers(timeout()) -> get_peers_result().
 get_peers(Timeout) ->
     get_config(Timeout,
                fun (Config, _ConfigRevision) ->
@@ -161,18 +204,22 @@ get_peers(Timeout) ->
                               replicas => Config#config.replicas}}
                end).
 
+-spec get_voters() -> {ok, peers()}.
 get_voters() ->
     get_voters(?DEFAULT_TIMEOUT).
 
+-spec get_voters(timeout()) -> {ok, peers()}.
 get_voters(Timeout) ->
     get_config(Timeout,
                fun (Config, _ConfigRevision) ->
                        {ok, Config#config.voters}
                end).
 
+-spec get_replicas() -> {ok, peers()}.
 get_replicas() ->
     get_replicas(?DEFAULT_TIMEOUT).
 
+-spec get_replicas(timeout()) -> {ok, peers()}.
 get_replicas(Timeout) ->
     get_config(Timeout,
                fun (Config, _ConfigRevision) ->
