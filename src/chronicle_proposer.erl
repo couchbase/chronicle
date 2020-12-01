@@ -35,7 +35,7 @@
 %% TODO: move these to the config
 -define(STOP_TIMEOUT, 10000).
 -define(ESTABLISH_TERM_TIMEOUT, 10000).
--define(CHECK_PEERS_INTERVAL, 5000).
+-define(CHECK_PEERS_INTERVAL, 1000).
 
 -record(data, { parent,
 
