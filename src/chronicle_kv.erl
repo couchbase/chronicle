@@ -14,11 +14,32 @@
 %% limitations under the License.
 %%
 -module(chronicle_kv).
--compile(export_all).
 
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [start_timeout/1]).
+
+%% APIs
+-export([event_manager/1]).
+-export([add/3, add/4]).
+-export([set/3, set/4, set/5]).
+-export([update/3, update/4]).
+-export([delete/2, delete/3, delete/4]).
+-export([submit_transaction/3, submit_transaction/4]).
+-export([transaction/3, transaction/4]).
+-export([get/2, get/3]).
+-export([rewrite/2, rewrite/3]).
+-export([get_snapshot/2, get_snapshot/3]).
+-export([get_full_snapshot/1, get_full_snapshot/2]).
+-export([get_revision/1]).
+-export([sync/2, sync/3]).
+
+%% callbacks
+-export([specs/2,
+         init/2, post_init/3,
+         apply_snapshot/5, apply_command/5,
+         handle_command/4, handle_query/4, handle_info/4,
+         terminate/4]).
 
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
@@ -100,6 +121,7 @@ transaction_conditions(Snapshot, Missing) ->
               [{revision, Key, Revision} | Acc]
       end, ConditionsMissing, Snapshot).
 
+%% TODO: give this function a better name
 submit_transaction(Name, Conditions, Updates) ->
     submit_transaction(Name, Conditions, Updates, #{}).
 
