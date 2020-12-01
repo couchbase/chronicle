@@ -79,7 +79,7 @@ acquire_lock(Timeout) ->
     end.
 
 remove_peer(Peer) ->
-    remove_peer(undefined, Peer).
+    remove_peer(unlocked, Peer).
 
 remove_peer(Lock, Peer) ->
     remove_peer(Lock, Peer, ?DEFAULT_TIMEOUT).
@@ -88,7 +88,7 @@ remove_peer(Lock, Peer, Timeout) ->
     remove_peers(Lock, [Peer], Timeout).
 
 remove_peers(Peers) ->
-    remove_peers(undefined, Peers).
+    remove_peers(unlocked, Peers).
 
 remove_peers(Lock, Peers) ->
     remove_peers(Lock, Peers, ?DEFAULT_TIMEOUT).
@@ -104,7 +104,7 @@ remove_peers(Lock, Peers, Timeout) ->
       end, Lock, Timeout).
 
 add_voter(Peer) ->
-    add_voter(undefined, Peer).
+    add_voter(unlocked, Peer).
 
 add_voter(Lock, Peer) ->
     add_voter(Lock, Peer, ?DEFAULT_TIMEOUT).
@@ -113,7 +113,7 @@ add_voter(Lock, Peer, Timeout) ->
     add_voters(Lock, [Peer], Timeout).
 
 add_voters(Peers) ->
-    add_voters(undefined, Peers).
+    add_voters(unlocked, Peers).
 
 add_voters(Lock, Peers) ->
     add_voters(Lock, Peers, ?DEFAULT_TIMEOUT).
@@ -128,7 +128,7 @@ add_voters(Lock, Peers, Timeout) ->
       end, Lock, Timeout).
 
 add_replica(Peer) ->
-    add_replica(undefined, Peer).
+    add_replica(unlocked, Peer).
 
 add_replica(Lock, Peer) ->
     add_replica(Lock, Peer, ?DEFAULT_TIMEOUT).
@@ -137,7 +137,7 @@ add_replica(Lock, Peer, Timeout) ->
     add_replicas(Lock, [Peer], Timeout).
 
 add_replicas(Peers) ->
-    add_replicas(undefined, Peers).
+    add_replicas(unlocked, Peers).
 
 add_replicas(Lock, Peers) ->
     add_replicas(Lock, Peers, ?DEFAULT_TIMEOUT).
@@ -232,7 +232,7 @@ update_peers(Fun, Lock, Timeout) ->
       end, Lock, Timeout).
 
 update_config(Fun, Timeout) ->
-    update_config(Fun, undefined, Timeout).
+    update_config(Fun, unlocked, Timeout).
 
 update_config(Fun, Lock, Timeout) ->
     with_leader(Timeout,
@@ -246,7 +246,7 @@ update_config_loop(Fun, Lock, Leader, TRef) ->
       fun (Config, ConfigRevision) ->
               ConfigLock = Config#config.lock,
 
-              case Lock =:= undefined orelse ConfigLock =:= Lock of
+              case Lock =:= unlocked orelse ConfigLock =:= Lock of
                   true ->
                       case Fun(Config) of
                           {ok, NewConfig}
