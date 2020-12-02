@@ -235,7 +235,7 @@ set_value(Req, ExpectedRevision) ->
     ?LOG_DEBUG("read content: ~p", [Body]),
     try jiffy:decode(Body) of
         _ ->
-            chronicle_kv:set(kv, Key, Body, ExpectedRevision),
+            {ok, _} = chronicle_kv:set(kv, Key, Body, ExpectedRevision),
             {true, Req1}
     catch _:_ ->
             ?LOG_DEBUG("body not json: ~p", [Body]),
@@ -246,7 +246,7 @@ delete_value(Req, ExpectedRevision) ->
     BinKey = cowboy_req:binding(key, Req),
     Key = binary_to_list(BinKey),
     ?LOG_DEBUG("deleting key: ~p", [Key]),
-    chronicle_kv:delete(kv, Key, ExpectedRevision),
+    {ok, _} = chronicle_kv:delete(kv, Key, ExpectedRevision),
     true.
 
 parse_nodes(Body) ->
