@@ -25,7 +25,7 @@
 -export([set/3, set/4, set/5]).
 -export([update/3, update/4]).
 -export([delete/2, delete/3, delete/4]).
--export([submit_transaction/3, submit_transaction/4]).
+-export([multi/2, multi/3]).
 -export([transaction/3, transaction/4]).
 -export([get/2, get/3]).
 -export([rewrite/2, rewrite/3]).
@@ -92,6 +92,42 @@ delete(Name, Key, ExpectedRevision, Opts) ->
                    {delete, Key, ExpectedRevision},
                    get_timeout(Opts), Opts).
 
+multi(Name, Updates) ->
+    multi(Name, Updates, #{}).
+
+multi(Name, Updates, Opts) ->
+    {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
+    submit_transaction(Name, TxnConditions, TxnUpdates, Opts).
+
+multi_to_txn(Updates) ->
+    multi_to_txn_loop(Updates, [], []).
+
+multi_to_txn_loop([], TxnConditions, TxnUpdates) ->
+    {TxnConditions, TxnUpdates};
+multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
+    case Update of
+        {add, Key, Value} ->
+            multi_to_txn_loop(Updates,
+                              [{missing, Key} | TxnConditions],
+                              [{set, Key, Value} | TxnUpdates]);
+        {set, Key, Value} ->
+            multi_to_txn_loop(Updates,
+                              TxnConditions,
+                              [{set, Key, Value} | TxnUpdates]);
+        {set, Key, Value, Revision} ->
+            multi_to_txn_loop(Updates,
+                              [{revision, Key, Revision} | TxnConditions],
+                              [{set, Key, Value} | TxnUpdates]);
+        {delete, Key} ->
+            multi_to_txn_loop(Updates,
+                              TxnConditions,
+                              [{delete, Key} | TxnUpdates]);
+        {delete, Key, Revision} ->
+            multi_to_txn_loop(Updates,
+                              [{revision, Revision} | TxnConditions],
+                              [{delete, Key} | TxnUpdates])
+    end.
+
 transaction(Name, Keys, Fun) ->
     transaction(Name, Keys, Fun, #{}).
 
@@ -120,10 +156,6 @@ transaction_conditions(Snapshot, Missing) ->
       fun (Key, {_, Revision}, Acc) ->
               [{revision, Key, Revision} | Acc]
       end, ConditionsMissing, Snapshot).
-
-%% TODO: give this function a better name
-submit_transaction(Name, Conditions, Updates) ->
-    submit_transaction(Name, Conditions, Updates, #{}).
 
 submit_transaction(Name, Conditions, Updates, Opts) ->
     submit_transaction(Name, Conditions, Updates, get_timeout(Opts), Opts).

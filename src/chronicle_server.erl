@@ -620,13 +620,12 @@ simple_test__(Nodes) ->
                           {error, not_found} = chronicle_kv:get(kv, a,
                                                                 #{read_cosistency => quorum}),
 
-                          {ok, _} = chronicle_kv:submit_transaction(
-                                         kv, [], [{set, a, 84},
-                                                  {set, c, 42}]),
+                          {ok, _} = chronicle_kv:multi(kv,
+                                                       [{set, a, 84},
+                                                        {set, c, 42}]),
                           {error, {conflict, _}} =
-                              chronicle_kv:submit_transaction(kv,
-                                                              [{revision, a, Rev2}],
-                                                              [{set, a, 1234}]),
+                              chronicle_kv:multi(kv,
+                                                 [{set, a, 1234, Rev2}]),
 
                           {ok, _, blah} =
                               chronicle_kv:transaction(
