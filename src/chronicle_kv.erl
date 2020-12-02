@@ -97,7 +97,7 @@ transaction(Name, Keys, Fun) ->
 
 transaction(Name, Keys, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
-    {ok, {Snapshot, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
+    {ok, {Snapshot, _, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
     case Fun(Snapshot) of
         {commit, Updates} ->
             Conditions = transaction_conditions(Snapshot, Missing),
@@ -190,7 +190,12 @@ get_snapshot(Name, Keys) ->
     get_snapshot(Name, Keys, #{}).
 
 get_snapshot(Name, Keys, Opts) ->
-    get_snapshot(Name, Keys, get_timeout(Opts), Opts).
+    case get_snapshot(Name, Keys, get_timeout(Opts), Opts) of
+        {ok, {Snapshot, Revision, _Missing}} ->
+            {ok, {Snapshot, Revision}};
+        Other ->
+            Other
+    end.
 
 get_snapshot(Name, Keys, Timeout, Opts) ->
     optimistic_query(
@@ -202,14 +207,19 @@ get_snapshot(Name, Keys, Timeout, Opts) ->
 get_snapshot_fast_path(Name, Keys) ->
     case get_kv_table(Name) of
         {ok, Table} ->
-            {_, TableSeqno} = get_revision(Name),
-            get_snapshot_fast_path_loop(Table, TableSeqno, Keys, #{});
+            {_, TableSeqno} = Revision = get_revision(Name),
+            case get_snapshot_fast_path_loop(Table, TableSeqno, Keys, #{}) of
+                {ok, Snapshot} ->
+                    {ok, {Snapshot, Revision, []}};
+                use_slow_path ->
+                    use_slow_path
+            end;
         {error, no_table} ->
             use_slow_path
     end.
 
 get_snapshot_fast_path_loop(_Table, _TableSeqno, [], Snapshot) ->
-    {ok, {Snapshot, []}};
+    {ok, Snapshot};
 get_snapshot_fast_path_loop(Table, TableSeqno, [Key | RestKeys], Snapshot) ->
     case get_from_kv_table(Table, Key) of
         {ok, {_, {_HistoryId, Seqno}} = ValueRev} ->
@@ -313,8 +323,8 @@ handle_query({get, Key}, _StateRevision, State, Data) ->
     handle_get(Key, State, Data);
 handle_query(get_full_snapshot, StateRevision, State, Data) ->
     handle_get_full_snapshot(StateRevision, State, Data);
-handle_query({get_snapshot, Keys}, _StateRevision, State, Data) ->
-    handle_get_snapshot(Keys, State, Data).
+handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
+    handle_get_snapshot(Keys, StateRevision, State, Data).
 
 apply_command({add, Key, Value}, Revision, StateRevision, State, Data) ->
     apply_add(Key, Value, Revision, StateRevision, State, Data);
@@ -438,10 +448,10 @@ handle_get(Key, State, Data) ->
 handle_get_full_snapshot(StateRevision, State, Data) ->
     {reply, {ok, {State, StateRevision}}, Data}.
 
-handle_get_snapshot(Keys, State, Data) ->
+handle_get_snapshot(Keys, StateRevision, State, Data) ->
     Snapshot = maps:with(Keys, State),
     Missing = Keys -- maps:keys(Snapshot),
-    {reply, {ok, {Snapshot, Missing}}, Data}.
+    {reply, {ok, {Snapshot, StateRevision, Missing}}, Data}.
 
 apply_add(Key, Value, Revision, StateRevision, State, Data) ->
     case check_condition({missing, Key}, Revision, StateRevision, State) of
