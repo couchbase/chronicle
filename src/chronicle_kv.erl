@@ -44,35 +44,64 @@
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
 
+-type name() :: atom().
+-type key() :: any().
+-type value() :: any().
+-type revision() :: chronicle:revision().
+-type revisionreq() :: any | revision().
+
+-type read_consistency() :: local | leader | quorum.
+-type options() :: #{timeout => timeout(),
+                     read_consistency => read_consistency(),
+                     read_own_writes => boolean()}.
+-type op_result() :: {ok, revision()}
+                   | {error, {conflict, revision()}}.
+
 -record(data, {name,
                meta_table,
                kv_table,
                event_mgr,
                initialized}).
 
+-ifndef(TEST).
+-type event_manager_name() :: atom().
+-else.
+-type event_manager_name() :: any().
+-endif.
+
+-spec event_manager(name()) -> event_manager_name().
 event_manager(Name) ->
     ?SERVER_NAME(event_manager_name(Name)).
 
+-spec add(name(), key(), value()) -> op_result().
 add(Name, Key, Value) ->
     add(Name, Key, Value, #{}).
 
+-spec add(name(), key(), value(), options()) -> op_result().
 add(Name, Key, Value, Opts) ->
     submit_command(Name, {add, Key, Value}, get_timeout(Opts), Opts).
 
+-spec set(name(), key(), value()) -> op_result().
 set(Name, Key, Value) ->
     set(Name, Key, Value, any).
 
+-spec set(name(), key(), value(), revisionreq()) -> op_result().
 set(Name, Key, Value, ExpectedRevision) ->
     set(Name, Key, Value, ExpectedRevision, #{}).
 
+-spec set(name(), key(), value(), revisionreq(), options()) -> op_result().
 set(Name, Key, Value, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {set, Key, Value, ExpectedRevision},
                    get_timeout(Opts), Opts).
 
+-type update_fun() :: fun ((value()) -> value()).
+
+-spec update(name(), key(), update_fun()) -> op_result().
 update(Name, Key, Fun) ->
     update(Name, Key, Fun, #{}).
 
+-spec update(name(), key(), update_fun(), options()) -> op_result().
 update(Name, Key, Fun, Opts) ->
     case get(Name, Key) of
         {ok, {Value, Revision}} ->
@@ -81,20 +110,32 @@ update(Name, Key, Fun, Opts) ->
             Error
     end.
 
+-spec delete(name(), key()) -> op_result().
 delete(Name, Key) ->
     delete(Name, Key, any).
 
+-spec delete(name(), key(), revisionreq()) -> op_result().
 delete(Name, Key, ExpectedRevision) ->
     delete(Name, Key, ExpectedRevision, #{}).
 
+-spec delete(name(), key(), revisionreq(), options()) -> op_result().
 delete(Name, Key, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
                    get_timeout(Opts), Opts).
 
+-type multi_ops() :: [multi_op()].
+-type multi_op() :: {add, key(), value()}
+                  | {set, key(), value()}
+                  | {set, key(), value(), revisionreq()}
+                  | {delete, key()}
+                  | {delete, key(), revisionreq()}.
+
+-spec multi(name(), multi_ops()) -> op_result().
 multi(Name, Updates) ->
     multi(Name, Updates, #{}).
 
+-spec multi(name(), multi_ops(), options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
     submit_transaction(Name, TxnConditions, TxnUpdates, Opts).
@@ -128,9 +169,24 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
                               [{delete, Key} | TxnUpdates])
     end.
 
+-type snapshot() :: #{key() => {value(), revision()}}.
+-type txn_ops() :: [txn_op()].
+-type txn_op() :: {set, key(), value()}
+                | {delete, key()}.
+-type txn_fun() :: fun ((snapshot()) ->
+                               {commit, txn_ops()} |
+                               {commit, txn_ops(), Extra::any()} |
+                               {abort, Result::any()}).
+-type txn_result() :: {ok, revision()}
+                    | {ok, revision(), Extra::any()}
+                    | {error, {conflict, revision()}}
+                    | (Aborted::any()).
+
+-spec transaction(name(), [key()], txn_fun()) -> txn_result().
 transaction(Name, Keys, Fun) ->
     transaction(Name, Keys, Fun, #{}).
 
+-spec transaction(name(), [key()], txn_fun(), options()) -> txn_result().
 transaction(Name, Keys, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     {ok, {Snapshot, _, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
@@ -163,9 +219,13 @@ submit_transaction(Name, Conditions, Updates, Opts) ->
 submit_transaction(Name, Conditions, Updates, Timeout, Opts) ->
     submit_command(Name, {transaction, Conditions, Updates}, Timeout, Opts).
 
+-type get_result() :: {ok, {value(), revision()}} | {error, not_found}.
+
+-spec get(name(), key()) -> get_result().
 get(Name, Key) ->
     get(Name, Key, #{}).
 
+-spec get(name(), key(), options()) -> get_result().
 get(Name, Key, Opts) ->
     optimistic_query(
       Name, {get, Key}, get_timeout(Opts), Opts,
@@ -200,9 +260,18 @@ get_fast_path(Name, Key) ->
             Error
     end.
 
+-type rewrite_fun_result() ::
+        {update, NewValue::value()} |
+        {update, NewKey::key(), NewValue::value} |
+        keep |
+        delete.
+-type rewrite_fun() :: fun ((key(), value()) -> rewrite_fun_result()).
+
+-spec rewrite(name(), rewrite_fun()) -> op_result().
 rewrite(Name, Fun) ->
     rewrite(Name, Fun, #{}).
 
+-spec rewrite(name(), rewrite_fun(), options()) -> op_result().
 rewrite(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     case submit_query(Name, {rewrite, Fun}, TRef, Opts) of
@@ -212,15 +281,21 @@ rewrite(Name, Fun, Opts) ->
             Error
     end.
 
+-type get_snapshot_result() :: {ok, {snapshot(), revision()}}.
+
+-spec get_full_snapshot(name()) -> get_snapshot_result().
 get_full_snapshot(Name) ->
     get_full_snapshot(Name, #{}).
 
+-spec get_full_snapshot(name(), options()) -> get_snapshot_result().
 get_full_snapshot(Name, Opts) ->
     submit_query(Name, get_full_snapshot, get_timeout(Opts), Opts).
 
+-spec get_snapshot(name(), [key()]) -> get_snapshot_result().
 get_snapshot(Name, Keys) ->
     get_snapshot(Name, Keys, #{}).
 
+-spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
     case get_snapshot(Name, Keys, get_timeout(Opts), Opts) of
         {ok, {Snapshot, Revision, _Missing}} ->
@@ -283,12 +358,15 @@ get_snapshot_fast_path_loop(Table, TableSeqno, [Key | RestKeys], Snapshot) ->
             use_slow_path
     end.
 
+-spec get_revision(name()) -> revision().
 get_revision(Name) ->
     chronicle_rsm:get_local_revision(Name).
 
+-spec sync(name(), read_consistency()) -> ok.
 sync(Name, Type) ->
     sync(Name, Type, ?DEFAULT_TIMEOUT).
 
+-spec sync(name(), read_consistency(), timeout()) -> ok.
 sync(Name, Type, Timeout) ->
     case Type of
         local ->
