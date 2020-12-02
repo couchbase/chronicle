@@ -618,7 +618,7 @@ simple_test__(Nodes) ->
                           {ok, _} = chronicle_kv:delete(kv, a, Rev2),
 
                           {error, not_found} = chronicle_kv:get(kv, a,
-                                                                #{read_cosistency => quorum}),
+                                                                #{read_consistency => quorum}),
 
                           {ok, _} = chronicle_kv:multi(kv,
                                                        [{set, a, 84},
