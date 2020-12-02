@@ -385,28 +385,20 @@ get_timeout(Opts) ->
 
 optimistic_query(Name, Query, Timeout, Opts, Body) ->
     TRef = start_timeout(Timeout),
-    case handle_read_consistency(Name, TRef, Opts) of
-        ok ->
-            case Body() of
-                {ok, _} = Ok ->
-                    Ok;
-                {error, _} = Error ->
-                    Error;
-                use_slow_path ->
-                    chronicle_rsm:query(Name, Query, TRef)
-            end;
+    ok = handle_read_consistency(Name, TRef, Opts),
+    case Body() of
+        {ok, _} = Ok ->
+            Ok;
         {error, _} = Error ->
-            Error
+            Error;
+        use_slow_path ->
+            chronicle_rsm:query(Name, Query, TRef)
     end.
 
 submit_query(Name, Query, Timeout, Opts) ->
     TRef = start_timeout(Timeout),
-    case handle_read_consistency(Name, TRef, Opts) of
-        ok ->
-            chronicle_rsm:query(Name, Query, TRef);
-        {error, _} = Error ->
-            Error
-    end.
+    ok = handle_read_consistency(Name, TRef, Opts),
+    chronicle_rsm:query(Name, Query, TRef).
 
 handle_read_consistency(Name, Timeout, Opts) ->
     Consistency = maps:get(read_consistency, Opts, local),
