@@ -153,8 +153,8 @@ sync(Name, Type, Timeout) ->
     case get_applied_revision(Name, Type, TRef) of
         {ok, Revision} ->
             sync_revision(Name, Revision, TRef);
-        {error, _} = Error ->
-            Error
+        {error, Error} ->
+            exit({Error, {sync, Name, Type, Timeout}})
     end.
 
 note_term_established(Pid, HistoryId, Term, Seqno) ->
