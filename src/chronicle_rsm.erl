@@ -13,7 +13,6 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
-%% TODO: turn {error, history_mismatch} into an exception.
 -module(chronicle_rsm).
 -compile(export_all).
 
@@ -133,7 +132,10 @@ sync_revision(Name, Revision, Timeout0) ->
                 ok ->
                     ok;
                 {error, timeout} ->
-                    exit({timeout, {sync_revision, Name, Revision, Timeout}})
+                    exit({timeout, {sync_revision, Name, Revision, Timeout}});
+                {error, history_mismatch} ->
+                    exit({history_mismatch,
+                          {sync_revision, Name, Revision, Timeout}})
             end
     end.
 
