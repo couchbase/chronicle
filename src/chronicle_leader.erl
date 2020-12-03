@@ -27,7 +27,6 @@
                           get_all_peers/1,
                           get_quorum_peers/1,
                           have_quorum/2,
-                          parallel_mapfold/4,
                           read_timeout/1,
                           send/3,
                           term_number/1]).
@@ -112,8 +111,19 @@ announce_leader_status() ->
     gen_statem:cast(?SERVER, announce_leader_status).
 
 request_vote(Peer, Candidate, HistoryId, Position) ->
-    gen_statem:call(?SERVER(Peer),
-                    {request_vote, Candidate, HistoryId, Position}, infinity).
+    ServerRef = ?SERVER(Peer),
+    MRef = chronicle_utils:monitor_process(ServerRef),
+    chronicle_utils:call_async(ServerRef, MRef,
+                               {request_vote, Candidate, HistoryId, Position},
+                               [noconnect]),
+    MRef.
+
+request_vote_many(Peers, Candidate, HistoryId, Position) ->
+    lists:foldl(
+      fun (Peer, Acc) ->
+              Ref = request_vote(Peer, Candidate, HistoryId, Position),
+              Acc#{Ref => Peer}
+      end, #{}, Peers).
 
 note_term_finished(HistoryId, Term) ->
     gen_statem:cast(?SERVER, {note_term_status, HistoryId, Term, finished}).
@@ -642,50 +652,63 @@ do_election_worker() ->
 
     case lists:member(Leader, Peers) of
         true ->
-            CallFun =
-                fun (Peer) ->
-                        request_vote(Peer, Leader, HistoryId, Position)
-                end,
-            HandleResponse =
-                fun (Peer, Resp, Acc) ->
-                        case Resp of
-                            {ok, PeerTerm} ->
-                                {no_quorum, Votes, Term} = Acc,
-                                NewVotes = [Peer | Votes],
-                                NewTerm = max(Term, PeerTerm),
-
-                                case have_quorum(NewVotes, Quorum) of
-                                    true ->
-                                        %% TODO: wait a little more to receive
-                                        %% more responses
-                                        {stop, {ok, NewTerm}};
-                                    false ->
-                                        NewAcc = {no_quorum, NewVotes, NewTerm},
-                                        {continue, NewAcc}
-                                end;
-                            {error, _} = Error ->
-                                ?DEBUG("Failed to get leader vote from ~p: ~p",
-                                       [Peer, Error]),
-                                {continue, Acc}
-                        end
-                end,
-
             case OtherPeers =:= [] of
                 true ->
                     ?INFO("I'm the only peer, so I'm the leader."),
                     {ok, Leader, HistoryId, LatestTerm};
                 false ->
-                    case parallel_mapfold(CallFun, HandleResponse,
-                                          {no_quorum, [Leader], LatestTerm},
-                                          OtherPeers) of
-                        {no_quorum, FinalVotes, _} ->
-                            {error, {no_quorum, FinalVotes, Quorum}};
+                    Refs = request_vote_many(OtherPeers,
+                                             Leader, HistoryId, Position),
+                    case election_worker_loop(Refs,
+                                              Quorum, [Leader], LatestTerm) of
                         {ok, FinalTerm} ->
-                            {ok, Leader, HistoryId, FinalTerm}
+                            {ok, Leader, HistoryId, FinalTerm};
+                        {error, _} = Error ->
+                            Error
                     end
             end;
         false ->
             {error, {not_voter, Leader, Peers}}
+    end.
+
+election_worker_loop(Refs, _Quorum, Votes, Term)
+  when map_size(Refs) =:= 0 ->
+    {error, {no_quorum, Votes, Term}};
+election_worker_loop(Refs, Quorum, Votes, Term) ->
+    {Ref, Result} =
+        receive
+            {RespRef, _} = Resp when is_reference(RespRef) ->
+                Resp;
+            {'DOWN', DownRef, process, _Pid, Reason} ->
+                {DownRef, {error, {down, Reason}}}
+        end,
+
+    case maps:take(Ref, Refs) of
+        {Peer, NewRefs} ->
+            ?DEBUG("peer ~p result ~p", [Peer, Result]),
+            case Result of
+                {ok, PeerTerm} ->
+                    NewVotes = [Peer | Votes],
+                    NewTerm = max(Term, PeerTerm),
+
+                    case have_quorum(NewVotes, Quorum) of
+                        true ->
+                            %% TODO: wait a little more to receive
+                            %% more responses
+                            {ok, NewTerm};
+                        false ->
+                            election_worker_loop(NewRefs,
+                                                 Quorum, NewVotes, NewTerm)
+                    end;
+                {error, _} = Error ->
+                    ?DEBUG("Failed to get leader vote from ~p: ~p",
+                           [Peer, Error]),
+                    election_worker_loop(NewRefs, Quorum, Votes, Term)
+            end;
+        error ->
+            %% Possible if we got a DOWN message from the peer, but it did end
+            %% up sending a response to us and it got delivered.
+            election_worker_loop(Refs, Quorum, Votes, Term)
     end.
 
 handle_send_heartbeat(State, Data) ->
