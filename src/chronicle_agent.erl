@@ -855,13 +855,19 @@ check_provisioned(State) ->
             {error, not_provisioned}
     end.
 
-handle_wipe(From, _State, Data) ->
-    announce_system_state(not_provisioned),
-    %% TODO: There might be snapshots held by some of the RSMs. Wiping without
-    %% ensuring that all of those are stopped is therefore unsafe.
-    {next_state,
-     not_provisioned, perform_wipe(Data),
-     {reply, From, ok}}.
+handle_wipe(From, State, Data) ->
+    case State of
+        not_provisioned ->
+            {keep_state_and_data, {reply, From, ok}};
+        _ ->
+            announce_system_state(not_provisioned),
+            %% TODO: There might be snapshots held by some of the RSMs. Wiping
+            %% without ensuring that all of those are stopped is therefore
+            %% unsafe.
+            {next_state,
+             not_provisioned, perform_wipe(Data),
+             {reply, From, ok}}
+    end.
 
 perform_wipe(Data) ->
     NewData = maybe_cancel_snapshot(Data),
