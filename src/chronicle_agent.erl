@@ -1582,6 +1582,8 @@ spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno,
                                 failed
                         end,
 
+                    %% Make sure to change flush_snapshot_results() if the
+                    %% format of the message is modified.
                     Parent ! {snapshot_result, self(), RSM, Result}
             end),
 
@@ -1591,6 +1593,10 @@ spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno,
           remaining_rsms = sets:del_element(RSM, RemainingRSMs)},
 
     {Pid, Data#data{snapshot_state = NewSnapshotState}}.
+
+flush_snapshot_results() ->
+    ?FLUSH({snapshot_result, _, _, _}),
+    ok.
 
 rsm_snapshot_saver(RSM, RSMPid, Seqno, Storage) ->
     MRef = erlang:monitor(process, RSMPid),
@@ -2031,6 +2037,8 @@ cancel_snapshot(#data{snapshot_state = SnapshotState,
       fun (Pid, _RSM) ->
               chronicle_utils:terminate_linked_process(Pid, kill)
       end, Savers),
+
+    flush_snapshot_results(),
 
     ?INFO("Snapshot at seqno ~p canceled.", [SnapshotSeqno]),
     chronicle_storage:delete_snapshot(SnapshotSeqno, Storage),
