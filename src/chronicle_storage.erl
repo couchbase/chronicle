@@ -1157,7 +1157,8 @@ compact_log(#storage{log_segments = LogSegments} = Storage) ->
             Storage
     end.
 
-do_compact_log(#storage{log_segments = LogSegments,
+do_compact_log(#storage{low_seqno = LowSeqno,
+                        log_segments = LogSegments,
                         snapshots = Snapshots} = Storage) ->
     %% Make sure we don't lose the snapshots
     %%
@@ -1221,7 +1222,15 @@ do_compact_log(#storage{log_segments = LogSegments,
               end, Delete)
     end,
 
-    {_LogPath, NewLowSeqno} = lists:last(Keep),
+    {_LogPath, LogStartSeqno} = lists:last(Keep),
+
+    %% Our current low seqno may actually be greater then the start seqno of
+    %% the log file. That's because log files are preserved even when a
+    %% snapshot is transferred and installed from another node. In such case,
+    %% the low seqno will be the seqno of the snapshot. But we do still keep
+    %% the log (with lower start seqnos) around.
+    NewLowSeqno = max(LowSeqno, LogStartSeqno),
+
     Storage#storage{log_segments = Keep, low_seqno = NewLowSeqno}.
 
 classify_logs(SnapshotSeqno, Logs) ->
