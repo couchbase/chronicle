@@ -598,14 +598,11 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State, Data) ->
            check_same_term(Term, Data),
            check_log_range(StartSeqno, EndSeqno, Data)).
 
-handle_register_rsm(Name, Pid, From, _State,
+handle_register_rsm(Name, Pid, From, State,
                     #data{rsms_by_name = RSMs,
                           rsms_by_mref = MRefs} = Data) ->
-    case maps:find(Name, RSMs) of
-        {ok, {OtherPid, _}} ->
-            {keep_state_and_data,
-             {reply, From, {error, {already_registered, Name, OtherPid}}}};
-        error ->
+    case check_register_rsm(Name, State, Data) of
+        ok ->
             ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
 
             MRef = erlang:monitor(process, Pid),
@@ -625,9 +622,22 @@ handle_register_rsm(Name, Pid, From, _State,
             NewData = Data#data{rsms_by_name = NewRSMs,
                                 rsms_by_mref = NewMRefs},
 
-            {keep_state,
-             NewData,
-             {reply, From, Reply}}
+            {keep_state, NewData, {reply, From, Reply}};
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
+    end.
+
+check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
+    case check_provisioned(State) of
+        ok ->
+            case maps:find(Name, RSMs) of
+                {ok, {OtherPid, _}} ->
+                    {error, {already_registered, Name, OtherPid}};
+                error ->
+                    ok
+            end;
+        {error, _} = Error ->
+            Error
     end.
 
 handle_get_latest_snapshot(Pid, From, _State,
