@@ -163,7 +163,9 @@ with_latest_snapshot(Fun) ->
                 gen_statem:cast(?SERVER, {release_snapshot, Ref})
             end;
         {error, no_snapshot} ->
-            {no_snapshot, ?NO_SEQNO}
+            {no_snapshot, ?NO_SEQNO};
+        {error, Error} ->
+            exit(Error)
     end.
 
 get_log() ->
@@ -640,22 +642,27 @@ check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
             Error
     end.
 
-handle_get_latest_snapshot(Pid, From, _State,
+handle_get_latest_snapshot(Pid, From, State,
                            #data{snapshot_readers = Readers,
                                  storage = Storage} = Data) ->
-    case get_and_hold_latest_snapshot(Data) of
-        {{Seqno, Config}, NewData0} ->
-            MRef = erlang:monitor(process, Pid),
-            NewReaders = Readers#{MRef => Seqno},
-            NewData = NewData0#data{snapshot_readers = NewReaders},
-            Reply = {ok, MRef, Seqno, Config, Storage},
+    case check_provisioned(State) of
+        ok ->
+            case get_and_hold_latest_snapshot(Data) of
+                {{Seqno, Config}, NewData0} ->
+                    MRef = erlang:monitor(process, Pid),
+                    NewReaders = Readers#{MRef => Seqno},
+                    NewData = NewData0#data{snapshot_readers = NewReaders},
+                    Reply = {ok, MRef, Seqno, Config, Storage},
 
-            {keep_state,
-             NewData,
-             {reply, From, Reply}};
-        no_snapshot ->
-            {keep_state_and_data,
-             {reply, From, {error, no_snapshot}}}
+                    {keep_state,
+                     NewData,
+                     {reply, From, Reply}};
+                no_snapshot ->
+                    {keep_state_and_data,
+                     {reply, From, {error, no_snapshot}}}
+            end;
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
 handle_release_snapshot(MRef, _State,
