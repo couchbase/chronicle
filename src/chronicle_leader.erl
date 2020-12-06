@@ -150,8 +150,8 @@ init([]) ->
                 metadata2data(Metadata);
             {joining_cluster, HistoryId} ->
                 #data{history_id = HistoryId};
-            not_provisioned ->
-                #data{}
+            Other ->
+                exit({unexpected_state, Other})
         end,
 
     {ok, make_observer(Data), Data}.
@@ -314,9 +314,9 @@ get_heartbeat_interval() ->
     %% TODO
     100.
 
-is_interesting_event({system_state, _, _}) ->
+is_interesting_event({system_state, provisioned, _}) ->
     true;
-is_interesting_event({system_event, _, _}) ->
+is_interesting_event({system_event, reprovisioned, _}) ->
     true;
 is_interesting_event({new_history, _, _}) ->
     true;
@@ -327,13 +327,8 @@ is_interesting_event({new_config, _, _}) ->
 is_interesting_event(_) ->
     false.
 
-handle_chronicle_event({system_state, not_provisioned, _}, State, Data) ->
-    handle_not_provisioned(State, Data);
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
-handle_chronicle_event({system_state, joining_cluster, HistoryId},
-                       State, Data) ->
-    handle_joining_cluster(HistoryId, State, Data);
 handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
     handle_reprovisioned(Metadata, State, Data);
 handle_chronicle_event({new_config, Config, Metadata}, State, Data) ->
@@ -342,15 +337,6 @@ handle_chronicle_event({new_history, HistoryId, Metadata}, State, Data) ->
     handle_new_history(HistoryId, Metadata, State, Data);
 handle_chronicle_event({term_established, Term}, State, Data) ->
     handle_new_term(Term, State, Data).
-
-handle_not_provisioned(_State, Data) ->
-    ?INFO("System became not provisioned."),
-    NewData = Data#data{peers = [],
-                        history_id = ?NO_HISTORY,
-                        established_term = ?NO_TERM,
-                        electable = false},
-
-    {next_state, make_observer(NewData), NewData}.
 
 handle_provisioned(Metadata, State, Data) ->
     ?INFO("System became provisioned."),
@@ -363,10 +349,6 @@ handle_provisioned(Metadata, State, Data) ->
                 State
         end,
     {next_state, NewState, NewData}.
-
-handle_joining_cluster(HistoryId, _State, Data) ->
-    ?INFO("Node's joining cluster in history ~p", [HistoryId]),
-    {keep_state, Data#data{history_id = HistoryId}}.
 
 handle_reprovisioned(Metadata, _State, Data) ->
     ?INFO("System reprovisioned."),

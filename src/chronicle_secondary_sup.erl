@@ -39,8 +39,7 @@ init([]) ->
     chronicle_events:subscribe(
       fun (Event) ->
               case Event of
-                  {system_state, NewState, _}
-                    when NewState =/= joining_cluster ->
+                  {system_state, NewState, _} ->
                       dynamic_supervisor:send_event(Self, {state, NewState});
                   _ ->
                       ok
@@ -51,7 +50,9 @@ init([]) ->
         case chronicle_agent:get_system_state() of
             {provisioned, _} ->
                 provisioned;
-            _ ->
+            {joining_cluster, _} ->
+                joining_cluster;
+            not_provisioned ->
                 not_provisioned
         end,
 
@@ -66,6 +67,8 @@ handle_event({state, NewState}, _) ->
 
 %% TODO: revise shutdown specifications
 child_specs(not_provisioned) ->
+    [];
+child_specs(joining_cluster) ->
     Leader = #{id => chronicle_leader,
                start => {chronicle_leader, start_link, []},
                restart => permanent,
@@ -92,4 +95,4 @@ child_specs(provisioned) ->
                shutdown => infinity,
                type => supervisor},
 
-    child_specs(not_provisioned) ++ [Server, Failover, RSMSup].
+    child_specs(joining_cluster) ++ [Server, Failover, RSMSup].
