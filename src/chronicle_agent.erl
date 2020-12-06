@@ -81,7 +81,10 @@
                 snapshot_attempts = 0,
                 snapshot_state :: undefined
                                 | {retry, reference()}
-                                | #snapshot_state{}}).
+                                | #snapshot_state{},
+
+                wipe_state = false :: false | {wiping, From::any()}
+              }).
 
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -248,12 +251,7 @@ reprovision() ->
 -type wipe_result() :: ok.
 -spec wipe() -> wipe_result().
 wipe() ->
-    case call(?SERVER, wipe) of
-        ok ->
-            sync_system_state_change();
-        Other ->
-            Other
-    end.
+    call(?SERVER, wipe, infinity).
 
 -type prepare_join_result() :: ok | {error, prepare_join_error()}.
 -type prepare_join_error() :: provisioned
@@ -411,6 +409,9 @@ sync_system_state_change() ->
 sync_leader() ->
     ok = chronicle_leader:sync().
 
+is_wipe_requested() ->
+    call(?SERVER, is_wipe_requested).
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -445,6 +446,8 @@ handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
 handle_event(cast, {release_snapshot, Ref}, State, Data) ->
     handle_release_snapshot(Ref, State, Data);
+handle_event(cast, prepare_wipe_done, State, Data) ->
+    handle_prepare_wipe_done(State, Data);
 handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
 handle_event(info, {snapshot_result, Pid, RSM, Result}, State, Data) ->
@@ -479,6 +482,8 @@ handle_call(reprovision, From, State, Data) ->
     handle_reprovision(From, State, Data);
 handle_call(wipe, From, State, Data) ->
     handle_wipe(From, State, Data);
+handle_call(is_wipe_requested, From, State, Data) ->
+    handle_is_wipe_requested(From, State, Data);
 handle_call({prepare_join, ClusterInfo}, From, State, Data) ->
     handle_prepare_join(ClusterInfo, From, State, Data);
 handle_call({join_cluster, ClusterInfo}, From, State, Data) ->
@@ -882,29 +887,79 @@ check_provisioned(State) ->
             {error, not_provisioned}
     end.
 
-handle_wipe(From, State, Data) ->
+handle_wipe(From, State, #data{wipe_state = WipeState} = Data) ->
     case State of
         not_provisioned ->
+            false = WipeState,
             {keep_state_and_data, {reply, From, ok}};
         _ ->
-            announce_system_state(not_provisioned),
-            %% TODO: There might be snapshots held by some of the RSMs. Wiping
-            %% without ensuring that all of those are stopped is therefore
-            %% unsafe.
-            {next_state,
-             not_provisioned, perform_wipe(Data),
-             {reply, From, ok}}
+            case WipeState of
+                {wiping, _} ->
+                    %% Wipe is already in progress. Postpone the event, it'll
+                    %% get responded to once the state becomes
+                    %% 'not_provisioned'.
+                    postpone;
+                false ->
+                    ?INFO("Wipe requested."),
+
+                    announce_system_wiping(),
+
+                    %% Wait for chronicle_secondary_sup to terminate all
+                    %% downstream processes. They may be holding snapshots, so
+                    %% we wouldn't be able to safely delete those. Waiting
+                    %% needs to be done without blocking the gen_statem loop,
+                    %% because some of the processes may be blocked on
+                    %% synchronous calls to chronicle_agent itself.
+                    Self = self(),
+                    proc_lib:spawn_link(
+                      fun () ->
+                              sync_system_state_change(),
+                              gen_statem:cast(Self, prepare_wipe_done)
+                      end),
+
+                    NewData = Data#data{wipe_state = {wiping, From}},
+                    {keep_state, maybe_cancel_snapshot(NewData)}
+            end
     end.
 
-perform_wipe(Data) ->
-    NewData = maybe_cancel_snapshot(Data),
+handle_is_wipe_requested(From, _State, Data) ->
+    {keep_state_and_data, {reply, From, is_wipe_requested(Data)}}.
+
+is_wipe_requested(#data{wipe_state = WipeState}) ->
+    case WipeState of
+        {wiping, _} ->
+            true;
+        false ->
+            false
+    end.
+
+handle_prepare_wipe_done(State, Data) ->
+    ?INFO("All secondary processes have terminated."),
+
+    true = (State =/= not_provisioned),
+    undefined = Data#data.snapshot_state,
+
+    {wiping, From} = Data#data.wipe_state,
+
+    %% All RSMs and snapshot readers should be stopped by now, but it's
+    %% possible(?) that we haven't processed all DOWN messages yet.
+    MRefs =
+        maps:keys(Data#data.snapshot_readers) ++
+        maps:keys(Data#data.rsms_by_mref),
+    lists:foreach(
+      fun (MRef) ->
+              erlang:demonitor(MRef, [flush])
+      end, MRefs),
 
     ?INFO("Wiping"),
-    chronicle_storage:close(NewData#data.storage),
+    chronicle_storage:close(Data#data.storage),
     chronicle_storage:wipe(),
     ?INFO("Wiped successfully"),
 
-    init_data().
+    gen_statem:reply(From, ok),
+
+    NewData = init_data(),
+    {next_state, not_provisioned, NewData}.
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
     case check_not_provisioned(State) of
@@ -951,7 +1006,8 @@ check_join_cluster(ClusterInfo, State, Data) ->
                   committed_seqno := CommittedSeqno,
                   peers := Peers} ->
                     case ?CHECK(check_history_id(HistoryId, Data),
-                                check_peer(Peers, Data)) of
+                                check_peer(Peers, Data),
+                                check_not_wipe_requested(Data)) of
                         ok ->
                             {ok, CommittedSeqno};
                         {error, _} = Error ->
@@ -962,6 +1018,14 @@ check_join_cluster(ClusterInfo, State, Data) ->
             end;
         _ ->
             {error, not_prepared}
+    end.
+
+check_not_wipe_requested(Data) ->
+    case is_wipe_requested(Data) of
+        false ->
+            ok;
+        true ->
+            {error, wipe_requested}
     end.
 
 check_peer(Peers, Data) ->
@@ -977,8 +1041,17 @@ check_peer(Peers, Data) ->
 check_join_cluster_done(State, Data) ->
     case State of
         #join_cluster{seqno = WaitedSeqno, from = From} ->
+            %% Don't transition if wipe is in progress. This will confuse
+            %% chronicle_secondary_sup which expects that once wipe has
+            %% started, eventually the system will transition to
+            %% not_provisioned state without any intermediate states.
+            %%
+            %% TODO: this extreme coupling between the two processes is
+            %% super-annoying. Do something once there's more time.
+            NotWipeRequested = not is_wipe_requested(Data),
+
             CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-            case CommittedSeqno >= WaitedSeqno of
+            case CommittedSeqno >= WaitedSeqno andalso NotWipeRequested of
                 true ->
                     NewData = store_meta(#{?META_STATE =>
                                                ?META_STATE_PROVISIONED}, Data),
@@ -1819,8 +1892,16 @@ announce_system_provisioned(Data) ->
     announce_system_state(provisioned, build_metadata(Data)).
 
 announce_system_reprovisioned(Data) ->
-    chronicle_events:sync_notify({system_event,
-                                  reprovisioned, build_metadata(Data)}).
+    announce_system_event(reprovisioned, build_metadata(Data)).
+
+announce_system_wiping() ->
+    announce_system_event(wiping).
+
+announce_system_event(Event) ->
+    announce_system_event(Event, no_extra).
+
+announce_system_event(Event, Extra) ->
+    chronicle_events:sync_notify({system_event, Event, Extra}).
 
 storage_open() ->
     Storage0 = chronicle_storage:open(),

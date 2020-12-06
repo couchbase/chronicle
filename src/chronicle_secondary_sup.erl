@@ -37,6 +37,8 @@ init([]) ->
     chronicle_events:subscribe(
       fun (Event) ->
               case Event of
+                  {system_event, wiping, _} ->
+                      dynamic_supervisor:send_event(Self, wipe_requested);
                   {system_state, NewState, _} ->
                       dynamic_supervisor:send_event(Self, {state, NewState});
                   _ ->
@@ -45,13 +47,18 @@ init([]) ->
       end),
 
     State =
-        case chronicle_agent:get_system_state() of
-            {provisioned, _} ->
-                provisioned;
-            {joining_cluster, _} ->
-                joining_cluster;
-            not_provisioned ->
-                not_provisioned
+        case chronicle_agent:is_wipe_requested() of
+            true ->
+                not_provisioned;
+            false ->
+                case chronicle_agent:get_system_state() of
+                    {provisioned, _} ->
+                        provisioned;
+                    {joining_cluster, _} ->
+                        joining_cluster;
+                    not_provisioned ->
+                        not_provisioned
+                end
         end,
 
     %% TODO: reconsider the strategy
@@ -60,6 +67,8 @@ init([]) ->
               period => 10},
     {ok, Flags, State}.
 
+handle_event(wipe_requested, _) ->
+    {noreply, not_provisioned};
 handle_event({state, NewState}, _) ->
     {noreply, NewState}.
 
