@@ -22,16 +22,14 @@
 -include("chronicle.hrl").
 
 -export([start_link/0]).
--export([sync_system_state_change/0]).
+-export([sync/0]).
 -export([init/1, handle_event/2, child_specs/1]).
 
 start_link() ->
     dynamic_supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
 
-sync_system_state_change() ->
-    ok = dynamic_supervisor:sync(?SERVER_NAME(?MODULE), 10000),
-    %% This is not super clean, but should do for now.
-    ok = chronicle_leader:sync().
+sync() ->
+    ok = dynamic_supervisor:sync(?SERVER_NAME(?MODULE), 20000).
 
 %% callbacks
 init([]) ->

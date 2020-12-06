@@ -221,7 +221,7 @@ get_history_id(#metadata{pending_branch =
 provision(Machines) ->
     case call(?SERVER, {provision, Machines}, ?PROVISION_TIMEOUT) of
         ok ->
-            ok = chronicle_secondary_sup:sync_system_state_change();
+            sync_system_state_change();
         Other ->
             Other
     end.
@@ -236,7 +236,11 @@ provision(Machines) ->
 reprovision() ->
     case call(?SERVER, reprovision, ?PROVISION_TIMEOUT) of
         ok ->
-            ok = chronicle_secondary_sup:sync_system_state_change();
+            sync_system_state_change(),
+
+            %% Make sure that chronicle_leader updates published leader
+            %% information, so writes don't fail once reprovision() returns.
+            sync_leader();
         Other ->
             Other
     end.
@@ -246,7 +250,7 @@ reprovision() ->
 wipe() ->
     case call(?SERVER, wipe) of
         ok ->
-            ok = chronicle_secondary_sup:sync_system_state_change();
+            sync_system_state_change();
         Other ->
             Other
     end.
@@ -268,7 +272,7 @@ prepare_join(ClusterInfo) ->
 join_cluster(ClusterInfo) ->
     case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
         ok ->
-            ok = chronicle_secondary_sup:sync_system_state_change();
+            sync_system_state_change();
         Other ->
             Other
     end.
@@ -400,6 +404,12 @@ store_branch(Peer, Branch) ->
                {bad_branch, OurBranch::#branch{}}.
 undo_branch(Peer, BranchId) ->
     call(?SERVER(Peer), {undo_branch, BranchId}).
+
+sync_system_state_change() ->
+    ok = chronicle_secondary_sup:sync().
+
+sync_leader() ->
+    ok = chronicle_leader:sync().
 
 %% gen_statem callbacks
 callback_mode() ->
