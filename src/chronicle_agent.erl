@@ -27,7 +27,6 @@
 
 -import(chronicle_utils, [call/2, call/3,
                           call_async/4,
-                          config_peers/1,
                           next_term/2,
                           term_number/1,
                           compare_positions/2]).
