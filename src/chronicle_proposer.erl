@@ -313,11 +313,13 @@ establish_term_init(Metadata,
            "Quorum peers:~n~p",
            [Term, HistoryId, Metadata, QuorumPeers]),
 
-    #metadata{config = Config,
-              config_revision = ConfigRevision,
+    #metadata{config = ConfigEntry,
               high_seqno = HighSeqno,
               committed_seqno = CommittedSeqno,
               pending_branch = PendingBranch} = Metadata,
+
+    Config = ConfigEntry#log_entry.value,
+    ConfigRevision = chronicle_utils:log_entry_revision(ConfigEntry),
 
     OtherQuorumPeers = QuorumPeers -- [?SELF_PEER],
 

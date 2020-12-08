@@ -446,10 +446,13 @@ with_leader_loop(TRef, Incarnation, Retries, Fun) ->
             Result
     end.
 
+get_config(#metadata{config = ConfigEntry}) ->
+    ConfigEntry#log_entry.value.
+
 get_all_peers(Metadata) ->
     case Metadata#metadata.pending_branch of
         undefined ->
-            config_peers(Metadata#metadata.config);
+            config_peers(get_config(Metadata));
         #branch{peers = BranchPeers} ->
             BranchPeers
     end.
@@ -457,7 +460,7 @@ get_all_peers(Metadata) ->
 get_establish_quorum(Metadata) ->
     case Metadata#metadata.pending_branch of
         undefined ->
-            get_append_quorum(Metadata#metadata.config);
+            get_append_quorum(get_config(Metadata));
         #branch{peers = BranchPeers} ->
             {all, sets:from_list(BranchPeers)}
     end.

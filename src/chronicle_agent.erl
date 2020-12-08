@@ -554,23 +554,13 @@ build_metadata(Data) ->
       ?META_COMMITTED_SEQNO := CommittedSeqno,
       ?META_PENDING_BRANCH := PendingBranch} = get_meta(Data),
 
-    ConfigEntry = get_config(Data),
-    {Config, ConfigRevision} =
-        case ConfigEntry of
-            undefined ->
-                {undefined, undefined};
-            #log_entry{value = Value} ->
-                {Value, chronicle_utils:log_entry_revision(ConfigEntry)}
-        end,
-
     #metadata{peer = Peer,
               history_id = HistoryId,
               term = Term,
               term_voted = TermVoted,
               high_seqno = get_high_seqno(Data),
               committed_seqno = CommittedSeqno,
-              config = Config,
-              config_revision = ConfigRevision,
+              config = get_config(Data),
               pending_branch = PendingBranch}.
 
 handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->

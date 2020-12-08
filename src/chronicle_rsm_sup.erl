@@ -51,7 +51,8 @@ init([]) ->
               intensity => 3,
               period => 10},
 
-    {ok, Flags, chronicle_utils:config_rsms(Metadata#metadata.config)}.
+    Config = chronicle_utils:get_config(Metadata),
+    {ok, Flags, chronicle_utils:config_rsms(Config)}.
 
 handle_event({new_config, Config}, _) ->
     {noreply, chronicle_utils:config_rsms(Config)}.

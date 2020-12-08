@@ -63,7 +63,6 @@
                     high_seqno,
                     committed_seqno,
                     config,
-                    config_revision,
                     pending_branch }).
 
 -record(branch, {history_id,
