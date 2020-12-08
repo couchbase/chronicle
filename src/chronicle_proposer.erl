@@ -28,6 +28,7 @@
                           get_quorum_peers/1,
                           have_quorum/2,
                           is_quorum_feasible/3,
+                          log_entry_revision/1,
                           term_number/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
@@ -49,7 +50,6 @@
                 quorum_peers,
                 machines,
                 config,
-                config_revision,
                 high_seqno,
                 committed_seqno,
 
@@ -318,9 +318,6 @@ establish_term_init(Metadata,
               committed_seqno = CommittedSeqno,
               pending_branch = PendingBranch} = Metadata,
 
-    Config = ConfigEntry#log_entry.value,
-    ConfigRevision = chronicle_utils:log_entry_revision(ConfigEntry),
-
     OtherQuorumPeers = QuorumPeers -- [?SELF_PEER],
 
     %% Send a fake response to update our state with the knowledge that we've
@@ -341,11 +338,10 @@ establish_term_init(Metadata,
                                     peers = AllPeers,
                                     quorum_peers = QuorumPeers,
                                     quorum = Quorum,
-                                    machines = config_machines(Config),
+                                    machines = get_machines(ConfigEntry),
                                     votes = [],
                                     failed_votes = BusyPeers,
-                                    config = Config,
-                                    config_revision = ConfigRevision,
+                                    config = ConfigEntry,
                                     high_seqno = HighSeqno,
                                     committed_seqno = CommittedSeqno,
                                     branch = PendingBranch,
@@ -591,7 +587,7 @@ maybe_resolve_branch(#data{branch = undefined} = Data) ->
 maybe_resolve_branch(#data{high_seqno = HighSeqno,
                            committed_seqno = CommittedSeqno,
                            branch = Branch,
-                           config = Config,
+                           config = #log_entry{value = Config},
                            pending_entries = PendingEntries} = Data) ->
     %% Some of the pending entries may actually be committed, but our local
     %% agent doesn't know yet. So those need to be preserved.
@@ -857,8 +853,8 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
             end
     end.
 
-maybe_complete_config_transition(#data{config = Config} = Data) ->
-    case Config of
+maybe_complete_config_transition(#data{config = ConfigEntry} = Data) ->
+    case ConfigEntry#log_entry.value of
         #config{} ->
             Data;
         #transition{future_config = FutureConfig} ->
@@ -872,14 +868,14 @@ maybe_complete_config_transition(#data{config = Config} = Data) ->
             end
     end.
 
-maybe_reply_config_change(#data{config = Config,
+maybe_reply_config_change(#data{config = ConfigEntry,
                                 config_change_reply_to = ReplyTo} = Data) ->
-    case Config of
+    case ConfigEntry#log_entry.value of
         #config{} ->
             case ReplyTo =/= undefined of
                 true ->
                     true = is_config_committed(Data),
-                    Revision = Data#data.config_revision,
+                    Revision = log_entry_revision(ConfigEntry),
                     reply_request(ReplyTo, {ok, Revision}),
                     Data#data{config_change_reply_to = undefined};
                 false ->
@@ -912,7 +908,8 @@ check_leader_got_removed(#data{being_removed = BeingRemoved} = Data) ->
 
 handle_config_post_append(OldData,
                           #data{peer = Peer,
-                                config_revision = ConfigRevision} = NewData) ->
+                                config = ConfigEntry} = NewData) ->
+    ConfigRevision = log_entry_revision(ConfigEntry),
     GotCommitted =
         not is_revision_committed(ConfigRevision, OldData)
         andalso is_revision_committed(ConfigRevision, NewData),
@@ -946,11 +943,13 @@ handle_config_post_append(OldData,
             {ok, NewData, []}
     end.
 
-reset_peers(#data{config = Config} = Data) ->
-    NewData = Data#data{peers = require_self_peer(config_peers(Config, Data))},
+reset_peers(#data{config = ConfigEntry} = Data) ->
+    Peers = require_self_peer(config_peers(ConfigEntry, Data)),
+    NewData = Data#data{peers = Peers},
     handle_new_peers(Data, NewData).
 
-is_config_committed(#data{config_revision = ConfigRevision} = Data) ->
+is_config_committed(#data{config = ConfigEntry} = Data) ->
+    ConfigRevision = log_entry_revision(ConfigEntry),
     is_revision_committed(ConfigRevision, Data).
 
 is_revision_committed({_, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
@@ -994,6 +993,9 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
                       false
               end
       end, Peers).
+
+get_machines(ConfigEntry) ->
+    config_machines(ConfigEntry#log_entry.value).
 
 config_machines(#config{state_machines = Machines}) ->
     maps:keys(Machines);
@@ -1164,16 +1166,19 @@ handle_query(ReplyTo, Query, Data) ->
             reply_request(ReplyTo, {error, unknown_query})
     end.
 
-handle_get_config(ReplyTo, #data{config = Config,
-                                 config_revision = Revision} = Data) ->
+handle_get_config(ReplyTo, #data{config = ConfigEntry} = Data) ->
     true = is_config_committed(Data),
+
+    Config = ConfigEntry#log_entry.value,
     #config{} = Config,
-    Reply = {ok, Config, Revision},
+    ConfigRevision = log_entry_revision(ConfigEntry),
+
+    Reply = {ok, Config, ConfigRevision},
     start_sync_quorum(ReplyTo, Reply, Data).
 
 handle_get_cluster_info(ReplyTo,
                         #data{history_id = HistoryId,
-                              config = Config,
+                              config = #log_entry{value = Config},
                               committed_seqno = CommittedSeqno} = Data) ->
     true = is_config_committed(Data),
     Info = #{history_id => HistoryId,
@@ -1182,8 +1187,10 @@ handle_get_cluster_info(ReplyTo,
     start_sync_quorum(ReplyTo, Info, Data).
 
 handle_cas_config(ReplyTo, NewConfig, CasRevision,
-                  #data{config = Config,
-                        config_revision = ConfigRevision} = Data) ->
+                  #data{config = ConfigEntry} = Data) ->
+    #log_entry{value = Config} = ConfigEntry,
+    ConfigRevision = log_entry_revision(ConfigEntry),
+
     %% TODO: this protects against the client proposing transition. But in
     %% reality, it should be solved in some other way
     #config{} = NewConfig,
@@ -1226,27 +1233,26 @@ make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
                seqno = Seqno,
                value = Value}.
 
-update_config(Config, Revision, #data{quorum_peers = OldQuorumPeers} = Data) ->
-    RawQuorum = get_append_quorum(Config, Data),
+update_config(ConfigEntry, #data{quorum_peers = OldQuorumPeers} = Data) ->
+    RawQuorum = get_append_quorum(ConfigEntry, Data),
     BeingRemoved = not lists:member(?SELF_PEER, get_quorum_peers(RawQuorum)),
 
     %% Always require include local to acknowledge writes, even if the node is
     %% being removed.
     Quorum = require_self_quorum(RawQuorum),
     QuorumPeers = get_quorum_peers(Quorum),
-    AllPeers = require_self_peer(config_peers(Config, Data)),
+    AllPeers = require_self_peer(config_peers(ConfigEntry, Data)),
 
     %% When nodes are being removed, attempt to notify them about the new
     %% config that removes them. This is just a best-effort approach. If nodes
     %% are down -- they are not going to get notified.
     NewPeers = lists:usort(OldQuorumPeers ++ AllPeers),
-    NewData = Data#data{config = Config,
-                        config_revision = Revision,
+    NewData = Data#data{config = ConfigEntry,
                         being_removed = BeingRemoved,
                         quorum = Quorum,
                         quorum_peers = QuorumPeers,
                         peers = NewPeers,
-                        machines = config_machines(Config)},
+                        machines = get_machines(ConfigEntry)},
 
     handle_new_peers(Data, NewData).
 
@@ -1272,8 +1278,8 @@ handle_removed_peers(Peers, Data) ->
 handle_added_peers(Peers, Data) ->
     send_heartbeat(Peers, Data).
 
-force_propose_config(Config, #data{config_change_reply_to =
-                                       undefined} = Data) ->
+force_propose_config(Config,
+                     #data{config_change_reply_to = undefined} = Data) ->
     %% This function doesn't check that the current config is committed, which
     %% should be the case for regular config transitions. It's only meant to
     %% be used after resolving a branch.
@@ -1289,13 +1295,12 @@ do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
                                          pending_entries = Entries} = Data) ->
     Seqno = HighSeqno + 1,
     LogEntry = make_log_entry(Seqno, Config, Data),
-    Revision = chronicle_utils:log_entry_revision(LogEntry),
 
     NewEntries = queue:in(LogEntry, Entries),
     NewData = Data#data{pending_entries = NewEntries,
                         high_seqno = Seqno,
                         config_change_reply_to = ReplyTo},
-    update_config(Config, Revision, NewData).
+    update_config(LogEntry, NewData).
 
 get_peer_status(Peer, #data{peer_statuses = Tab}) ->
     case ets:lookup(Tab, Peer) of
@@ -1917,10 +1922,10 @@ get_establish_quorum(#metadata{peer = Self} = Metadata) ->
 get_all_peers(#metadata{peer = Self} = Metadata) ->
     translate_peers(chronicle_utils:get_all_peers(Metadata), Self).
 
-get_append_quorum(Config, #data{peer = Self}) ->
+get_append_quorum(#log_entry{value = Config}, #data{peer = Self}) ->
     translate_quorum(chronicle_utils:get_append_quorum(Config), Self).
 
-config_peers(Config, #data{peer = Self}) ->
+config_peers(#log_entry{value = Config}, #data{peer = Self}) ->
     translate_peers(chronicle_utils:config_peers(Config), Self).
 
 translate_peers(Peers, Self) when is_list(Peers) ->
