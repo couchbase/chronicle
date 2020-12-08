@@ -270,7 +270,6 @@ term_number({TermNumber, _TermLeader}) ->
 term_leader({_TermNumber, TermLeader}) ->
     TermLeader.
 
-%% TODO: include committed_seqno
 get_position(#metadata{term_voted = TermVoted, high_seqno = HighSeqno}) ->
     {TermVoted, HighSeqno}.
 
