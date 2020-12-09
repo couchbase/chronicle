@@ -692,7 +692,7 @@ rpc_node(Node, Fun) ->
 rpc_nodes(Nodes, Fun) ->
     lists:foreach(
       fun (N) ->
-              rpc_node(N, Fun)
+              ok = rpc_node(N, Fun)
       end, Nodes).
 
 leader_transfer_test_() ->
