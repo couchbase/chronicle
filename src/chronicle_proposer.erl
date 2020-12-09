@@ -1178,12 +1178,12 @@ handle_get_config(ReplyTo, #data{config = ConfigEntry} = Data) ->
 
 handle_get_cluster_info(ReplyTo,
                         #data{history_id = HistoryId,
-                              config = #log_entry{value = Config},
+                              config = ConfigEntry,
                               committed_seqno = CommittedSeqno} = Data) ->
     true = is_config_committed(Data),
     Info = #{history_id => HistoryId,
              committed_seqno => CommittedSeqno,
-             peers => chronicle_utils:config_peers(Config)},
+             config => ConfigEntry},
     start_sync_quorum(ReplyTo, Info, Data).
 
 handle_cas_config(ReplyTo, NewConfig, CasRevision,

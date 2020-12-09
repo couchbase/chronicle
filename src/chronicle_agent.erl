@@ -29,7 +29,8 @@
                           call_async/4,
                           next_term/2,
                           term_number/1,
-                          compare_positions/2]).
+                          compare_positions/2,
+                          max_position/2]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer),
@@ -68,7 +69,8 @@
                           remaining_rsms,
                           savers }).
 
--record(join_cluster, { from, seqno }).
+-record(prepare_join, { config }).
+-record(join_cluster, { from, config, seqno }).
 
 %% TODO: get rid of the duplication between #data{} and #metadata{}.
 -record(data, { storage,
@@ -255,7 +257,7 @@ wipe() ->
 -type prepare_join_result() :: ok | {error, prepare_join_error()}.
 -type prepare_join_error() :: provisioned
                             | joining_cluster
-                            | bad_cluster_info.
+                            | {bad_cluster_info, any()}.
 -spec prepare_join(chronicle:cluster_info()) -> prepare_join_result().
 prepare_join(ClusterInfo) ->
     call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
@@ -265,7 +267,8 @@ prepare_join(ClusterInfo) ->
                             | {history_mismatch, chronicle:history_id()}
                             | {not_in_peers,
                                chronicle:peer(), [chronicle:peer()]}
-                            | wipe_requested.
+                            | wipe_requested
+                            | {bad_cluster_info, any()}.
 -spec join_cluster(chronicle:cluster_info()) -> join_cluster_result().
 join_cluster(ClusterInfo) ->
     case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
@@ -422,10 +425,10 @@ init([]) ->
         case get_meta(?META_STATE, Data) of
             ?META_STATE_PROVISIONED ->
                 provisioned;
-            ?META_STATE_PREPARE_JOIN ->
-                prepare_join;
-            {?META_STATE_JOIN_CLUSTER, Seqno} ->
-                #join_cluster{seqno = Seqno};
+            {?META_STATE_PREPARE_JOIN, #{config := Config}} ->
+                #prepare_join{config = Config};
+            {?META_STATE_JOIN_CLUSTER, #{config := Config, seqno := Seqno}} ->
+                #join_cluster{config = Config, seqno = Seqno};
             ?META_STATE_NOT_PROVISIONED ->
                 not_provisioned
         end,
@@ -529,7 +532,10 @@ handle_get_system_state(From, State, Data) ->
             provisioned = ExtState ->
                 {ExtState, build_metadata(Data)};
             joining_cluster = ExtState ->
-                {ExtState, get_effective_history_id(Data)};
+                HistoryId = get_meta(?META_HISTORY_ID, Data),
+                true = (HistoryId =/= ?NO_HISTORY),
+
+                {ExtState, HistoryId};
             ExtState ->
                 ExtState
         end,
@@ -539,7 +545,7 @@ get_external_state(State) ->
     case State of
         provisioned ->
             provisioned;
-        prepare_join ->
+        #prepare_join{} ->
             joining_cluster;
         #join_cluster{} ->
             joining_cluster;
@@ -569,7 +575,7 @@ handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->
     Reply =
         case ?CHECK(check_prepared(State),
                     check_history_id(PeerHistoryId, OurHistoryId),
-                    check_peer_current(PeerPosition, Data)) of
+                    check_peer_current(PeerPosition, State, Data)) of
             ok ->
                 {ok, get_meta(?META_TERM, Data)};
             {error, _} = Error ->
@@ -952,32 +958,47 @@ handle_prepare_wipe_done(State, Data) ->
     {next_state, not_provisioned, NewData}.
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
-    case check_not_provisioned(State) of
+    case ?CHECK(check_not_provisioned(State),
+                check_cluster_info(ClusterInfo)) of
         ok ->
-            case ClusterInfo of
-                #{history_id := HistoryId} ->
-                    Peer = get_peer_name(),
-                    NewData =
-                        store_meta(#{?META_HISTORY_ID => HistoryId,
-                                     ?META_PEER => Peer,
-                                     ?META_STATE => ?META_STATE_PREPARE_JOIN},
-                                   Data),
-                    announce_joining_cluster(NewData),
-                    {next_state, prepare_join, NewData, {reply, From, ok}};
-                _ ->
-                    {keep_state_and_data,
-                     {reply, From, {error, bad_cluster_info}}}
-            end;
+            #{history_id := HistoryId,
+              config := Config} = ClusterInfo,
+            Peer = get_peer_name(),
+            Meta = #{?META_HISTORY_ID => HistoryId,
+                     ?META_PEER => Peer,
+                     ?META_STATE => {?META_STATE_PREPARE_JOIN,
+                                     #{config => Config}}},
+            NewData = store_meta(Meta, Data),
+            announce_joining_cluster(HistoryId),
+            {next_state,
+             #prepare_join{config = Config}, NewData,
+             {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
+check_cluster_info(ClusterInfo) ->
+    case ClusterInfo of
+        #{history_id := HistoryId,
+          committed_seqno := CommittedSeqno,
+          config := #log_entry{value = #config{}}}
+          when is_binary(HistoryId),
+               is_integer(CommittedSeqno) ->
+            ok;
+        _ ->
+            {error, {bad_cluster_info, ClusterInfo}}
+    end.
+
 handle_join_cluster(ClusterInfo, From, State, Data) ->
     case check_join_cluster(ClusterInfo, State, Data) of
-        {ok, Seqno} ->
-            Meta = #{?META_STATE => {?META_STATE_JOIN_CLUSTER, Seqno}},
+        {ok, Config, Seqno} ->
+            Meta = #{?META_STATE => {?META_STATE_JOIN_CLUSTER,
+                                     #{seqno => Seqno,
+                                       config => Config}}},
             NewData = store_meta(Meta, Data),
-            NewState = #join_cluster{from = From, seqno = Seqno},
+            NewState = #join_cluster{from = From,
+                                     seqno = Seqno,
+                                     config = Config},
 
             %% We might already have all entries we need.
             {FinalState, FinalData} =
@@ -990,21 +1011,21 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
 
 check_join_cluster(ClusterInfo, State, Data) ->
     case State of
-        prepare_join ->
-            case ClusterInfo of
-                #{history_id := HistoryId,
-                  committed_seqno := CommittedSeqno,
-                  peers := Peers} ->
+        #prepare_join{} ->
+            case check_cluster_info(ClusterInfo) of
+                ok ->
+                    #{history_id := HistoryId,
+                      config := Config,
+                      committed_seqno := Seqno} = ClusterInfo,
+
                     case ?CHECK(check_history_id(HistoryId, Data),
-                                check_peer(Peers, Data),
+                                check_in_peers(Config, Data),
                                 check_not_wipe_requested(Data)) of
                         ok ->
-                            {ok, CommittedSeqno};
+                            {ok, Config, Seqno};
                         {error, _} = Error ->
                             Error
-                    end;
-                _ ->
-                    {error, bad_cluster_info}
+                    end
             end;
         _ ->
             {error, not_prepared}
@@ -1018,9 +1039,12 @@ check_not_wipe_requested(Data) ->
             {error, wipe_requested}
     end.
 
-check_peer(Peers, Data) ->
+check_in_peers(#log_entry{value = Config}, Data) ->
+    Peers = chronicle_utils:config_peers(Config),
+
     Peer = get_meta(?META_PEER, Data),
     true = (Peer =/= ?NO_PEER),
+
     case lists:member(Peer, Peers) of
         true ->
             ok;
@@ -1082,7 +1106,7 @@ check_establish_term(HistoryId, Term, Position, State, Data) ->
     ?CHECK(check_prepared(State),
            check_history_id(HistoryId, Data),
            check_later_term(Term, Data),
-           check_peer_current(Position, Data)).
+           check_peer_current(Position, State, Data)).
 
 check_later_term(Term, Data) ->
     CurrentTerm = get_meta(?META_TERM, Data),
@@ -1093,16 +1117,52 @@ check_later_term(Term, Data) ->
             {error, {conflicting_term, CurrentTerm}}
     end.
 
-check_peer_current(Position, Data) ->
-    OurTermVoted = get_meta(?META_TERM_VOTED, Data),
-    OurHighSeqno = get_high_seqno(Data),
-    OurPosition = {OurTermVoted, OurHighSeqno},
-    case compare_positions(Position, OurPosition) of
+check_peer_current(Position, State, Data) ->
+    RequiredPosition = get_required_peer_position(State, Data),
+    case compare_positions(Position, RequiredPosition) of
         lt ->
-            {error, {behind, OurPosition}};
+            {error, {behind, RequiredPosition}};
         _ ->
             ok
     end.
+
+get_position(Data) ->
+    OurTermVoted = get_meta(?META_TERM_VOTED, Data),
+    OurHighSeqno = get_high_seqno(Data),
+    {OurTermVoted, OurHighSeqno}.
+
+get_required_peer_position(State, Data) ->
+    OurPosition = get_position(Data),
+
+    %% When a node is being added to a cluster, it starts in an empty
+    %% state. So it'll accept vote solicitations from any node with the
+    %% correct history id. But it's possible that the node will get contacted
+    %% by nodes that were previsouly removed from the cluster (if those don't
+    %% know that they got removed). For this to happen the node being added
+    %% must have previsouly been part of the cluster together with the removed
+    %% nodes. The latter nodes will have the correct history id and will be
+    %% able to get the added node to vote for them. Which may give one of
+    %% those nodes enough votes to become the leader, which must never happen.
+    %%
+    %% To protect against this the node will reject vote solicitations from
+    %% nodes that are not aware of the latest config as of when the node add
+    %% sequence was initiated.
+    case config_position(State) of
+        {ok, ConfigPosition} ->
+            max_position(ConfigPosition, OurPosition);
+        false ->
+            OurPosition
+    end.
+
+config_position(#prepare_join{config = Config}) ->
+    {ok, entry_position(Config)};
+config_position(#join_cluster{config = Config}) ->
+    {ok, entry_position(Config)};
+config_position(_) ->
+    false.
+
+entry_position(#log_entry{term = Term, seqno = Seqno}) ->
+    {Term, Seqno}.
 
 handle_ensure_term(HistoryId, Term, From, State, Data) ->
     Reply =
@@ -1873,9 +1933,7 @@ announce_system_state(SystemState) ->
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}).
 
-announce_joining_cluster(Data) ->
-    HistoryId = get_effective_history_id(Data),
-    true = (HistoryId =/= ?NO_HISTORY),
+announce_joining_cluster(HistoryId) ->
     announce_system_state(joining_cluster, HistoryId).
 
 announce_system_provisioned(Data) ->

@@ -295,6 +295,14 @@ compare_positions({TermVotedA, HighSeqnoA}, {TermVotedB, HighSeqnoB}) ->
             lt
     end.
 
+max_position(PositionA, PositionB) ->
+    case compare_positions(PositionA, PositionB) of
+        gt ->
+            PositionA;
+        _ ->
+            PositionB
+    end.
+
 %% A version of erlang:monitor(process, ...) that knows how to deal with {via,
 %% Registry, Name} processes that are used by vnet.
 monitor_process({via, Registry, Name}) ->
