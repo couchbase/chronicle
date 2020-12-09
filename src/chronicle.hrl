@@ -54,7 +54,7 @@
         { history_id :: chronicle:history_id(),
           term :: chronicle:leader_term(),
           seqno :: chronicle:seqno(),
-          value :: #config{} | #transition{} | #rsm_command{}}).
+          value :: noop | #config{} | #transition{} | #rsm_command{}}).
 
 -record(metadata, { peer,
                     history_id,

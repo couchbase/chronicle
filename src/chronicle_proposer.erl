@@ -244,7 +244,8 @@ handle_state_enter(proposing, Data) ->
     NewData0 = start_catchup_process(Data),
     NewData1 = preload_pending_entries(NewData0),
     NewData2 = maybe_resolve_branch(NewData1),
-    NewData = maybe_complete_config_transition(NewData2),
+    NewData3 = maybe_complete_config_transition(NewData2),
+    NewData = maybe_propose_noop(NewData3),
 
     announce_proposer_ready(NewData),
 
@@ -293,6 +294,17 @@ preload_pending_entries(#data{history_id = HistoryId,
             end;
         false ->
             Data
+    end.
+
+maybe_propose_noop(#data{pending_entries = PendingEntries} = Data) ->
+    case queue:is_empty(PendingEntries) of
+        true ->
+            Data;
+        false ->
+            %% Some entries are found to be uncommitted. Propose a NOOP to
+            %% commit them in current term.
+            {_, NewData} = propose_value(noop, Data),
+            NewData
     end.
 
 announce_proposer_ready(#data{parent = Parent,
@@ -1291,16 +1303,21 @@ propose_config(Config, ReplyTo, Data) ->
 
 %% TODO: right now when this function is called we replicate the proposal in
 %% its own batch. But it can be coalesced with user batches.
-do_propose_config(Config, ReplyTo, #data{high_seqno = HighSeqno,
-                                         pending_entries = Entries} = Data) ->
+do_propose_config(Config, ReplyTo, Data) ->
+    {LogEntry, NewData0} = propose_value(Config, Data),
+    NewData = NewData0#data{config_change_reply_to = ReplyTo},
+    update_config(LogEntry, NewData).
+
+propose_value(Value,
+              #data{high_seqno = HighSeqno,
+                    pending_entries = Entries} = Data) ->
     Seqno = HighSeqno + 1,
-    LogEntry = make_log_entry(Seqno, Config, Data),
+    LogEntry = make_log_entry(Seqno, Value, Data),
 
     NewEntries = queue:in(LogEntry, Entries),
-    NewData = Data#data{pending_entries = NewEntries,
-                        high_seqno = Seqno,
-                        config_change_reply_to = ReplyTo},
-    update_config(LogEntry, NewData).
+    NewData = Data#data{pending_entries = NewEntries, high_seqno = Seqno},
+
+    {LogEntry, NewData}.
 
 get_peer_status(Peer, #data{peer_statuses = Tab}) ->
     case ets:lookup(Tab, Peer) of

@@ -1198,7 +1198,7 @@ extract_latest_config(Entries) ->
                       Entry;
                   #transition{} ->
                       Entry;
-                  #rsm_command{} ->
+                  _ ->
                       Acc
               end
       end, false, Entries).
