@@ -266,7 +266,7 @@ publish(#storage{log_info_tab = LogInfoTab,
 
             case PublishedHighSeqno > HighSeqno of
                 true ->
-                    mem_log_delete_range(HighSeqno,
+                    mem_log_delete_range(HighSeqno + 1,
                                          PublishedHighSeqno, Storage);
                 false ->
                     ok
