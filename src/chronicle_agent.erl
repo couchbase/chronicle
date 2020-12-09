@@ -264,7 +264,8 @@ prepare_join(ClusterInfo) ->
 -type join_cluster_error() :: not_prepared
                             | {history_mismatch, chronicle:history_id()}
                             | {not_in_peers,
-                               chronicle:peer(), [chronicle:peer()]}.
+                               chronicle:peer(), [chronicle:peer()]}
+                            | wipe_requested.
 -spec join_cluster(chronicle:cluster_info()) -> join_cluster_result().
 join_cluster(ClusterInfo) ->
     case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
