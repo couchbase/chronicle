@@ -50,8 +50,15 @@
                 quorum_peers,
                 machines,
                 config,
+
                 high_seqno,
                 committed_seqno,
+
+                %% Don't consider seqno-s that are lesser than this seqno
+                %% committed even if we replicated the corresponding entries
+                %% to a quorum of nodes. Initialized to the seqno at which the
+                %% first entry is proposed in the current term.
+                safe_commit_seqno,
 
                 being_removed,
 
@@ -245,7 +252,7 @@ handle_state_enter(proposing, Data) ->
     NewData1 = preload_pending_entries(NewData0),
     NewData2 = maybe_resolve_branch(NewData1),
     NewData3 = maybe_complete_config_transition(NewData2),
-    NewData = maybe_propose_noop(NewData3),
+    NewData = propose_noop(NewData3),
 
     announce_proposer_ready(NewData),
 
@@ -296,16 +303,12 @@ preload_pending_entries(#data{history_id = HistoryId,
             Data
     end.
 
-maybe_propose_noop(#data{pending_entries = PendingEntries} = Data) ->
-    case queue:is_empty(PendingEntries) of
-        true ->
-            Data;
-        false ->
-            %% Some entries are found to be uncommitted. Propose a NOOP to
-            %% commit them in current term.
-            {_, NewData} = propose_value(noop, Data),
-            NewData
-    end.
+propose_noop(Data) ->
+    %% If everything from previous term is committed, there's no need to
+    %% propose a noop. But for the sake of simplicity we'll propose it all the
+    %% time whena term is established.
+    {NoopEntry, NewData} = propose_value(noop, Data),
+    NewData#data{safe_commit_seqno = NoopEntry#log_entry.seqno}.
 
 announce_proposer_ready(#data{parent = Parent,
                               history_id = HistoryId,
@@ -710,18 +713,18 @@ handle_append_ok(Peer, PeerHighSeqno,
 check_committed_seqno_advanced(State, Data) ->
     check_committed_seqno_advanced(#{}, State, Data).
 
-check_committed_seqno_advanced(Options,
-                               State,
-                               #data{committed_seqno =
-                                         CommittedSeqno} = Data) ->
-    NewCommittedSeqno = deduce_committed_seqno(Data),
-    case NewCommittedSeqno > CommittedSeqno of
+check_committed_seqno_advanced(Options, State, Data) ->
+    #data{committed_seqno = CommittedSeqno,
+          safe_commit_seqno = SafeCommitSeqno} = Data,
+
+    QuorumSeqno = deduce_quorum_seqno(Data),
+    case QuorumSeqno > CommittedSeqno andalso QuorumSeqno >= SafeCommitSeqno of
         true ->
             ?DEBUG("Committed seqno advanced.~n"
                    "New committed seqno: ~p~n"
                    "Old committed seqno: ~p",
-                   [NewCommittedSeqno, CommittedSeqno]),
-            NewData0 = Data#data{committed_seqno = NewCommittedSeqno},
+                   [QuorumSeqno, CommittedSeqno]),
+            NewData0 = Data#data{committed_seqno = QuorumSeqno},
 
             case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
@@ -1786,8 +1789,8 @@ deduce_acked_sync_round(#data{quorum = Quorum, quorum_peers = Peers} = Data) ->
 
     deduce_quorum_value(PeerRounds, 0, Quorum).
 
-deduce_committed_seqno(#data{quorum = Quorum,
-                             quorum_peers = Peers} = Data) ->
+deduce_quorum_seqno(#data{quorum = Quorum,
+                          quorum_peers = Peers} = Data) ->
     PeerSeqnos =
         lists:filtermap(
           fun (Peer) ->
