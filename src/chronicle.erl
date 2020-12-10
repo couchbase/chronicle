@@ -27,6 +27,8 @@
          get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
 -export([add_voter/1, add_voter/2, add_voters/1, add_voters/2,
          add_replica/1, add_replica/2, add_replicas/1, add_replicas/2,
+         add_peer/2, add_peer/3, add_peer/4,
+         add_peers/1, add_peers/2, add_peers/3,
          remove_peer/1, remove_peer/2, remove_peers/1, remove_peers/2]).
 
 -export_type([uuid/0, peer/0, history_id/0,
@@ -38,6 +40,7 @@
 -type uuid() :: binary().
 -type peer() :: atom().
 -type peers() :: [peer()].
+-type peers_and_roles() :: [{peer(), role()}].
 -type history_id() :: binary().
 
 -type leader_term() :: {non_neg_integer(), peer()}.
@@ -51,6 +54,7 @@
 
 -type lock() :: binary().
 -type lockreq() :: lock() | unlocked.
+-type role() :: voter | replica.
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
@@ -121,74 +125,110 @@ remove_peers(Lock, Peers, Timeout) ->
               NewVoters = Voters -- Peers,
               NewReplicas = Replicas -- Peers,
 
-              {NewVoters, NewReplicas}
+              {ok, NewVoters, NewReplicas}
       end, Lock, Timeout).
 
--type add_voters_result() :: ok | {error, lock_revoked_error()}.
-
--spec add_voter(peer()) -> add_voters_result().
+-spec add_voter(peer()) -> add_peers_result().
 add_voter(Peer) ->
     add_voter(unlocked, Peer).
 
--spec add_voter(lockreq(), peer()) -> add_voters_result().
+-spec add_voter(lockreq(), peer()) -> add_peers_result().
 add_voter(Lock, Peer) ->
     add_voter(Lock, Peer, ?DEFAULT_TIMEOUT).
 
--spec add_voter(lockreq(), peer(), timeout()) -> add_voters_result().
+-spec add_voter(lockreq(), peer(), timeout()) -> add_peers_result().
 add_voter(Lock, Peer, Timeout) ->
     add_voters(Lock, [Peer], Timeout).
 
--spec add_voters(peers()) -> add_voters_result().
+-spec add_voters(peers()) -> add_peers_result().
 add_voters(Peers) ->
     add_voters(unlocked, Peers).
 
--spec add_voters(lockreq(), peers()) -> add_voters_result().
+-spec add_voters(lockreq(), peers()) -> add_peers_result().
 add_voters(Lock, Peers) ->
     add_voters(Lock, Peers, ?DEFAULT_TIMEOUT).
 
--spec add_voters(lockreq(), peers(), timeout()) -> add_voters_result().
+-spec add_voters(lockreq(), peers(), timeout()) -> add_peers_result().
 add_voters(Lock, Peers, Timeout) ->
-    validate_peers(Peers),
-    update_peers(
-      fun (Voters, Replicas) ->
-              NewVoters = lists:usort(Voters ++ Peers),
-              NewReplicas = Replicas -- Peers,
-              {NewVoters, NewReplicas}
-      end, Lock, Timeout).
+    add_peers(Lock, [{Peer, voter} || Peer <- Peers], Timeout).
 
--type add_replicas_result() :: ok | {error, add_replicas_error()}.
--type add_replicas_error() :: no_voters_left_error()
-                            | lock_revoked_error().
-
--spec add_replica(peer()) -> add_replicas_result().
+-spec add_replica(peer()) -> add_peers_result().
 add_replica(Peer) ->
     add_replica(unlocked, Peer).
 
--spec add_replica(lockreq(), peer()) -> add_replicas_result().
+-spec add_replica(lockreq(), peer()) -> add_peers_result().
 add_replica(Lock, Peer) ->
     add_replica(Lock, Peer, ?DEFAULT_TIMEOUT).
 
--spec add_replica(lockreq(), peer(), timeout()) -> add_replicas_result().
+-spec add_replica(lockreq(), peer(), timeout()) -> add_peers_result().
 add_replica(Lock, Peer, Timeout) ->
     add_replicas(Lock, [Peer], Timeout).
 
--spec add_replicas(peers()) -> add_replicas_result().
+-spec add_replicas(peers()) -> add_peers_result().
 add_replicas(Peers) ->
     add_replicas(unlocked, Peers).
 
--spec add_replicas(lockreq(), peers()) -> add_replicas_result().
+-spec add_replicas(lockreq(), peers()) -> add_peers_result().
 add_replicas(Lock, Peers) ->
     add_replicas(Lock, Peers, ?DEFAULT_TIMEOUT).
 
--spec add_replicas(lockreq(), peers(), timeout()) -> add_replicas_result().
+-spec add_replicas(lockreq(), peers(), timeout()) -> add_peers_result().
 add_replicas(Lock, Peers, Timeout) ->
-    validate_peers(Peers),
+    add_peers(Lock, [{Peer, replica} || Peer <- Peers], Timeout).
+
+-type add_peers_result() :: ok | {error, add_peers_error()}.
+-type add_peers_error() :: lock_revoked_error()
+                         | {already_member, peer(), role()}.
+
+-spec add_peer(peer(), role()) -> add_peers_result().
+add_peer(Peer, Role) ->
+    add_peer(unlocked, Peer, Role).
+
+-spec add_peer(lockreq(), peer(), role()) -> add_peers_result().
+add_peer(Lock, Peer, Role) ->
+    add_peer(Lock, Peer, Role, ?DEFAULT_TIMEOUT).
+
+-spec add_peer(lockreq(), peer(), role(), timeout()) -> add_peers_result().
+add_peer(Lock, Peer, Role, Timeout) ->
+    add_peers(Lock, [{Peer, Role}], Timeout).
+
+-spec add_peers(peers_and_roles()) -> add_peers_result().
+add_peers(Peers) ->
+    add_peers(unlocked, Peers).
+
+-spec add_peers(lockreq(), peers_and_roles()) -> add_peers_result().
+add_peers(Lock, Peers) ->
+    add_peers(Lock, Peers, ?DEFAULT_TIMEOUT).
+
+-spec add_peers(lockreq(), peers_and_roles(), timeout()) -> add_peers_result().
+add_peers(Lock, Peers, Timeout) ->
+    validate_peers_and_roles(Peers),
     update_peers(
       fun (Voters, Replicas) ->
-              NewVoters = Voters -- Peers,
-              NewReplicas = lists:usort(Replicas ++ Peers),
-              {NewVoters, NewReplicas}
+              CurrentRoles =
+                  [{V, voter} || V <- Voters] ++
+                  [{R, replica} || R <- Replicas],
+              add_peers_loop(Peers, Voters, Replicas,
+                             maps:from_list(CurrentRoles))
       end, Lock, Timeout).
+
+add_peers_loop([], AccVoters, AccReplicas, _) ->
+    {ok, AccVoters, AccReplicas};
+add_peers_loop([{Peer, Role} | Rest], AccVoters, AccReplicas, CurrentRoles) ->
+    case maps:find(Peer, CurrentRoles) of
+        {ok, CurrentRole} ->
+            {error, {already_member, Peer, CurrentRole}};
+        error ->
+            {NewAccVoters, NewAccReplicas} =
+                case Role of
+                    voter ->
+                        {[Peer | AccVoters], AccReplicas};
+                    replica ->
+                        {AccVoters, [Peer | AccReplicas]}
+                end,
+
+            add_peers_loop(Rest, NewAccVoters, NewAccReplicas, CurrentRoles)
+    end.
 
 -type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
 
@@ -263,18 +303,21 @@ get_config(Leader, TRef, Fun) ->
 update_peers(Fun, Lock, Timeout) ->
     update_config(
       fun (#config{voters = Voters, replicas = Replicas} = Config) ->
-              {NewVoters, NewReplicas} = Fun(Voters, Replicas),
+              case Fun(Voters, Replicas) of
+                  {ok, NewVoters, NewReplicas} ->
+                      NewVoters = (NewVoters -- NewReplicas),
+                      NewReplicas = (NewReplicas -- NewVoters),
 
-              NewVoters = (NewVoters -- NewReplicas),
-              NewReplicas = (NewReplicas -- NewVoters),
-
-              case NewVoters of
-                  [] ->
-                      {stop, {error, no_voters_left}};
-                  _ ->
-                      NewConfig = Config#config{voters = NewVoters,
-                                                replicas = NewReplicas},
-                      {ok, NewConfig}
+                      case NewVoters of
+                          [] ->
+                              {stop, {error, no_voters_left}};
+                          _ ->
+                              NewConfig = Config#config{voters = NewVoters,
+                                                        replicas = NewReplicas},
+                              {ok, NewConfig}
+                      end;
+                  {error, _} = Error ->
+                      {stop, Error}
               end
       end, Lock, Timeout).
 
@@ -332,6 +375,26 @@ validate_peers(Peers) ->
                       error(badarg)
               end
       end, Peers).
+
+validate_peers_and_roles(PeerRoles) ->
+    Peers = [Peer || {Peer, _} <- PeerRoles],
+    validate_peers(Peers),
+    case lists:usort(Peers) =:= lists:sort(Peers) of
+        true ->
+            ok;
+        false ->
+            error(badarg)
+    end,
+
+    lists:foreach(
+      fun ({_Peer, Role}) ->
+              case lists:member(Role, [replica, voter]) of
+                  true ->
+                      ok;
+                  false ->
+                      error(badarg)
+              end
+      end, PeerRoles).
 
 validate_lock(Lock) ->
     case Lock of
