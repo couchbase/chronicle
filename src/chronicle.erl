@@ -121,11 +121,8 @@ remove_peers(Lock, Peers) ->
 remove_peers(Lock, Peers, Timeout) ->
     validate_peers(Peers),
     update_peers(
-      fun (Voters, Replicas) ->
-              NewVoters = Voters -- Peers,
-              NewReplicas = Replicas -- Peers,
-
-              {ok, NewVoters, NewReplicas}
+      fun (CurrentPeers) ->
+              {ok, maps:without(Peers, CurrentPeers)}
       end, Lock, Timeout).
 
 -spec add_voter(peer()) -> add_peers_result().
@@ -204,30 +201,18 @@ add_peers(Lock, Peers) ->
 add_peers(Lock, Peers, Timeout) ->
     validate_peers_and_roles(Peers),
     update_peers(
-      fun (Voters, Replicas) ->
-              CurrentRoles =
-                  [{V, voter} || V <- Voters] ++
-                  [{R, replica} || R <- Replicas],
-              add_peers_loop(Peers, Voters, Replicas,
-                             maps:from_list(CurrentRoles))
+      fun (CurrentPeers) ->
+              add_peers_loop(Peers, CurrentPeers)
       end, Lock, Timeout).
 
-add_peers_loop([], AccVoters, AccReplicas, _) ->
-    {ok, AccVoters, AccReplicas};
-add_peers_loop([{Peer, Role} | Rest], AccVoters, AccReplicas, CurrentRoles) ->
-    case maps:find(Peer, CurrentRoles) of
+add_peers_loop([], AccPeers) ->
+    {ok, AccPeers};
+add_peers_loop([{Peer, Role} | Rest], AccPeers) ->
+    case maps:find(Peer, AccPeers) of
         {ok, CurrentRole} ->
             {error, {already_member, Peer, CurrentRole}};
         error ->
-            {NewAccVoters, NewAccReplicas} =
-                case Role of
-                    voter ->
-                        {[Peer | AccVoters], AccReplicas};
-                    replica ->
-                        {AccVoters, [Peer | AccReplicas]}
-                end,
-
-            add_peers_loop(Rest, NewAccVoters, NewAccReplicas, CurrentRoles)
+            add_peers_loop(Rest, AccPeers#{Peer => Role})
     end.
 
 -type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
@@ -303,15 +288,30 @@ get_config(Leader, TRef, Fun) ->
 update_peers(Fun, Lock, Timeout) ->
     update_config(
       fun (#config{voters = Voters, replicas = Replicas} = Config) ->
-              case Fun(Voters, Replicas) of
-                  {ok, NewVoters, NewReplicas} ->
-                      NewVoters = (NewVoters -- NewReplicas),
-                      NewReplicas = (NewReplicas -- NewVoters),
+              CurrentPeers = maps:from_list(
+                               [{V, voter} || V <- Voters] ++
+                                   [{R, replica} || R <- Replicas]),
 
-                      case NewVoters of
+              case Fun(CurrentPeers) of
+                  {ok, NewPeers} ->
+                      {NewVoters0, NewReplicas0} =
+                          maps:fold(
+                            fun (Peer, Role, {AccVoters, AccReplicas}) ->
+                                    case Role of
+                                        voter ->
+                                            {[Peer | AccVoters], AccReplicas};
+                                        replica ->
+                                            {AccVoters, [Peer | AccReplicas]}
+                                    end
+                            end, {[], []}, NewPeers),
+
+                      case NewVoters0 of
                           [] ->
                               {stop, {error, no_voters_left}};
                           _ ->
+                              NewVoters = lists:sort(NewVoters0),
+                              NewReplicas = lists:sort(NewReplicas0),
+
                               NewConfig = Config#config{voters = NewVoters,
                                                         replicas = NewReplicas},
                               {ok, NewConfig}
