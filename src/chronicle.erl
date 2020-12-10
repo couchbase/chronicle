@@ -30,6 +30,8 @@
          add_peer/2, add_peer/3, add_peer/4,
          add_peers/1, add_peers/2, add_peers/3,
          remove_peer/1, remove_peer/2, remove_peers/1, remove_peers/2]).
+-export([set_peer_role/2, set_peer_role/3, set_peer_role/4,
+         set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
 
 -export_type([uuid/0, peer/0, history_id/0,
               leader_term/0, seqno/0, peer_position/0,
@@ -213,6 +215,51 @@ add_peers_loop([{Peer, Role} | Rest], AccPeers) ->
             {error, {already_member, Peer, CurrentRole}};
         error ->
             add_peers_loop(Rest, AccPeers#{Peer => Role})
+    end.
+
+-type set_peer_roles_result() :: ok | {error, set_peer_roles_error()}.
+-type set_peer_roles_error() :: lock_revoked_error()
+                              | no_voters_left_error()
+                              | {not_member, peer()}.
+
+-spec set_peer_role(peer(), role()) -> set_peer_roles_result().
+set_peer_role(Peer, Role) ->
+    set_peer_role(unlocked, Peer, Role).
+
+-spec set_peer_role(lockreq(), peer(), role()) -> set_peer_roles_result().
+set_peer_role(Lock, Peer, Role) ->
+    set_peer_role(Lock, Peer, Role, ?DEFAULT_TIMEOUT).
+
+-spec set_peer_role(lockreq(), peer(), role(), timeout()) ->
+          set_peer_roles_result().
+set_peer_role(Lock, Peer, Role, Timeout) ->
+    set_peer_roles(Lock, [{Peer, Role}], Timeout).
+
+-spec set_peer_roles(peers_and_roles()) -> set_peer_roles_result().
+set_peer_roles(Peers) ->
+    set_peer_roles(unlocked, Peers).
+
+-spec set_peer_roles(lockreq(), peers_and_roles()) -> set_peer_roles_result().
+set_peer_roles(Lock, Peers) ->
+    set_peer_roles(Lock, Peers, ?DEFAULT_TIMEOUT).
+
+-spec set_peer_roles(lockreq(), peers_and_roles(), timeout()) ->
+          set_peer_roles_result().
+set_peer_roles(Lock, Peers, Timeout) ->
+    validate_peers_and_roles(Peers),
+    update_peers(
+      fun (CurrentPeers) ->
+              set_peer_roles_loop(Peers, CurrentPeers)
+      end, Lock, Timeout).
+
+set_peer_roles_loop([], AccPeers) ->
+    {ok, AccPeers};
+set_peer_roles_loop([{Peer, Role} | Rest], AccPeers) ->
+    case maps:is_key(Peer, AccPeers) of
+        true ->
+            set_peer_roles_loop(Rest, AccPeers#{Peer => Role});
+        false ->
+            {error, {not_member, Peer}}
     end.
 
 -type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
