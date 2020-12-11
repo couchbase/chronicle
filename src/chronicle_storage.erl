@@ -363,7 +363,7 @@ handle_log_entry(Entry, Storage) ->
         {append, StartSeqno, EndSeqno, Meta, Entries} ->
             handle_log_append(StartSeqno, EndSeqno, Meta, Entries, Storage);
         {meta, Meta} ->
-            handle_log_meta(Meta, Storage);
+            add_meta(Meta, Storage);
         {truncate, Seqno} ->
             #storage{low_seqno = LowSeqno, high_seqno = HighSeqno} = Storage,
 
@@ -394,9 +394,6 @@ handle_log_entry(Entry, Storage) ->
             add_snapshot(Seqno, Config, NewStorage)
     end.
 
-handle_log_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
-    Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
-
 handle_log_append(StartSeqno, EndSeqno, Meta, Entries,
                   #storage{high_seqno = HighSeqno} = Storage) ->
     case StartSeqno =:= HighSeqno + 1 of
@@ -408,9 +405,10 @@ handle_log_append(StartSeqno, EndSeqno, Meta, Entries,
                   {append, StartSeqno, EndSeqno, HighSeqno}})
     end,
 
-    NewStorage0 = handle_log_meta(Meta, Storage),
-    NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
-    config_index_append(Entries, NewStorage1).
+    do_append(EndSeqno, Meta, Entries, Storage).
+
+add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
+    Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
 
 add_snapshot(Seqno, Config, #storage{snapshots = CurrentSnapshots} = Storage) ->
     Storage#storage{snapshots = [{Seqno, Config} | CurrentSnapshots]}.
@@ -449,29 +447,25 @@ get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
 
 -spec store_meta(meta(), #storage{}) -> #storage{}.
 store_meta(Updates, Storage) ->
-    case store_meta_prepare(Updates, Storage) of
-        {ok, DedupedUpdates, NewStorage} ->
-            maybe_rollover(log_append([{meta, DedupedUpdates}], NewStorage));
-        not_needed ->
+    Meta = dedup_meta(Updates, Storage),
+    case maps:size(Meta) > 0 of
+        true ->
+            NewStorage = add_meta(Meta, Storage),
+            maybe_rollover(log_append([{meta, Meta}], NewStorage));
+        false ->
             Storage
     end.
 
-store_meta_prepare(Updates, #storage{meta = Meta} = Storage) ->
-    Deduped = maps:filter(
-                fun (Key, Value) ->
-                        case maps:find(Key, Meta) of
-                            {ok, CurrentValue} ->
-                                Value =/= CurrentValue;
-                            error ->
-                                true
-                        end
-                end, Updates),
-    case maps:size(Deduped) > 0 of
-        true ->
-            {ok, Deduped, Storage#storage{meta = maps:merge(Meta, Deduped)}};
-        false ->
-            not_needed
-    end.
+dedup_meta(Updates, #storage{meta = Meta}) ->
+    maps:filter(
+      fun (Key, Value) ->
+              case maps:find(Key, Meta) of
+                  {ok, CurrentValue} ->
+                      Value =/= CurrentValue;
+                  error ->
+                      true
+              end
+      end, Updates).
 
 truncate(Seqno, #storage{meta = Meta,
                          low_seqno = LowSeqno,
@@ -489,23 +483,22 @@ truncate(Seqno, #storage{meta = Meta,
 append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
-    {Meta, NewStorage0} = append_handle_meta(Storage, Opts),
-    NewStorage1 = log_append([{append, StartSeqno, EndSeqno, Meta, Entries}],
-                             NewStorage0),
-    NewStorage2 = mem_log_append(EndSeqno, Entries, NewStorage1),
-    maybe_rollover(config_index_append(Entries, NewStorage2)).
+    Meta = append_handle_meta(Storage, Opts),
+    LogEntry = {append, StartSeqno, EndSeqno, Meta, Entries},
+    NewStorage = log_append([LogEntry], Storage),
+    maybe_rollover(do_append(EndSeqno, Meta, Entries, NewStorage)).
+
+do_append(EndSeqno, Meta, Entries, Storage) ->
+    NewStorage0 = mem_log_append(EndSeqno, Entries, Storage),
+    NewStorage1 = config_index_append(Entries, NewStorage0),
+    add_meta(Meta, NewStorage1).
 
 append_handle_meta(Storage, Opts) ->
     case maps:find(meta, Opts) of
         {ok, Meta} ->
-            case store_meta_prepare(Meta, Storage) of
-                {ok, DedupedMeta, NewStorage} ->
-                    {DedupedMeta, NewStorage};
-                not_needed ->
-                    {#{}, Storage}
-            end;
+            dedup_meta(Meta, Storage);
         error ->
-            {#{}, Storage}
+            #{}
     end.
 
 sync(#storage{current_log = Log}) ->
