@@ -1978,13 +1978,9 @@ storage_open() ->
 publish_storage(Storage) ->
     chronicle_storage:publish(Storage).
 
-append_entry(Entry, Meta, #data{storage = Storage} = Data) ->
+append_entry(Entry, Meta, Data) ->
     Seqno = Entry#log_entry.seqno,
-    NewStorage = chronicle_storage:append(Seqno, Seqno,
-                                          [Entry], #{meta => Meta},
-                                          Storage),
-    chronicle_storage:sync(NewStorage),
-    Data#data{storage = publish_storage(NewStorage)}.
+    append_entries(Seqno, Seqno, [Entry], Meta, false, Data).
 
 store_meta(Meta, #data{storage = Storage} = Data) ->
     NewStorage = chronicle_storage:store_meta(Meta, Storage),
