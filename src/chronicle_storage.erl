@@ -365,16 +365,11 @@ handle_log_entry(Entry, Storage) ->
         {meta, Meta} ->
             handle_log_meta(Meta, Storage);
         {truncate, Seqno} ->
-            #storage{log_tab = LogTab,
-                     config_index_tab = ConfigIndexTab,
-                     low_seqno = LowSeqno,
-                     high_seqno = HighSeqno} = Storage,
+            #storage{low_seqno = LowSeqno, high_seqno = HighSeqno} = Storage,
 
-            delete_table_range(LogTab, Seqno + 1, HighSeqno),
-
-            NewConfig = truncate_ordered_table(ConfigIndexTab, Seqno),
-            NewStorage = Storage#storage{config = NewConfig,
-                                         high_seqno = Seqno},
+            mem_log_delete_range(Seqno + 1, HighSeqno, Storage),
+            NewStorage0 = config_index_truncate(Seqno, Storage),
+            NewStorage = NewStorage0#storage{high_seqno = Seqno},
 
             %% For the first log segment it's possible for truncate to go
             %% below the low seqno. So it needs to be adjusted accordingly.
