@@ -483,7 +483,7 @@ truncate(Seqno, #storage{meta = Meta,
 append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
-    Meta = append_handle_meta(Storage, Opts),
+    Meta = append_handle_meta(Opts, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Entries},
     NewStorage = log_append([LogEntry], Storage),
     maybe_rollover(do_append(EndSeqno, Meta, Entries, NewStorage)).
@@ -493,7 +493,7 @@ do_append(EndSeqno, Meta, Entries, Storage) ->
     NewStorage1 = config_index_append(Entries, NewStorage0),
     add_meta(Meta, NewStorage1).
 
-append_handle_meta(Storage, Opts) ->
+append_handle_meta(Opts, Storage) ->
     case maps:find(meta, Opts) of
         {ok, Meta} ->
             dedup_meta(Meta, Storage);
