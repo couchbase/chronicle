@@ -106,76 +106,71 @@ open() ->
 open_logs(#storage{data_dir = DataDir} = Storage) ->
     {Orphans, Sealed, Current} = find_logs(DataDir),
 
-    InitState = #{meta => #{},
-                  config => undefined,
-                  low_seqno => ?NO_SEQNO + 1,
-                  high_seqno => ?NO_SEQNO,
-                  snapshots => [],
-                  log_segments => []},
+    NewStorage0 = Storage#storage{meta = #{},
+                                  config = undefined,
+                                  low_seqno = ?NO_SEQNO + 1,
+                                  high_seqno = ?NO_SEQNO,
+                                  snapshots = [],
+                                  log_segments = []},
 
     %% TODO: Be more robust when dealing with corrupt log files. As long as a
     %% consistent state can be recovered, corrupt logs should not be a fatal
     %% error.
-    SealedState =
+    NewStorage1 =
         lists:foldl(
-          fun ({_LogIx, LogPath}, Acc) ->
-                  HandleUserDataFun =
-                      make_handle_user_data_fun(LogPath, Storage),
-                  HandleEntryFun = make_handle_log_entry_fun(LogPath, Storage),
+          fun ({_LogIx, LogPath}, Acc0) ->
+                  Acc = Acc0#storage{current_log_path = LogPath},
                   case chronicle_log:read_log(LogPath,
-                                              HandleUserDataFun, HandleEntryFun,
+                                              fun handle_user_data/2,
+                                              fun handle_log_entry/2,
                                               Acc) of
-                      {ok, NewAcc0} ->
-                          #{log_start_seqno := LogStartSeqno,
-                            log_segments := LogSegments0} = NewAcc0,
+                      {ok, NewAcc} ->
+                          #storage{
+                             log_segments = LogSegments,
+                             current_log_start_seqno = LogStartSeqno} = NewAcc,
+
                           LogSegment = {LogPath, LogStartSeqno},
-                          LogSegments = [LogSegment | LogSegments0],
-                          NewAcc0#{log_segments => LogSegments};
+                          NewLogSegments = [LogSegment | LogSegments],
+                          NewAcc#storage{log_segments = NewLogSegments};
                       {error, Error} ->
                           ?ERROR("Failed to read log ~p: ~p", [LogPath, Error]),
                           exit({failed_to_read_log, LogPath, Error})
                   end
-          end, InitState, Sealed),
+          end, NewStorage0, Sealed),
 
     {CurrentLogIx, CurrentLogPath} = Current,
-    {CurrentLog, FinalState} = open_current_log(CurrentLogPath,
-                                                Storage, SealedState),
-    #{meta := Meta, config := Config,
-      low_seqno := LowSeqno, high_seqno := HighSeqno,
-      log_start_seqno := CurrentLogStartSeqno,
-      snapshots := Snapshots, log_segments := LogSegments} = FinalState,
-    {ok, DataSize} = chronicle_log:data_size(CurrentLog),
+    FinalStorage = open_current_log(CurrentLogIx, CurrentLogPath, NewStorage1),
 
     maybe_delete_orphans(Orphans),
-    Storage#storage{current_log = CurrentLog,
-                    current_log_ix = CurrentLogIx,
-                    current_log_path = CurrentLogPath,
-                    current_log_data_size = DataSize,
-                    current_log_start_seqno = CurrentLogStartSeqno,
-                    low_seqno = LowSeqno,
-                    high_seqno = HighSeqno,
-                    meta = Meta,
-                    config = Config,
-                    snapshots = Snapshots,
-                    log_segments = LogSegments}.
 
-open_current_log(LogPath, Storage, State) ->
-    case chronicle_log:open(LogPath,
-                            make_handle_user_data_fun(LogPath, Storage),
-                            make_handle_log_entry_fun(LogPath, Storage),
-                            State) of
-        {ok, Log, NewState} ->
-            {Log, NewState};
-        {error, Error} when Error =:= enoent;
-                            Error =:= no_header ->
-            ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
-            #{meta := Meta, config := Config, high_seqno := HighSeqno} = State,
-            Log = create_log(Config, Meta, HighSeqno, LogPath),
-            {Log, State#{log_start_seqno => HighSeqno + 1}};
-        {error, Error} ->
-            ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
-            exit({failed_to_open_log, LogPath, Error})
-    end.
+    FinalStorage.
+
+open_current_log(LogIx, LogPath, Storage0) ->
+    Storage = Storage0#storage{current_log_ix = LogIx,
+                               current_log_path = LogPath},
+    NewStorage =
+        case chronicle_log:open(LogPath,
+                                fun handle_user_data/2,
+                                fun handle_log_entry/2,
+                                Storage) of
+            {ok, Log, NewStorage0} ->
+                NewStorage0#storage{current_log = Log};
+            {error, Error} when Error =:= enoent;
+                                Error =:= no_header ->
+                ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
+                #storage{meta = Meta,
+                         config = Config,
+                         high_seqno = HighSeqno} = Storage,
+                Log = create_log(Config, Meta, HighSeqno, LogPath),
+                Storage#storage{current_log = Log,
+                                current_log_start_seqno = HighSeqno + 1};
+            {error, Error} ->
+                ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
+                exit({failed_to_open_log, LogPath, Error})
+        end,
+
+    {ok, DataSize} = chronicle_log:data_size(NewStorage#storage.current_log),
+    NewStorage#storage{current_log_data_size = DataSize}.
 
 maybe_delete_orphans([]) ->
     ok;
@@ -324,20 +319,16 @@ maybe_complete_wipe(DataDir) ->
 wipe_marker(DataDir) ->
     filename:join(DataDir, "chronicle.wipe").
 
-make_handle_user_data_fun(LogPath, Storage) ->
-    fun (UserData, State) ->
-            handle_user_data(LogPath, Storage, UserData, State)
-    end.
-
-handle_user_data(LogPath, Storage, UserData, State) ->
+handle_user_data(UserData, Storage) ->
     #{config := Config, meta := Meta, high_seqno := HighSeqno} = UserData,
 
-    #{config := StateConfig,
-      meta := StateMeta,
-      high_seqno := StateHighSeqno} = State,
+    #storage{config = StorageConfig,
+             meta = StorageMeta,
+             high_seqno = StorageHighSeqno,
+             current_log_path = LogPath} = Storage,
 
-    NewState = State#{log_start_seqno => HighSeqno + 1},
-    case StateConfig of
+    NewStorage = Storage#storage{current_log_start_seqno = HighSeqno + 1},
+    case StorageConfig of
         undefined ->
             case Config of
                 undefined ->
@@ -346,110 +337,100 @@ handle_user_data(LogPath, Storage, UserData, State) ->
                     ets:insert(Storage#storage.config_index_tab, Config)
             end,
 
-            NewState#{config => Config,
-                      meta => Meta,
-                      high_seqno => HighSeqno,
-                      low_seqno => HighSeqno + 1};
+            NewStorage#storage{config = Config,
+                               meta = Meta,
+                               high_seqno = HighSeqno,
+                               low_seqno = HighSeqno + 1};
         _ ->
-            case Config =:= StateConfig
-                andalso Meta =:= StateMeta
-                andalso HighSeqno =:= StateHighSeqno of
+            case Config =:= StorageConfig
+                andalso Meta =:= StorageMeta
+                andalso HighSeqno =:= StorageHighSeqno of
                 true ->
-                    NewState;
+                    NewStorage;
                 false ->
                     exit({inconsistent_log,
                           LogPath,
-                          {config, Config, StateConfig},
-                          {meta, Meta, StateMeta},
-                          {high_seqno, HighSeqno, StateHighSeqno}})
+                          {config, Config, StorageConfig},
+                          {meta, Meta, StorageMeta},
+                          {high_seqno, HighSeqno, StorageHighSeqno}})
             end
-    end.
-
-make_handle_log_entry_fun(LogPath, Storage) ->
-    fun (Entry, State) ->
-            handle_log_entry(LogPath, Storage, Entry, State)
     end.
 
 %% TODO: In many respects log entry handlers duplicate the code in functions
 %% that log the corresponding entries. Get rid of this duplication.
-handle_log_entry(LogPath, Storage, Entry, State) ->
+handle_log_entry(Entry, Storage) ->
     case Entry of
         {append, Meta, Entries} ->
-            handle_log_append(Meta, Entries, LogPath, Storage, State);
+            handle_log_append(Meta, Entries, Storage);
         {meta, Meta} ->
-            handle_log_meta(Meta, State);
+            handle_log_meta(Meta, Storage);
         {truncate, Seqno} ->
             #storage{log_tab = LogTab,
-                     config_index_tab = ConfigIndexTab} = Storage,
+                     config_index_tab = ConfigIndexTab,
+                     low_seqno = LowSeqno,
+                     high_seqno = HighSeqno} = Storage,
 
-            #{low_seqno := LowSeqno, high_seqno := HighSeqno} = State,
             delete_table_range(LogTab, Seqno + 1, HighSeqno),
 
             NewConfig = truncate_ordered_table(ConfigIndexTab, Seqno),
-            NewState = State#{config => NewConfig,
-                              high_seqno => Seqno},
+            NewStorage = Storage#storage{config = NewConfig,
+                                         high_seqno = Seqno},
 
             %% For the first log segment it's possible for truncate to go
             %% below the low seqno. So it needs to be adjusted accordingly.
             case Seqno < LowSeqno of
                 true ->
-                    NewState#{low_seqno => Seqno + 1};
+                    NewStorage#storage{low_seqno = Seqno + 1};
                 false ->
-                    NewState
+                    NewStorage
             end;
         {snapshot, Seqno, Config} ->
-            add_snapshot(Seqno, Config, State);
+            add_snapshot(Seqno, Config, Storage);
         {install_snapshot, Seqno, Config, Meta} ->
             ets:delete_all_objects(Storage#storage.log_tab),
             ets:delete_all_objects(Storage#storage.config_index_tab),
             ets:insert(Storage#storage.config_index_tab, Config),
 
-            CurrentMeta = maps:get(meta, State),
-            NewState = State#{low_seqno => Seqno + 1,
-                              high_seqno => Seqno,
-                              config => Config,
-                              meta => maps:merge(CurrentMeta, Meta)},
-            add_snapshot(Seqno, Config, NewState)
+            #storage{meta = CurrentMeta} = Storage,
+            NewStorage = Storage#storage{low_seqno = Seqno + 1,
+                                         high_seqno = Seqno,
+                                         config = Config,
+                                         meta = maps:merge(CurrentMeta, Meta)},
+            add_snapshot(Seqno, Config, NewStorage)
     end.
 
-handle_log_meta(Meta, State) ->
-    maps:update_with(meta,
-                     fun (CurrentMeta) ->
-                             maps:merge(CurrentMeta, Meta)
-                     end, State).
+handle_log_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
+    Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
 
-handle_log_append(Meta, Entries, LogPath, Storage, State) ->
-    NewState = handle_log_meta(Meta, State),
+handle_log_append(Meta, Entries, Storage) ->
+    NewStorage = handle_log_meta(Meta, Storage),
     lists:foldl(
       fun (#log_entry{seqno = Seqno} = Entry, Acc) ->
-              #{high_seqno := PrevSeqno, config := Config} = Acc,
+              #storage{high_seqno = PrevSeqno, config = Config} = Acc,
 
               case Seqno =:= PrevSeqno + 1 of
                   true ->
                       ok;
                   false ->
-                      exit({inconsistent_log, LogPath, Entry, PrevSeqno})
+                      exit({inconsistent_log,
+                            Acc#storage.current_log_path, Entry, PrevSeqno})
               end,
 
-              ets:insert(Storage#storage.log_tab, Entry),
+              ets:insert(Acc#storage.log_tab, Entry),
               NewConfig =
                   case is_config_entry(Entry) of
                       true ->
-                          ets:insert(Storage#storage.config_index_tab, Entry),
+                          ets:insert(Acc#storage.config_index_tab, Entry),
                           Entry;
                       false ->
                           Config
                   end,
 
-              Acc#{config => NewConfig,
-                   high_seqno => Seqno}
-      end, NewState, Entries).
+              Acc#storage{config = NewConfig, high_seqno = Seqno}
+      end, NewStorage, Entries).
 
-add_snapshot(Seqno, Config, State) ->
-    maps:update_with(snapshots,
-                     fun (CurrentSnapshots) ->
-                             [{Seqno, Config} | CurrentSnapshots]
-                     end, State).
+add_snapshot(Seqno, Config, #storage{snapshots = CurrentSnapshots} = Storage) ->
+    Storage#storage{snapshots = [{Seqno, Config} | CurrentSnapshots]}.
 
 is_config_entry(#log_entry{value = Value}) ->
     case Value of
