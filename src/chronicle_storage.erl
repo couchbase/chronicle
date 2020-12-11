@@ -374,16 +374,10 @@ make_handle_log_entry_fun(LogPath, Storage) ->
 %% that log the corresponding entries. Get rid of this duplication.
 handle_log_entry(LogPath, Storage, Entry, State) ->
     case Entry of
-        {atomic, Entries} ->
-            lists:foldl(
-              fun (SubEntry, Acc) ->
-                      handle_log_entry(LogPath, Storage, SubEntry, Acc)
-              end, State, Entries);
-        {meta, KVs} ->
-            maps:update_with(meta,
-                             fun (CurrentMeta) ->
-                                     maps:merge(CurrentMeta, KVs)
-                             end, State);
+        {append, Meta, Entries} ->
+            handle_log_append(Meta, Entries, LogPath, Storage, State);
+        {meta, Meta} ->
+            handle_log_meta(Meta, State);
         {truncate, Seqno} ->
             #storage{log_tab = LogTab,
                      config_index_tab = ConfigIndexTab} = Storage,
@@ -415,30 +409,41 @@ handle_log_entry(LogPath, Storage, Entry, State) ->
                               high_seqno => Seqno,
                               config => Config,
                               meta => maps:merge(CurrentMeta, Meta)},
-            add_snapshot(Seqno, Config, NewState);
-        #log_entry{seqno = Seqno} ->
-            #{high_seqno := PrevSeqno, config := Config} = State,
-
-            case Seqno =:= PrevSeqno + 1 of
-                true ->
-                    ok;
-                false ->
-                    exit({inconsistent_log, LogPath, Entry, PrevSeqno})
-            end,
-
-            ets:insert(Storage#storage.log_tab, Entry),
-            NewConfig =
-                case is_config_entry(Entry) of
-                    true ->
-                        ets:insert(Storage#storage.config_index_tab, Entry),
-                        Entry;
-                    false ->
-                        Config
-                end,
-
-            State#{config => NewConfig,
-                   high_seqno => Seqno}
+            add_snapshot(Seqno, Config, NewState)
     end.
+
+handle_log_meta(Meta, State) ->
+    maps:update_with(meta,
+                     fun (CurrentMeta) ->
+                             maps:merge(CurrentMeta, Meta)
+                     end, State).
+
+handle_log_append(Meta, Entries, LogPath, Storage, State) ->
+    NewState = handle_log_meta(Meta, State),
+    lists:foldl(
+      fun (#log_entry{seqno = Seqno} = Entry, Acc) ->
+              #{high_seqno := PrevSeqno, config := Config} = Acc,
+
+              case Seqno =:= PrevSeqno + 1 of
+                  true ->
+                      ok;
+                  false ->
+                      exit({inconsistent_log, LogPath, Entry, PrevSeqno})
+              end,
+
+              ets:insert(Storage#storage.log_tab, Entry),
+              NewConfig =
+                  case is_config_entry(Entry) of
+                      true ->
+                          ets:insert(Storage#storage.config_index_tab, Entry),
+                          Entry;
+                      false ->
+                          Config
+                  end,
+
+              Acc#{config => NewConfig,
+                   high_seqno => Seqno}
+      end, NewState, Entries).
 
 add_snapshot(Seqno, Config, State) ->
     maps:update_with(snapshots,
@@ -520,23 +525,22 @@ truncate(Seqno, #storage{meta = Meta,
 append(StartSeqno, EndSeqno, Entries, Opts,
        #storage{high_seqno = HighSeqno} = Storage) ->
     true = (StartSeqno =:= HighSeqno + 1),
-    {DiskEntries, NewStorage0} = append_handle_meta(Storage, Entries, Opts),
-    NewStorage1 = log_append(DiskEntries, NewStorage0),
+    {Meta, NewStorage0} = append_handle_meta(Storage, Opts),
+    NewStorage1 = log_append([{append, Meta, Entries}], NewStorage0),
     NewStorage2 = mem_log_append(EndSeqno, Entries, NewStorage1),
     maybe_rollover(config_index_append(Entries, NewStorage2)).
 
-append_handle_meta(Storage, Entries, Opts) ->
+append_handle_meta(Storage, Opts) ->
     case maps:find(meta, Opts) of
         {ok, Meta} ->
             case store_meta_prepare(Meta, Storage) of
                 {ok, DedupedMeta, NewStorage} ->
-                    NewEntries = [{atomic, [{meta, DedupedMeta} | Entries]}],
-                    {NewEntries, NewStorage};
+                    {DedupedMeta, NewStorage};
                 not_needed ->
-                    {Entries, Storage}
+                    {#{}, Storage}
             end;
         error ->
-            {Entries, Storage}
+            {#{}, Storage}
     end.
 
 sync(#storage{current_log = Log}) ->
