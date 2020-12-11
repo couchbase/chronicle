@@ -1210,18 +1210,15 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
       committed_seqno := NewCommittedSeqno,
       truncate := Truncate} = Info,
 
-    PreMetadata =
+    Metadata =
         #{?META_HISTORY_ID => HistoryId,
           ?META_TERM => Term,
           ?META_TERM_VOTED => Term,
-          ?META_PENDING_BRANCH => undefined},
-    PostMetadata = #{?META_COMMITTED_SEQNO => NewCommittedSeqno},
+          ?META_PENDING_BRANCH => undefined,
+          ?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
-    %% When resolving a branch, we must never delete the branch record without
-    %% also logging a new config. Therefore the update needs to be atomic.
-    Atomic = (get_meta(?META_PENDING_BRANCH, Data) =/= undefined),
-    NewData0 = append_entries(StartSeqno, EndSeqno, Entries, PreMetadata,
-                              PostMetadata, Truncate, Atomic, Data),
+    NewData0 = append_entries(StartSeqno, EndSeqno,
+                              Entries, Metadata, Truncate, Data),
 
     ?DEBUG("Appended entries.~n"
            "History id: ~p~n"
@@ -1994,41 +1991,12 @@ store_meta(Meta, #data{storage = Storage} = Data) ->
     chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 
-append_entries(StartSeqno, EndSeqno, Entries,
-               PreMetadata, PostMetadata, Truncate, Atomic,
+append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
                #data{storage = Storage} = Data) ->
-    NewStorage0 =
-        case Truncate of
-            true ->
-                %% It's important to truncate diverged entries before logging
-                %% metadata. We only truncate on the first append in a new
-                %% term. So the metadata will include the new term_voted
-                %% value. But if truncate happens after this metadata gets
-                %% logged, if the process crashes, upon recovery we might end
-                %% up with an untruncated log and the new term_voted. Which
-                %% would be in violation of the following invariant: all nodes
-                %% with the same term_voted agree on the longest common prefix
-                %% of their histories.
-                chronicle_storage:truncate(StartSeqno - 1, Storage);
-            false ->
-                Storage
-        end,
-
-    NewStorage  =
-        %% TODO: simply make everything atomic?
-        case Atomic of
-            true ->
-                Metadata = maps:merge(PreMetadata, PostMetadata),
-                chronicle_storage:append(StartSeqno, EndSeqno,
-                                         Entries,
-                                         #{meta => Metadata}, NewStorage0);
-            false ->
-                S0 = chronicle_storage:store_meta(PreMetadata, NewStorage0),
-                S1 = chronicle_storage:append(StartSeqno, EndSeqno,
-                                              Entries, #{}, S0),
-                chronicle_storage:store_meta(PostMetadata, S1)
-        end,
-
+    NewStorage = chronicle_storage:append(StartSeqno, EndSeqno,
+                                          Entries,
+                                          #{meta => Metadata,
+                                            truncate => Truncate}, Storage),
     chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 

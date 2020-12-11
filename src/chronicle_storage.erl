@@ -360,8 +360,9 @@ handle_user_data(UserData, Storage) ->
 %% that log the corresponding entries. Get rid of this duplication.
 handle_log_entry(Entry, Storage) ->
     case Entry of
-        {append, StartSeqno, EndSeqno, Meta, Entries} ->
-            handle_log_append(StartSeqno, EndSeqno, Meta, Entries, Storage);
+        {append, StartSeqno, EndSeqno, Meta, Truncate, Entries} ->
+            handle_log_append(StartSeqno, EndSeqno,
+                              Meta, Truncate, Entries, Storage);
         {meta, Meta} ->
             add_meta(Meta, Storage);
         {truncate, Seqno} ->
@@ -394,18 +395,38 @@ handle_log_entry(Entry, Storage) ->
             add_snapshot(Seqno, Config, NewStorage)
     end.
 
-handle_log_append(StartSeqno, EndSeqno, Meta, Entries,
-                  #storage{high_seqno = HighSeqno} = Storage) ->
-    case StartSeqno =:= HighSeqno + 1 of
-        true ->
-            ok;
-        false ->
-            exit({inconsistent_log,
-                  Storage#storage.current_log_path,
-                  {append, StartSeqno, EndSeqno, HighSeqno}})
-    end,
+handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
+                  #storage{low_seqno = LowSeqno,
+                           high_seqno = HighSeqno} = Storage) ->
+    NewStorage =
+        case Truncate of
+            true ->
+                %% Need to do this explicitly, since currently do_append()
+                %% doesn't truncate until publish() is called.
+                mem_log_delete_range(StartSeqno, HighSeqno, Storage),
 
-    do_append(EndSeqno, Meta, Entries, Storage).
+                %% For the first log segment it's possible for truncate to go
+                %% below the low seqno. So it needs to be adjusted accordingly.
+                case StartSeqno < LowSeqno of
+                    true ->
+                        Storage#storage{low_seqno = StartSeqno};
+                    false ->
+                        Storage
+                end;
+            false ->
+                case StartSeqno =:= HighSeqno + 1 of
+                    true ->
+                        ok;
+                    false ->
+                        exit({inconsistent_log,
+                              Storage#storage.current_log_path,
+                              {append, StartSeqno, EndSeqno, HighSeqno}})
+                end,
+
+                Storage
+        end,
+
+    do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, NewStorage).
 
 add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
     Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
@@ -467,31 +488,27 @@ dedup_meta(Updates, #storage{meta = Meta}) ->
               end
       end, Updates).
 
-truncate(Seqno, #storage{meta = Meta,
-                         low_seqno = LowSeqno,
-                         high_seqno = HighSeqno} = Storage) ->
-    CommittedSeqno = get_committed_seqno(Meta),
-
-    true = (Seqno >= CommittedSeqno),
-    true = (Seqno =< HighSeqno),
-    true = (Seqno + 1 >= LowSeqno),
-
-    NewStorage0 = log_append([{truncate, Seqno}], Storage),
-    NewStorage1 = config_index_truncate(Seqno, NewStorage0),
-    maybe_rollover(NewStorage1#storage{high_seqno = Seqno}).
-
-append(StartSeqno, EndSeqno, Entries, Opts,
-       #storage{high_seqno = HighSeqno} = Storage) ->
-    true = (StartSeqno =:= HighSeqno + 1),
+append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
+    Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
     Meta = append_handle_meta(Opts, Storage),
-    LogEntry = {append, StartSeqno, EndSeqno, Meta, Entries},
-    NewStorage = log_append([LogEntry], Storage),
-    maybe_rollover(do_append(EndSeqno, Meta, Entries, NewStorage)).
+    LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
+    NewStorage0 = log_append([LogEntry], Storage),
+    NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
+                            Truncate, Entries, NewStorage0),
+    maybe_rollover(NewStorage1).
 
-do_append(EndSeqno, Meta, Entries, Storage) ->
-    NewStorage0 = mem_log_append(EndSeqno, Entries, Storage),
-    NewStorage1 = config_index_append(Entries, NewStorage0),
-    add_meta(Meta, NewStorage1).
+do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
+    NewStorage0 =
+        case Truncate of
+            true ->
+                config_index_truncate(StartSeqno - 1, Storage);
+            false ->
+                Storage
+        end,
+
+    NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
+    NewStorage2 = config_index_append(Entries, NewStorage1),
+    add_meta(Meta, NewStorage2).
 
 append_handle_meta(Opts, Storage) ->
     case maps:find(meta, Opts) of
@@ -500,6 +517,24 @@ append_handle_meta(Opts, Storage) ->
         error ->
             #{}
     end.
+
+append_handle_truncate(StartSeqno, Opts,
+                       #storage{meta = Meta,
+                                low_seqno = LowSeqno,
+                                high_seqno = HighSeqno}) ->
+    Truncate = maps:get(truncate, Opts, false),
+    case Truncate of
+        true ->
+            CommittedSeqno = get_committed_seqno(Meta),
+
+            true = (StartSeqno > CommittedSeqno),
+            true = (StartSeqno =< HighSeqno + 1),
+            true = (StartSeqno >= LowSeqno);
+        false ->
+            true = (StartSeqno =:= HighSeqno + 1)
+    end,
+
+    Truncate.
 
 sync(#storage{current_log = Log}) ->
     case chronicle_log:sync(Log) of
