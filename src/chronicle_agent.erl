@@ -572,6 +572,7 @@ build_metadata(Data) ->
               history_id = HistoryId,
               term = Term,
               term_voted = TermVoted,
+              high_term = get_high_term(Data),
               high_seqno = get_high_seqno(Data),
               committed_seqno = CommittedSeqno,
               config = get_config(Data),
@@ -2045,6 +2046,9 @@ get_meta(Key, Data) ->
 
 get_high_seqno(#data{storage = Storage}) ->
     chronicle_storage:get_high_seqno(Storage).
+
+get_high_term(#data{storage = Storage}) ->
+    chronicle_storage:get_high_term(Storage).
 
 get_config(#data{storage = Storage}) ->
     chronicle_storage:get_config(Storage).

@@ -60,6 +60,7 @@
                     history_id,
                     term,
                     term_voted,
+                    high_term,
                     high_seqno,
                     committed_seqno,
                     config,

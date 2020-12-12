@@ -455,6 +455,25 @@ get_committed_seqno(#{?META_COMMITTED_SEQNO := CommittedSeqno}) ->
 get_high_seqno(Storage) ->
     Storage#storage.high_seqno.
 
+get_high_term(#storage{high_seqno = HighSeqno} = Storage) ->
+    get_term_for_seqno(HighSeqno, Storage).
+
+get_term_for_seqno(Seqno, _Storage)
+  when Seqno =:= ?NO_SEQNO ->
+    ?NO_TERM;
+get_term_for_seqno(Seqno, #storage{snapshots = Snapshots} = Storage) ->
+    case get_log_entry(Seqno, Storage) of
+        {ok, #log_entry{term = Term}} ->
+            Term;
+        {error, not_found} ->
+            case lists:keyfind(Seqno, 1, Snapshots) of
+                {_, Term, _} ->
+                    Term;
+                false ->
+                    exit({no_term_for_seqno, Seqno})
+            end
+    end.
+
 get_config(Storage) ->
     Storage#storage.config.
 
