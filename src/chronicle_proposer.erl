@@ -1212,7 +1212,6 @@ handle_cas_config(ReplyTo, NewConfig, CasRevision,
     #config{} = Config,
     case CasRevision =:= ConfigRevision of
         true ->
-            %% TODO: need to backfill new nodes
             FinalConfig =
                 case config_needs_transition(NewConfig, Config) of
                     true ->
@@ -1646,7 +1645,6 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
             ok
     end.
 
-%% TODO: think about how to backfill peers properly
 get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     LocalCommittedSeqno = get_local_committed_seqno(Data),
     case Seqno < LocalCommittedSeqno of
