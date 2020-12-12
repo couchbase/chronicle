@@ -456,22 +456,30 @@ get_high_seqno(Storage) ->
     Storage#storage.high_seqno.
 
 get_high_term(#storage{high_seqno = HighSeqno} = Storage) ->
-    get_term_for_seqno(HighSeqno, Storage).
+    {ok, Term} = get_term_for_seqno(HighSeqno, Storage),
+    Term.
 
-get_term_for_seqno(Seqno, _Storage)
-  when Seqno =:= ?NO_SEQNO ->
-    ?NO_TERM;
-get_term_for_seqno(Seqno, #storage{snapshots = Snapshots} = Storage) ->
-    case get_log_entry(Seqno, Storage) of
-        {ok, #log_entry{term = Term}} ->
-            Term;
-        {error, not_found} ->
-            case lists:keyfind(Seqno, 1, Snapshots) of
-                {_, Term, _} ->
-                    Term;
-                false ->
-                    exit({no_term_for_seqno, Seqno})
-            end
+get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
+                                   low_seqno = LowSeqno,
+                                   snapshots = Snapshots} = Storage) ->
+    case Seqno =< HighSeqno of
+        true ->
+            if
+                Seqno >= LowSeqno ->
+                    {ok, Entry} = get_log_entry(Seqno, Storage),
+                    {ok, Entry#log_entry.term};
+                Seqno =:= ?NO_SEQNO ->
+                    {ok, ?NO_TERM};
+                true ->
+                    case lists:keyfind(Seqno, 1, Snapshots) of
+                        {_, Term, _} ->
+                            {ok, Term};
+                        false ->
+                            {error, compacted}
+                    end
+            end;
+        false ->
+            exit({invalid_seqno, Seqno, LowSeqno, HighSeqno})
     end.
 
 get_config(Storage) ->
