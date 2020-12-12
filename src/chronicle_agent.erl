@@ -212,6 +212,24 @@ get_log_for_rsm(Name, StartSeqno, EndSeqno) ->
 get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
     call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).
 
+get_term_for_seqno(Seqno) ->
+    case get_log_committed(Seqno, Seqno) of
+        {ok, [#log_entry{term = Term}]} ->
+            {ok, Term};
+        {error, compacted} ->
+            %% We might still have a snapshot at the given seqno.
+            case call(?SERVER, {get_term_for_seqno, Seqno}) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, compacted} = Error ->
+                    Error;
+                {error, Error} ->
+                    exit(Error)
+            end;
+        {error, Error} ->
+            exit(Error)
+    end.
+
 -spec get_history_id(#metadata{}) -> chronicle:history_id().
 get_history_id(#metadata{history_id = CommittedHistoryId,
                          pending_branch = undefined}) ->
@@ -342,14 +360,17 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
              chronicle:history_id(),
              chronicle:leader_term(),
              chronicle:seqno(),
+             chronicle:leader_term(),
              chronicle:seqno(),
              [#log_entry{}],
              chronicle_utils:send_options()) ->
           maybe_replies(Opaque, append_result()).
 append(Peer, Opaque, HistoryId, Term,
-       CommittedSeqno, AtSeqno, Entries, Options) ->
+       CommittedSeqno,
+       AtTerm, AtSeqno, Entries, Options) ->
     call_async(?SERVER(Peer), Opaque,
-               {append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
+               {append, HistoryId, Term,
+                CommittedSeqno, AtTerm, AtSeqno, Entries},
                Options).
 
 -type install_snapshot_result() :: ok | {error, install_snapshot_error()}.
@@ -480,6 +501,8 @@ handle_call(get_log, From, _State, _Data) ->
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
             From, State, Data) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data);
+handle_call({get_term_for_seqno, Seqno}, From, State, Data) ->
+    handle_get_term_for_seqno(Seqno, From, State, Data);
 handle_call({register_rsm, Name, Pid}, From, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
 handle_call({get_latest_snapshot, Pid}, From, State, Data) ->
@@ -504,10 +527,10 @@ handle_call({establish_term, HistoryId, Term, Position}, From, State, Data) ->
     handle_establish_term(HistoryId, Term, Position, From, State, Data);
 handle_call({ensure_term, HistoryId, Term}, From, State, Data) ->
     handle_ensure_term(HistoryId, Term, From, State, Data);
-handle_call({append, HistoryId, Term, CommittedSeqno, AtSeqno, Entries},
+handle_call({append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
             From, State, Data) ->
-    handle_append(HistoryId, Term,
-                  CommittedSeqno, AtSeqno, Entries, From, State, Data);
+    handle_append(HistoryId, Term, CommittedSeqno,
+                  AtTerm, AtSeqno, Entries, From, State, Data);
 handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
             From, State, Data) ->
     handle_local_mark_committed(HistoryId, Term,
@@ -618,6 +641,19 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State, Data) ->
            check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            check_log_range(StartSeqno, EndSeqno, Data)).
+
+handle_get_term_for_seqno(Seqno, From, _State,
+                          #data{storage = Storage} = Data) ->
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+    Reply =
+        case Seqno =< CommittedSeqno of
+            true ->
+                chronicle_storage:get_term_for_seqno(Seqno, Storage);
+            false ->
+                {error, {uncommitted, Seqno, CommittedSeqno}}
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_register_rsm(Name, Pid, From, State,
                     #data{rsms_by_name = RSMs,
@@ -1187,12 +1223,12 @@ handle_ensure_term(HistoryId, Term, From, State, Data) ->
     {keep_state_and_data, {reply, From, Reply}}.
 
 handle_append(HistoryId, Term,
-              CommittedSeqno, AtSeqno, Entries, From, State, Data) ->
+              CommittedSeqno, AtTerm, AtSeqno, Entries, From, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
     case check_append(HistoryId, Term,
-                      CommittedSeqno, AtSeqno, Entries, State, Data) of
+                      CommittedSeqno, AtTerm, AtSeqno, Entries, State, Data) of
         {ok, Info} ->
             complete_append(HistoryId, Term, Info, From, State, Data);
         {error, _} = Error ->
@@ -1259,12 +1295,13 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
      NewState, maybe_initiate_snapshot(NewState, NewData),
      {reply, From, ok}}.
 
-check_append(HistoryId, Term, CommittedSeqno, AtSeqno, Entries, State, Data) ->
+check_append(HistoryId, Term, CommittedSeqno,
+             AtTerm, AtSeqno, Entries, State, Data) ->
     ?CHECK(check_prepared(State),
            check_append_history_id(HistoryId, Entries, Data),
            check_not_earlier_term(Term, Data),
            check_append_obsessive(Term, CommittedSeqno,
-                                  AtSeqno, Entries, Data)).
+                                  AtTerm, AtSeqno, Entries, Data)).
 
 check_append_history_id(HistoryId, Entries, Data) ->
     case check_history_id(HistoryId, Data) of
@@ -1303,7 +1340,7 @@ check_append_history_id(HistoryId, Entries, Data) ->
             Error
     end.
 
-check_append_obsessive(Term, CommittedSeqno, AtSeqno, Entries, Data) ->
+check_append_obsessive(Term, CommittedSeqno, _AtTerm, AtSeqno, Entries, Data) ->
     case get_entries_seqnos(AtSeqno, Entries) of
         {ok, StartSeqno, EndSeqno} ->
             #{?META_TERM_VOTED := OurTermVoted,

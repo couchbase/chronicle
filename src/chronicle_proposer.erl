@@ -1594,7 +1594,7 @@ send_append(Peers, PeerSeqnos,
       fun (Peer, Opaque) ->
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
-                  {ok, Entries} ->
+                  {ok, AtTerm, Entries} ->
                       ?DEBUG("Sending append request to peer ~p.~n"
                              "History Id: ~p~n"
                              "Term: ~p~n"
@@ -1606,7 +1606,7 @@ send_append(Peers, PeerSeqnos,
 
                       case chronicle_agent:append(Peer, Opaque, HistoryId,
                                                   Term, CommittedSeqno,
-                                                  PeerSeqno, Entries,
+                                                  AtTerm, PeerSeqno, Entries,
                                                   [nosuspend]) of
                           ok ->
                               set_peer_sent_seqnos(Peer, HighSeqno,
@@ -1645,7 +1645,20 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
             ok
     end.
 
-get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
+get_entries(Seqno, Data) ->
+    case get_term_for_seqno(Seqno, Data) of
+        {ok, Term} ->
+            case do_get_entries(Seqno, Data) of
+                {ok, Entries} ->
+                    {ok, Term, Entries};
+                need_catchup ->
+                    need_catchup
+            end;
+        {error, compacted} ->
+            need_catchup
+    end.
+
+do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     LocalCommittedSeqno = get_local_committed_seqno(Data),
     case Seqno < LocalCommittedSeqno of
         true ->
@@ -1665,6 +1678,35 @@ get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
                         end, PendingEntries),
             {ok, queue:to_list(Entries)}
     end.
+
+get_term_for_seqno(Seqno, #data{term = Term,
+                                safe_commit_seqno = SafeCommitSeqno} = Data) ->
+    case Seqno >= SafeCommitSeqno of
+        true ->
+            %% Should be the most common case when we are replicating entries
+            %% from current term.
+            {ok, Term};
+        false ->
+            LocalCommittedSeqno = get_local_committed_seqno(Data),
+            case Seqno =< LocalCommittedSeqno of
+                true ->
+                    chronicle_agent:get_term_for_seqno(Seqno);
+                false ->
+                    get_term_for_seqno_pending(Seqno, Data)
+            end
+    end.
+
+get_term_for_seqno_pending(Seqno, #data{pending_entries = PendingEntries}) ->
+    Tail = chronicle_utils:queue_dropwhile(
+             fun (Entry) ->
+                     Entry#log_entry.seqno < Seqno
+             end, PendingEntries),
+
+    %% We must always find an entry.
+    {value, Entry} = queue:peek(Tail),
+    true = (Entry#log_entry.seqno =:= Seqno),
+
+    {ok, Entry#log_entry.term}.
 
 get_local_committed_seqno(Data) ->
     {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),

@@ -479,7 +479,7 @@ get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
                     end
             end;
         false ->
-            exit({invalid_seqno, Seqno, LowSeqno, HighSeqno})
+            {error, {invalid_seqno, Seqno, LowSeqno, HighSeqno}}
     end.
 
 get_config(Storage) ->
