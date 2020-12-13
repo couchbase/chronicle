@@ -1262,8 +1262,14 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
           ?META_PENDING_BRANCH => undefined,
           ?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
-    NewData0 = append_entries(StartSeqno, EndSeqno,
-                              Entries, Metadata, Truncate, Data),
+    NewData0 =
+        case Entries =/= [] orelse Truncate of
+            true ->
+                append_entries(StartSeqno, EndSeqno,
+                               Entries, Metadata, Truncate, Data);
+            false ->
+                store_meta(Metadata, Data)
+        end,
 
     ?DEBUG("Appended entries.~n"
            "History id: ~p~n"
@@ -1340,149 +1346,154 @@ check_append_history_id(HistoryId, Entries, Data) ->
             Error
     end.
 
-check_append_obsessive(Term, CommittedSeqno, _AtTerm, AtSeqno, Entries, Data) ->
-    case get_entries_seqnos(AtSeqno, Entries) of
-        {ok, StartSeqno, EndSeqno} ->
-            #{?META_TERM_VOTED := OurTermVoted,
-              ?META_COMMITTED_SEQNO := OurCommittedSeqno} = get_meta(Data),
-            OurHighSeqno = get_high_seqno(Data),
-
-            {SafeHighSeqno, NewTerm} =
-                case Term =:= OurTermVoted of
-                    true ->
-                        {OurHighSeqno, false};
-                    false ->
-                        %% Last we received any entries was in a different
-                        %% term. So any uncommitted entries might actually be
-                        %% from alternative histories and they need to be
-                        %% truncated.
-                        {OurCommittedSeqno, true}
-                end,
-
-            case StartSeqno > SafeHighSeqno + 1 of
-                true ->
-                    %% TODO: add more information here?
-
-                    %% There's a gap between what entries we've got and what
-                    %% we were given. So the leader needs to send us more.
-                    {error, {missing_entries, build_metadata(Data)}};
-                false ->
-                    case EndSeqno < SafeHighSeqno of
-                        true ->
-                            %% Currently, this should never happen, because
-                            %% proposer always sends all history it has. But
-                            %% conceptually it doesn't have to be this way. If
-                            %% proposer starts chunking appends into
-                            %% sub-appends in the future, in combination with
-                            %% message loss, this case will be normal. But
-                            %% consider this a protocol error for now.
-                            {error,
-                             {protocol_error,
-                              {stale_proposer, EndSeqno, SafeHighSeqno}}};
-                        false ->
+check_append_obsessive(Term, CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
+    OurHighSeqno = get_high_seqno(Data),
+    case AtSeqno > OurHighSeqno of
+        true ->
+            {error, {missing_entries, build_metadata(Data)}};
+        false ->
+            OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            case check_at_seqno(AtTerm, AtSeqno, OurCommittedSeqno, Data) of
+                ok ->
+                    case preprocess_entries(AtSeqno, Entries,
+                                            OurCommittedSeqno, OurHighSeqno,
+                                            Data) of
+                        {ok, StartSeqno, EndSeqno, Truncate, FinalEntries} ->
                             case check_committed_seqno(Term, CommittedSeqno,
                                                        EndSeqno, Data) of
                                 {ok, FinalCommittedSeqno} ->
-                                    case drop_known_entries(
-                                           Entries, EndSeqno,
-                                           SafeHighSeqno, OurHighSeqno,
-                                           NewTerm, Data) of
-                                        {ok,
-                                         FinalStartSeqno,
-                                         Truncate,
-                                         FinalEntries} ->
+                                    {ok,
+                                     #{entries => FinalEntries,
+                                       start_seqno => StartSeqno,
+                                       end_seqno => EndSeqno,
+                                       committed_seqno => FinalCommittedSeqno,
+                                       truncate => Truncate}};
+                                {error, _} = Error ->
+                                    Error
+                            end;
+                        {error, _} = Error ->
+                            Error
+                    end;
+                {error, _} = Error ->
+                    Error
+            end
+    end.
+
+check_at_seqno(AtTerm, AtSeqno, CommittedSeqno,
+               #data{storage = Storage} = Data) ->
+    case chronicle_storage:get_term_for_seqno(AtSeqno, Storage) of
+        {ok, Term}
+          when Term =:= AtTerm ->
+            ok;
+        {ok, Term} ->
+            case AtSeqno > CommittedSeqno of
+                true ->
+                    {error, {missing_entries, build_metadata(Data)}};
+                false ->
+                    %% We got a term mismatch on a committed entry. This must
+                    %% not happen.
+                    ?ERROR("Term mismatch at seqno ~p when "
+                           "the entry is committed.~n"
+                           "Our term: ~p~n"
+                           "Leader term: ~p",
+                           [AtSeqno, Term, AtTerm]),
+
+                    {error,
+                     {protocol_error,
+                      {at_seqno_mismatch,
+                       AtTerm, AtSeqno, CommittedSeqno, Term}}}
+            end;
+        {error, compacted} ->
+            true = (AtSeqno =< CommittedSeqno),
+
+            %% Since AtSeqno is committed, consider the terms match.
+            ok
+    end.
+
+preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
+    case preprocess_entries_loop(AtSeqno, Entries,
+                                 CommittedSeqno, HighSeqno, Data) of
+        {ok, _, _, _, _} = Ok ->
+            Ok;
+        {error, {malformed, Entry}} ->
+            %% TODO: remove logging of the entries
+            ?ERROR("Received an ill-formed append request.~n"
+                   "At seqno: ~p"
+                   "Stumbled upon this entry: ~p~n"
+                   "All entries:~n~p",
+                   [AtSeqno, Entry, Entries]),
+            {error, {protocol_error,
+                     {malformed_append, Entry, AtSeqno, Entries}}};
+        {error, _} = Error ->
+            Error
+    end.
+
+preprocess_entries_loop(PrevSeqno, [], _CommittedSeqno, _HighSeqno, _Data) ->
+    {ok, PrevSeqno + 1, PrevSeqno, false, []};
+preprocess_entries_loop(PrevSeqno,
+                        [Entry | RestEntries] = Entries,
+                        CommittedSeqno, HighSeqno, Data) ->
+    EntrySeqno = Entry#log_entry.seqno,
+    case PrevSeqno + 1 =:= EntrySeqno of
+        true ->
+            case EntrySeqno > HighSeqno of
+                true ->
+                    case get_entries_seqnos(PrevSeqno, Entries) of
+                        {ok, StartSeqno, EndSeqno} ->
+                            {ok, StartSeqno, EndSeqno, false, Entries};
+                        {error, _} = Error ->
+                            Error
+                    end;
+                false ->
+                    case get_log_entry(EntrySeqno, Data) of
+                        %% TODO: it should be enough to compare histories and
+                        %% terms here. But for now let's compare complete
+                        %% entries to be doubly confident.
+                        {ok, OurEntry}
+                          when Entry =:= OurEntry ->
+                            preprocess_entries_loop(EntrySeqno, RestEntries,
+                                                    CommittedSeqno, HighSeqno,
+                                                    Data);
+                        {ok, OurEntry} ->
+                            case EntrySeqno > CommittedSeqno of
+                                true ->
+                                    case get_entries_seqnos(PrevSeqno,
+                                                            Entries) of
+                                        {ok, StartSeqno, EndSeqno} ->
                                             {ok,
-                                             #{entries => FinalEntries,
-                                               start_seqno => FinalStartSeqno,
-                                               end_seqno => EndSeqno,
-                                               committed_seqno =>
-                                                   FinalCommittedSeqno,
-                                               truncate => Truncate}};
+                                             StartSeqno, EndSeqno,
+                                             true, Entries};
                                         {error, _} = Error ->
                                             Error
                                     end;
-                                {error, _} = Error ->
-                                    Error
-                            end
+                                false ->
+                                    %% TODO: don't log entries
+                                    ?ERROR("Unexpected mismatch in entries "
+                                           "sent by the proposer.~n"
+                                           "Seqno: ~p~n"
+                                           "Committed seqno: ~p~n"
+                                           "Our entry:~n~p~n"
+                                           "Received entry:~n~p",
+                                           [EntrySeqno, CommittedSeqno,
+                                            OurEntry, Entry]),
+                                    {error,
+                                     {protocol_error,
+                                      {mismatched_entry,
+                                       EntrySeqno, CommittedSeqno,
+                                       OurEntry, Entry}}}
+                            end;
+                        {error, not_found} ->
+                            %% The entry must have been compacted.
+                            true = (EntrySeqno =< CommittedSeqno),
+
+                            %% Assume the entries matched
+                            preprocess_entries_loop(EntrySeqno, RestEntries,
+                                                    CommittedSeqno, HighSeqno,
+                                                    Data)
                     end
             end;
-        {error, {malformed, Entry}} ->
-            %% TODO: remove logging of the entries
-            ?ERROR("Received an ill-formed append request in term ~p.~n"
-                   "Stumbled upon this entry: ~p~n"
-                   "All entries:~n~p",
-                   [Term, Entry, Entries]),
-            {error, {protocol_error,
-                     {malformed_append, Entry, AtSeqno, Entries}}}
-
-    end.
-
-drop_known_entries(Entries, EntriesEndSeqno,
-                   SafeHighSeqno, HighSeqno, NewTerm, Data) ->
-    {SafeEntries, UnsafeEntries} = split_entries(SafeHighSeqno, Entries),
-
-    %% All safe entries must match.
-    case check_entries_match(SafeEntries, Data) of
-        ok ->
-            {PreHighSeqnoEntries, PostHighSeqnoEntries} =
-                split_entries(HighSeqno, UnsafeEntries),
-
-            case check_entries_match(PreHighSeqnoEntries, Data) of
-                ok ->
-                    case EntriesEndSeqno < HighSeqno of
-                        true ->
-                            %% The entries sent by the leader match our
-                            %% entries, but our history is longer. This may
-                            %% only happen in a new term. The tail of the log
-                            %% needs to be truncated.
-
-                            true = NewTerm,
-                            [] = PostHighSeqnoEntries,
-
-                            ?DEBUG("Going to drop log tail past ~p",
-                                   [EntriesEndSeqno]),
-
-                            {ok, EntriesEndSeqno + 1, true, []};
-                        false ->
-                            {ok, HighSeqno + 1, false, PostHighSeqnoEntries}
-                    end;
-                {mismatch, MismatchSeqno, _OurEntry, Remaining} ->
-                    true = NewTerm,
-
-                    ?DEBUG("Mismatch at seqno ~p. "
-                           "Going to drop the log tail.", [MismatchSeqno]),
-                    {ok, MismatchSeqno, true, Remaining ++ PostHighSeqnoEntries}
-            end;
-        {mismatch, Seqno, OurEntry, Remaining} ->
-            %% TODO: don't log entries
-            ?ERROR("Unexpected mismatch in entries sent by the proposer.~n"
-                   "Seqno: ~p~n"
-                   "Our entry:~n~p~n"
-                   "Remaining entries:~n~p",
-                   [Seqno, OurEntry, Remaining]),
-            {error, {protocol_error,
-                     {mismatched_entry, Remaining, OurEntry}}}
-    end.
-
-split_entries(Seqno, Entries) ->
-    lists:splitwith(
-      fun (#log_entry{seqno = EntrySeqno}) ->
-              EntrySeqno =< Seqno
-      end, Entries).
-
-check_entries_match([], _Data) ->
-    ok;
-check_entries_match([Entry | Rest] = Entries, Data) ->
-    EntrySeqno = Entry#log_entry.seqno,
-    {ok, OurEntry} = get_log_entry(EntrySeqno, Data),
-
-    %% TODO: it should be enough to compare histories and terms here. But for
-    %% now let's compare complete entries to be doubly confident.
-    case Entry =:= OurEntry of
-        true ->
-            check_entries_match(Rest, Data);
         false ->
-            {mismatch, EntrySeqno, OurEntry, Entries}
+            {error, {malformed, Entry}}
     end.
 
 get_entries_seqnos(AtSeqno, Entries) ->
