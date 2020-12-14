@@ -87,7 +87,6 @@
 -record(peer_status, {
                       %% The following fields are only valid when peer's state
                       %% is active.
-                      needs_sync,
                       acked_seqno,
                       acked_commit_seqno,
                       sent_seqno,
@@ -989,13 +988,11 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
     lists:filtermap(
       fun (Peer) ->
               case get_peer_status(Peer, Data) of
-                  {ok, #peer_status{needs_sync = NeedsSync,
-                                    sent_seqno = PeerSentSeqno,
+                  {ok, #peer_status{sent_seqno = PeerSentSeqno,
                                     sent_commit_seqno = PeerSentCommitSeqno,
                                     state = active}} ->
                       DoSync =
-                          NeedsSync
-                          orelse HighSeqno > PeerSentSeqno
+                          HighSeqno > PeerSentSeqno
                           orelse CommitSeqno > PeerSentCommitSeqno,
 
                       case DoSync of
@@ -1377,20 +1374,13 @@ do_set_peer_active(Peer, PeerStatus, Metadata, #data{term = OurTerm} = Data) ->
               committed_seqno = PeerCommittedSeqno,
               high_seqno = PeerHighSeqno} = Metadata,
 
-    {CommittedSeqno, HighSeqno, NeedsSync} =
+    {CommittedSeqno, HighSeqno} =
         case PeerTermVoted =:= OurTerm of
             true ->
                 %% We've lost communication with the peer. But it's already
                 %% voted in our current term, so our histories are compatible.
-                {PeerCommittedSeqno, PeerHighSeqno, false};
+                {PeerCommittedSeqno, PeerHighSeqno};
             false ->
-                %% Peer has some uncommitted entries that need to be
-                %% truncated. Normally, that'll just happen in the course of
-                %% normal replication, but if there are no mutations to
-                %% replicate, we need to force replicate to the node.
-                DoSync = PeerHighSeqno > PeerCommittedSeqno,
-
-
                 %% The peer hasn't voted in our term yet, so it may have
                 %% divergent entries in the log that need to be truncated.
                 %%
@@ -1405,11 +1395,10 @@ do_set_peer_active(Peer, PeerStatus, Metadata, #data{term = OurTerm} = Data) ->
                 %% local agent. This all can be addressed by including more
                 %% information into establish_term() response and append()
                 %% call. But I'll leave for later.
-                {PeerCommittedSeqno, PeerCommittedSeqno, DoSync}
+                {PeerCommittedSeqno, PeerCommittedSeqno}
         end,
 
-    NewPeerStatus = PeerStatus#peer_status{needs_sync = NeedsSync,
-                                           acked_seqno = HighSeqno,
+    NewPeerStatus = PeerStatus#peer_status{acked_seqno = HighSeqno,
                                            sent_seqno = HighSeqno,
                                            acked_commit_seqno = CommittedSeqno,
                                            sent_commit_seqno = CommittedSeqno,
@@ -1425,11 +1414,7 @@ set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
               true = (HighSeqno >= AckedSeqno),
               true = (HighSeqno >= CommittedSeqno),
 
-              %% Note, that we update needs_sync without waiting for the
-              %% response. If there's an error, we'll reinitialize peer's
-              %% status and decide again if it needs explicit syncing.
-              PeerStatus#peer_status{needs_sync = false,
-                                     sent_seqno = HighSeqno,
+              PeerStatus#peer_status{sent_seqno = HighSeqno,
                                      sent_commit_seqno = CommittedSeqno}
       end, Data).
 
@@ -1464,8 +1449,7 @@ set_peer_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
     true = (TermVoted =:= OurTerm),
     true = (CommittedSeqno =:= HighSeqno),
 
-    NewPeerStatus = PeerStatus#peer_status{needs_sync = false,
-                                           acked_seqno = CommittedSeqno,
+    NewPeerStatus = PeerStatus#peer_status{acked_seqno = CommittedSeqno,
                                            sent_seqno = CommittedSeqno,
                                            acked_commit_seqno = CommittedSeqno,
                                            sent_commit_seqno = CommittedSeqno,
