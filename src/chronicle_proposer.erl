@@ -1374,40 +1374,47 @@ set_peer_active(Peer, Metadata, Data) ->
     status_requested = PeerStatus#peer_status.state,
     do_set_peer_active(Peer, PeerStatus, Metadata, Data).
 
-do_set_peer_active(Peer, PeerStatus, Metadata, #data{term = OurTerm} = Data) ->
-    #metadata{term_voted = PeerTermVoted,
-              committed_seqno = PeerCommittedSeqno,
+do_set_peer_active(Peer, PeerStatus, Metadata,
+                   #data{committed_seqno = CommittedSeqno,
+                         high_seqno = HighSeqno} = Data) ->
+    #metadata{committed_seqno = PeerCommittedSeqno,
+              high_term = PeerHighTerm,
               high_seqno = PeerHighSeqno} = Metadata,
 
-    {CommittedSeqno, HighSeqno} =
-        case PeerTermVoted =:= OurTerm of
+    PeerCompatible =
+        case PeerHighSeqno =< HighSeqno of
             true ->
-                %% We've lost communication with the peer. But it's already
-                %% voted in our current term, so our histories are compatible.
+                case get_term_for_seqno(PeerHighSeqno, Data) of
+                    {ok, Term} ->
+                        Term =:= PeerHighTerm;
+                    {error, compacted} ->
+                        true = (PeerHighSeqno =< CommittedSeqno),
+                        %% The peer fell too far behind. Compatible or not,
+                        %% we'll need to send a snapshot to it.
+                        false
+                end;
+            false ->
+                false
+        end,
+
+    {SentCommittedSeqno, SentHighSeqno} =
+        case PeerCompatible of
+            true ->
                 {PeerCommittedSeqno, PeerHighSeqno};
             false ->
-                %% The peer hasn't voted in our term yet, so it may have
-                %% divergent entries in the log that need to be truncated.
-                %%
-                %% TODO: We set all seqno-s to peer's committed seqno. That is
-                %% because entries past peer's committed seqno may come from
-                %% an alternative, never-to-be-committed history. Using
-                %% committed seqno is always safe, but that also means that we
-                %% might need to needlessly resend some of the entries that
-                %% the peer already has.
-                %%
-                %% Somewhat peculiarly, the same logic also applies to our
-                %% local agent. This all can be addressed by including more
-                %% information into establish_term() response and append()
-                %% call. But I'll leave for later.
+                %% Peer's got some entries that are incompatible with our view
+                %% of the history. Instead of trying to find the point where
+                %% our histories diverged, we'll resend all entries starting
+                %% from peer's committed seqno (which must be compatible).
                 {PeerCommittedSeqno, PeerCommittedSeqno}
         end,
 
-    NewPeerStatus = PeerStatus#peer_status{acked_seqno = HighSeqno,
-                                           sent_seqno = HighSeqno,
-                                           acked_commit_seqno = CommittedSeqno,
-                                           sent_commit_seqno = CommittedSeqno,
-                                           state = active},
+    NewPeerStatus = PeerStatus#peer_status{
+                      acked_seqno = SentHighSeqno,
+                      sent_seqno = SentHighSeqno,
+                      acked_commit_seqno = SentCommittedSeqno,
+                      sent_commit_seqno = SentCommittedSeqno,
+                      state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
@@ -1444,16 +1451,13 @@ set_peer_catchup(Peer, Data) ->
               PeerStatus#peer_status{state = catchup}
       end, Data).
 
-set_peer_catchup_done(Peer, Metadata, #data{term = OurTerm} = Data) ->
+set_peer_catchup_done(Peer, Metadata, Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     catchup = PeerStatus#peer_status.state,
     #metadata{high_seqno = HighSeqno,
-              committed_seqno = CommittedSeqno,
-              term_voted = TermVoted} = Metadata,
+              committed_seqno = CommittedSeqno} = Metadata,
 
-    true = (TermVoted =:= OurTerm),
     true = (CommittedSeqno =:= HighSeqno),
-
     NewPeerStatus = PeerStatus#peer_status{acked_seqno = CommittedSeqno,
                                            sent_seqno = CommittedSeqno,
                                            acked_commit_seqno = CommittedSeqno,

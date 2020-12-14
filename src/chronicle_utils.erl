@@ -270,8 +270,8 @@ term_number({TermNumber, _TermLeader}) ->
 term_leader({_TermNumber, TermLeader}) ->
     TermLeader.
 
-get_position(#metadata{term_voted = TermVoted, high_seqno = HighSeqno}) ->
-    {TermVoted, HighSeqno}.
+get_position(#metadata{high_term = HighTerm, high_seqno = HighSeqno}) ->
+    {HighTerm, HighSeqno}.
 
 compare_positions({TermVotedA, HighSeqnoA}, {TermVotedB, HighSeqnoB}) ->
     TermVotedNoA = term_number(TermVotedA),

@@ -1172,9 +1172,9 @@ check_peer_current(Position, State, Data) ->
     end.
 
 get_position(Data) ->
-    OurTermVoted = get_meta(?META_TERM_VOTED, Data),
+    OurHighTerm = get_high_term(Data),
     OurHighSeqno = get_high_seqno(Data),
-    {OurTermVoted, OurHighSeqno}.
+    {OurHighTerm, OurHighSeqno}.
 
 get_required_peer_position(State, Data) ->
     OurPosition = get_position(Data),
