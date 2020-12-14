@@ -521,7 +521,7 @@ handle_call({join_cluster, ClusterInfo}, From, State, Data) ->
     handle_join_cluster(ClusterInfo, From, State, Data);
 handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
-    Position = {get_meta(?META_TERM_VOTED, Data), get_high_seqno(Data)},
+    Position = {get_high_term(Data), get_high_seqno(Data)},
     handle_establish_term(HistoryId, Term, Position, From, State, Data);
 handle_call({establish_term, HistoryId, Term, Position}, From, State, Data) ->
     handle_establish_term(HistoryId, Term, Position, From, State, Data);
@@ -587,14 +587,12 @@ build_metadata(Data) ->
     #{?META_PEER := Peer,
       ?META_HISTORY_ID := HistoryId,
       ?META_TERM := Term,
-      ?META_TERM_VOTED := TermVoted,
       ?META_COMMITTED_SEQNO := CommittedSeqno,
       ?META_PENDING_BRANCH := PendingBranch} = get_meta(Data),
 
     #metadata{peer = Peer,
               history_id = HistoryId,
               term = Term,
-              term_voted = TermVoted,
               high_term = get_high_term(Data),
               high_seqno = get_high_seqno(Data),
               committed_seqno = CommittedSeqno,
@@ -837,7 +835,6 @@ handle_reprovision(From, State, Data) ->
             NewData = append_entry(ConfigEntry,
                                    #{?META_PEER => Peer,
                                      ?META_TERM => NewTerm,
-                                     ?META_TERM_VOTED => NewTerm,
                                      ?META_COMMITTED_SEQNO => Seqno},
                                    Data),
 
@@ -900,7 +897,6 @@ handle_provision(Machines0, From, State, Data) ->
                                      ?META_PEER => Peer,
                                      ?META_HISTORY_ID => HistoryId,
                                      ?META_TERM => Term,
-                                     ?META_TERM_VOTED => Term,
                                      ?META_COMMITTED_SEQNO => Seqno},
                                    Data),
 
@@ -1258,7 +1254,6 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     Metadata =
         #{?META_HISTORY_ID => HistoryId,
           ?META_TERM => Term,
-          ?META_TERM_VOTED => Term,
           ?META_PENDING_BRANCH => undefined,
           ?META_COMMITTED_SEQNO => NewCommittedSeqno},
 
@@ -1516,11 +1511,11 @@ check_committed_seqno(Term, CommittedSeqno, HighSeqno, Data) ->
            check_committed_seqno_rollback(Term, CommittedSeqno, Data)).
 
 check_committed_seqno_rollback(Term, CommittedSeqno, Data) ->
-    #{?META_TERM_VOTED := OurTermVoted,
-      ?META_COMMITTED_SEQNO := OurCommittedSeqno} = get_meta(Data),
+    OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
     case CommittedSeqno < OurCommittedSeqno of
         true ->
-            case Term =:= OurTermVoted of
+            HighTerm = get_high_term(Data),
+            case Term =:= HighTerm of
                 true ->
                     ?ERROR("Refusing to lower our committed "
                            "seqno ~p to ~p in term ~p. "
@@ -1537,10 +1532,9 @@ check_committed_seqno_rollback(Term, CommittedSeqno, Data) ->
                     %% keep its committed seqno unchanged.
                     ?INFO("Leader in term ~p believes seqno ~p "
                           "to be committed, "
-                          "while we know that ~p was committed in term ~p. "
+                          "while we know that ~p was committed. "
                           "Keeping our committed seqno intact.",
-                          [Term, CommittedSeqno,
-                           OurCommittedSeqno, OurTermVoted]),
+                          [Term, CommittedSeqno, OurCommittedSeqno]),
                     {ok, OurCommittedSeqno}
             end;
         false ->
@@ -1616,7 +1610,6 @@ handle_install_snapshot(HistoryId, Term,
         ok ->
             Metadata = #{?META_HISTORY_ID => HistoryId,
                          ?META_TERM => Term,
-                         ?META_TERM_VOTED => Term,
                          ?META_PENDING_BRANCH => undefined,
                          ?META_COMMITTED_SEQNO => SnapshotSeqno},
 
@@ -2021,7 +2014,6 @@ storage_open() ->
                              ?META_PEER => ?NO_PEER,
                              ?META_HISTORY_ID => ?NO_HISTORY,
                              ?META_TERM => ?NO_TERM,
-                             ?META_TERM_VOTED => ?NO_TERM,
                              ?META_COMMITTED_SEQNO => ?NO_SEQNO,
                              ?META_PENDING_BRANCH => undefined},
                 ?INFO("Found empty storage. "

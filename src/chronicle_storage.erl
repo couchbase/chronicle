@@ -44,7 +44,6 @@
                    ?META_PEER => chronicle:peer(),
                    ?META_HISTORY_ID => chronicle:history_id(),
                    ?META_TERM => chronicle:leader_term(),
-                   ?META_TERM_VOTED => chronicle:leader_term(),
                    ?META_COMMITTED_SEQNO => chronicle:seqno(),
                    ?META_PENDING_BRANCH => undefined | #branch{} }.
 
