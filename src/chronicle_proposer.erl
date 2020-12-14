@@ -54,6 +54,9 @@
                 high_seqno,
                 committed_seqno,
 
+                %% Committed seqno known to the agent on this node.
+                local_committed_seqno,
+
                 %% Don't consider seqno-s that are lesser than this seqno
                 %% committed even if we replicated the corresponding entries
                 %% to a quorum of nodes. Initialized to the seqno at which the
@@ -278,8 +281,9 @@ stop_catchup_process(#data{catchup_pid = Pid} = Data) ->
 
 preload_pending_entries(#data{history_id = HistoryId,
                               term = Term,
-                              high_seqno = HighSeqno} = Data) ->
-    LocalCommittedSeqno = get_local_committed_seqno(Data),
+                              high_seqno = HighSeqno,
+                              local_committed_seqno = LocalCommittedSeqno}
+                        = Data) ->
     case HighSeqno > LocalCommittedSeqno of
         true ->
             case chronicle_agent:get_log(HistoryId, Term,
@@ -358,6 +362,7 @@ establish_term_init(Metadata,
                                     config = ConfigEntry,
                                     high_seqno = HighSeqno,
                                     committed_seqno = CommittedSeqno,
+                                    local_committed_seqno = CommittedSeqno,
                                     branch = PendingBranch,
                                     being_removed = false},
             {keep_state,
@@ -661,7 +666,7 @@ handle_append_result(Peer, Request, Result, proposing = State, Data) ->
 
 maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
   when Peer =:= ?SELF_PEER ->
-    OldCommittedSeqno = get_local_committed_seqno(Data),
+    OldCommittedSeqno = Data#data.local_committed_seqno,
     case OldCommittedSeqno =:= NewCommittedSeqno of
         true ->
             Data;
@@ -673,7 +678,8 @@ maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
                           Entry#log_entry.seqno =< NewCommittedSeqno
                   end, PendingEntries),
 
-            Data#data{pending_entries = NewPendingEntries}
+            Data#data{pending_entries = NewPendingEntries,
+                      local_committed_seqno = NewCommittedSeqno}
     end;
 maybe_drop_pending_entries(_, _, Data) ->
     Data.
@@ -1642,8 +1648,8 @@ get_entries(Seqno, Data) ->
             need_catchup
     end.
 
-do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
-    LocalCommittedSeqno = get_local_committed_seqno(Data),
+do_get_entries(Seqno, #data{pending_entries = PendingEntries,
+                            local_committed_seqno = LocalCommittedSeqno}) ->
     case Seqno < LocalCommittedSeqno of
         true ->
             %% TODO: consider triggerring catchup even if we've got all the
@@ -1664,6 +1670,7 @@ do_get_entries(Seqno, #data{pending_entries = PendingEntries} = Data) ->
     end.
 
 get_term_for_seqno(Seqno, #data{term = Term,
+                                local_committed_seqno = LocalCommittedSeqno,
                                 safe_commit_seqno = SafeCommitSeqno} = Data) ->
     case Seqno >= SafeCommitSeqno of
         true ->
@@ -1671,7 +1678,6 @@ get_term_for_seqno(Seqno, #data{term = Term,
             %% from current term.
             {ok, Term};
         false ->
-            LocalCommittedSeqno = get_local_committed_seqno(Data),
             case Seqno =< LocalCommittedSeqno of
                 true ->
                     chronicle_agent:get_term_for_seqno(Seqno);
@@ -1691,11 +1697,6 @@ get_term_for_seqno_pending(Seqno, #data{pending_entries = PendingEntries}) ->
     true = (Entry#log_entry.seqno =:= Seqno),
 
     {ok, Entry#log_entry.term}.
-
-get_local_committed_seqno(Data) ->
-    {ok, PeerStatus} = get_peer_status(?SELF_PEER, Data),
-    active = PeerStatus#peer_status.state,
-    PeerStatus#peer_status.acked_commit_seqno.
 
 get_local_log(StartSeqno, EndSeqno) ->
     chronicle_agent:get_log_committed(StartSeqno, EndSeqno).
