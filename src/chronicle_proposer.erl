@@ -251,10 +251,9 @@ handle_state_enter(establish_term,
     end;
 handle_state_enter(proposing, Data) ->
     NewData0 = start_catchup_process(Data),
-    NewData1 = preload_pending_entries(NewData0),
-    NewData2 = maybe_resolve_branch(NewData1),
-    NewData3 = maybe_complete_config_transition(NewData2),
-    NewData = propose_noop(NewData3),
+    NewData1 = maybe_resolve_branch(NewData0),
+    NewData2 = maybe_complete_config_transition(NewData1),
+    NewData = propose_noop(NewData2),
 
     announce_proposer_ready(NewData),
 
@@ -366,7 +365,7 @@ establish_term_init(Metadata,
                                     branch = PendingBranch,
                                     being_removed = false},
             {keep_state,
-             NewData,
+             preload_pending_entries(NewData),
              {state_timeout,
               ?ESTABLISH_TERM_TIMEOUT, establish_term_timeout}};
         false ->
