@@ -155,10 +155,11 @@ get_full_snapshot(PeerSeqno) ->
     end.
 
 install_snapshot(Peer,
-                 {Seqno, Term, Config, RSMSnapshots},
+                 {SnapshotSeqno, SnapshotTerm, SnapshotConfig, RSMSnapshots},
                  #state{history_id = HistoryId, term = Term}) ->
     chronicle_agent:install_snapshot(Peer, HistoryId, Term,
-                                     Seqno, Term, Config, RSMSnapshots).
+                                     SnapshotSeqno, SnapshotTerm,
+                                     SnapshotConfig, RSMSnapshots).
 
 cancel_active(Peer, #state{pids = Pids} = State) ->
     NewPids =
