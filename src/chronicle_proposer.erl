@@ -1448,20 +1448,6 @@ set_peer_catchup(Peer, Data) ->
 set_peer_catchup_done(Peer, Metadata, Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     catchup = PeerStatus#peer_status.state,
-    #metadata{high_seqno = HighSeqno,
-              committed_seqno = CommittedSeqno} = Metadata,
-
-    true = (CommittedSeqno =:= HighSeqno),
-    NewPeerStatus = PeerStatus#peer_status{acked_seqno = CommittedSeqno,
-                                           sent_seqno = CommittedSeqno,
-                                           acked_commit_seqno = CommittedSeqno,
-                                           sent_commit_seqno = CommittedSeqno,
-                                           state = active},
-    put_peer_status(Peer, NewPeerStatus, Data).
-
-set_peer_catchup_rejected(Peer, Metadata, Data) ->
-    {ok, PeerStatus} = get_peer_status(Peer, Data),
-    catchup = PeerStatus#peer_status.state,
     do_set_peer_active(Peer, PeerStatus, Metadata, Data).
 
 set_peer_acked_sync_round(Peer, Round, Data) ->
