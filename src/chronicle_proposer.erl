@@ -860,12 +860,6 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
                             %% to ignore.
                             remove_peer_status(Peer, Data),
                             {keep_state, Data};
-                        {snapshot_rejected, Metadata} ->
-                            %% Not something expected to happen frequently,
-                            %% but it's possible that the old leader caught up
-                            %% the peer before we managed to.
-                            set_peer_catchup_rejected(Peer, Metadata, Data),
-                            {keep_state, replicate(Peer, Data)};
                         _ ->
                             stop({unexpected_error, Peer, Error}, State, Data)
                     end
