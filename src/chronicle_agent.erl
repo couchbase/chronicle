@@ -378,7 +378,6 @@ append(Peer, Opaque, HistoryId, Term,
         not_provisioned |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
-        {snapshot_rejected, #metadata{}} |
         {protocol_error, any()}.
 
 -spec install_snapshot(peer(),
@@ -1605,55 +1604,92 @@ handle_install_snapshot(HistoryId, Term,
                         SnapshotSeqno, SnapshotTerm, SnapshotConfig,
                         RSMSnapshots, From, State, Data) ->
     case check_install_snapshot(HistoryId, Term,
-                                SnapshotSeqno, SnapshotTerm, SnapshotConfig,
+                                SnapshotConfig,
                                 RSMSnapshots, State, Data) of
         ok ->
-            Metadata = #{?META_HISTORY_ID => HistoryId,
-                         ?META_TERM => Term,
-                         ?META_PENDING_BRANCH => undefined,
-                         ?META_COMMITTED_SEQNO => SnapshotSeqno},
+            case get_snapshot_action(SnapshotSeqno, SnapshotTerm, Data) of
+                skip ->
+                    {keep_state_and_data,
+                     {reply, From, {ok, build_metadata(Data)}}};
+                Action ->
+                    %% TODO: This may commit HistoryId prematurely
+                    Metadata = #{?META_HISTORY_ID => HistoryId,
+                                 ?META_TERM => Term,
+                                 ?META_PENDING_BRANCH => undefined,
+                                 ?META_COMMITTED_SEQNO => SnapshotSeqno},
 
-            NewData0 = install_snapshot(SnapshotSeqno, SnapshotTerm,
-                                        SnapshotConfig,
-                                        RSMSnapshots, Metadata, Data),
+                    NewData0 =
+                        case Action of
+                            install ->
+                                install_snapshot(SnapshotSeqno, SnapshotTerm,
+                                                 SnapshotConfig,
+                                                 RSMSnapshots, Metadata, Data);
+                            commit_seqno ->
+                                store_meta(Metadata, Data)
+                        end,
 
-            {NewState, NewData} =
-                case State of
-                    provisioned ->
-                        maybe_announce_term_established(Term, Data),
-                        maybe_announce_new_config(Data, NewData0),
-                        maybe_announce_committed_seqno(Data, NewData0),
+                    {NewState, NewData} =
+                        case State of
+                            provisioned ->
+                                maybe_announce_term_established(Term, Data),
+                                maybe_announce_new_config(Data, NewData0),
+                                maybe_announce_committed_seqno(Data, NewData0),
 
-                        {State, maybe_cancel_snapshot(NewData0)};
-                    _ ->
-                        check_join_cluster_done(State, NewData0)
-                end,
+                                {State, maybe_cancel_snapshot(NewData0)};
+                            _ ->
+                                check_join_cluster_done(State, NewData0)
+                        end,
 
-            {next_state,
-             NewState, NewData,
-             {reply, From, {ok, build_metadata(NewData)}}};
+                    {next_state,
+                     NewState, maybe_initiate_snapshot(NewState, NewData),
+                     {reply, From, {ok, build_metadata(NewData)}}}
+            end;
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
+get_snapshot_action(SnapshotSeqno, SnapshotTerm,
+                    #data{storage = Storage} = Data) ->
+    HighSeqno = get_high_seqno(Data),
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+
+    if
+        SnapshotSeqno > HighSeqno ->
+            install;
+        SnapshotSeqno =< CommittedSeqno ->
+            skip;
+        true ->
+            %% CommittedSeqno < SnapshotSeqno =< HighSeqno
+            %%
+            %% Install snapshot always tosses away all entries in the log and
+            %% replaces them with the snapshot. In this case, some or all of
+            %% the entries following the snapshot might ultimately be
+            %% committed and must be preserved. Otherwise in certain
+            %% situations it's possible for a committed entry to get
+            %% overwritten.
+            %%
+            %% It's only possible for the tail of the log after the snapshot
+            %% to have "valid" entries if the entry at SnapshotSeqno is
+            %% valid. We check if that's indeed the case by comparing the
+            %% entry's term and the snapshot term. If they match, then there's
+            %% no need to install the snapshot. We can simply mark everything
+            %% up to the snapshot seqno committed.
+            {ok, Term} =
+                chronicle_storage:get_term_for_seqno(SnapshotSeqno, Storage),
+            case Term =:= SnapshotTerm of
+                true ->
+                    commit_seqno;
+                false ->
+                    install
+            end
+    end.
+
 check_install_snapshot(HistoryId, Term,
-                       SnapshotSeqno, _SnapshotTerm, SnapshotConfig,
-                       RSMSnapshots, State, Data) ->
+                       SnapshotConfig, RSMSnapshots, State, Data) ->
     ?CHECK(check_prepared(State),
            check_history_id(HistoryId, Data),
            check_not_earlier_term(Term, Data),
-           check_snapshot_seqno(SnapshotSeqno, Data),
            check_snapshot_config(SnapshotConfig, RSMSnapshots)).
-
-check_snapshot_seqno(SnapshotSeqno, Data) ->
-    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-
-    case SnapshotSeqno > CommittedSeqno of
-        true ->
-            ok;
-        false ->
-            {error, {snapshot_rejected, build_metadata(Data)}}
-    end.
 
 check_snapshot_config(Config, RSMSnapshots) ->
     ConfigRSMs = maps:keys(get_rsms(Config)),
