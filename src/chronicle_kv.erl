@@ -472,7 +472,7 @@ post_init(_Revision, _State, #data{kv_table = KvTable} = Data) ->
     publish_kv_table(KvTable, Data),
     {ok, Data#data{initialized = true}}.
 
-apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, _OldState,
+apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
                #data{name = Name,
                      kv_table = OldKvTable,
                      initialized = Initialized} = Data) ->
@@ -490,6 +490,11 @@ apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, _OldState,
             ok
     end,
     ets:delete(OldKvTable),
+
+    %% TODO: This is a temprorary kludge making ns_server's life a bit
+    %% easier. Get rid of it.
+    notify_snapshot_diff(SnapshotRevision, SnapshotState, OldState, Data),
+
     notify_snapshot_installed(SnapshotRevision, Data),
     {ok, Data#data{kv_table = KvTable}}.
 
@@ -745,17 +750,58 @@ notify(Event, #data{initialized = true, event_mgr = Mgr}) ->
 notify(_Event, _Data) ->
     ok.
 
-notify_key(Key, Revision, Event, Data) ->
-    notify({{key, Key}, Revision, Event}, Data).
+key_updated_event(Key, Revision, Value) ->
+    {{key, Key}, Revision, {updated, Value}}.
+
+key_deleted_event(Key, Revision) ->
+    {{key, Key}, Revision, deleted}.
 
 notify_deleted(Key, Revision, Data) ->
-    notify_key(Key, Revision, deleted, Data).
+    notify(key_deleted_event(Key, Revision), Data).
 
 notify_updated(Key, Revision, Value, Data) ->
-    notify_key(Key, Revision, {updated, Value}, Data).
+    notify(key_updated_event(Key, Revision, Value), Data).
 
 notify_snapshot_installed(Revision, Data) ->
     notify({snapshot_installed, Revision}, Data).
+
+notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
+                     #data{initialized = true, event_mgr = Mgr}) ->
+    chronicle_utils:maps_foreach(
+      fun (Key, {Value, Rev}) ->
+              Notify =
+                  case maps:find(Key, OldSnapshot) of
+                      {ok, OldRev} ->
+                          Rev =:= OldRev;
+                      error ->
+                          true
+                  end,
+
+              case Notify of
+                  true ->
+                      %% Note that the snapshot revision is used here instead
+                      %% of the revisions of the individual keys. This to
+                      %% ensure that revisions are aways in monotonically
+                      %% increasing order.
+                      Event = key_updated_event(Key, Revision, Value),
+                      gen_event:notify(Mgr, Event);
+                  false ->
+                      ok
+              end
+      end, NewSnapshot),
+
+    chronicle_utils:maps_foreach(
+      fun (Key, _) ->
+              case maps:is_key(Key, NewSnapshot) of
+                  true ->
+                      ok;
+                  false ->
+                      Event = key_deleted_event(Key, Revision),
+                      gen_event:notify(Mgr, Event)
+              end
+      end, OldSnapshot);
+notify_snapshot_diff(_, _, _, _) ->
+    ok.
 
 get_kv_table(Name) ->
     case ets:lookup(?ETS_TABLE(Name), table) of
