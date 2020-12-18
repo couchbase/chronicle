@@ -638,6 +638,25 @@ simple_test__(Nodes) ->
                                 end,
                                 #{read_consistency => leader}),
 
+                          {ok, _} =
+                              chronicle_kv:txn(
+                                kv,
+                                fun (Txn) ->
+                                        case chronicle_kv:txn_get(a, Txn) of
+                                            {ok, {A, _}} ->
+                                                #{b := {B, _}} = Vs = chronicle_kv:txn_get_many([b, c], Txn),
+                                                error = maps:find(c, Vs),
+                                                85 = A,
+                                                d = B,
+
+                                                {commit, [{set, c, 42}]};
+                                            {error, not_found} ->
+                                                {abort, aborted}
+                                        end
+                                end),
+
+                          {ok, {42, _}} = chronicle_kv:get(kv, c),
+
                           {ok, _} = chronicle_kv:update(kv, a, fun (V) -> V+1 end),
                           {ok, {86, _}} = chronicle_kv:get(kv, a),
 

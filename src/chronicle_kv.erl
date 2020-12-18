@@ -34,6 +34,9 @@
 -export([get_revision/1]).
 -export([sync/2, sync/3]).
 
+-export([txn/2, txn/3]).
+-export([txn_get/2, txn_get_many/2]).
+
 %% callbacks
 -export([specs/2,
          init/2, post_init/3,
@@ -204,6 +207,72 @@ transaction(Name, Keys, Fun, Opts) ->
             end;
         {abort, Result} ->
             Result
+    end.
+
+txn_get(Key, Txn) ->
+    case Txn of
+        {txn_fast, Table, TableSeqno} ->
+            txn_get_from_table(Key, Table, TableSeqno);
+        {txn_slow, Map} ->
+            txn_get_from_map(Key, Map)
+    end.
+
+txn_get_many(Keys, Txn) ->
+    case Txn of
+        {txn_fast, Table, TableSeqno} ->
+            txn_get_from_table_many(Keys, Table, TableSeqno);
+        {txn_slow, Map} ->
+            txn_get_from_map_many(Keys, Map)
+    end.
+
+txn(Name, Fun) ->
+    txn(Name, Fun, #{}).
+
+txn(Name, Fun, Opts) ->
+    TRef = start_timeout(get_timeout(Opts)),
+    case prepare_txn(Name, Fun, TRef, Opts) of
+        {ok, {TxnResult, Conditions}} ->
+            case TxnResult of
+                {commit, Updates} ->
+                    submit_transaction(Name, Conditions, Updates, TRef, Opts);
+                {commit, Updates, Extra} ->
+                    case submit_transaction(Name, Conditions,
+                                            Updates, TRef, Opts) of
+                        {ok, Revision} ->
+                            {ok, Revision, Extra};
+                        Other ->
+                            Other
+                    end;
+                {abort, Result} ->
+                    Result
+            end;
+        {error, {raised, T, E, Stack}} ->
+            erlang:raise(T, E, Stack)
+    end.
+
+prepare_txn(Name, Fun, TRef, Opts) ->
+    optimistic_query(Name, {prepare_txn, Fun}, TRef, Opts,
+                     fun () ->
+                             prepare_txn_fast(Name, Fun)
+                     end).
+
+prepare_txn_fast(Name, Fun) ->
+    case get_kv_table(Name) of
+        {ok, Table} ->
+            {_, TableSeqno} = get_revision(Name),
+
+            try
+                Result = txn_with_conditions(
+                           fun () ->
+                                   Fun({txn_fast, Table, TableSeqno})
+                           end),
+                {ok, Result}
+            catch
+                throw:use_slow_path ->
+                    use_slow_path
+            end;
+        {error, no_table} ->
+            use_slow_path
     end.
 
 transaction_conditions(Snapshot, Missing) ->
@@ -434,7 +503,9 @@ handle_query({get, Key}, _StateRevision, State, Data) ->
 handle_query(get_full_snapshot, StateRevision, State, Data) ->
     handle_get_full_snapshot(StateRevision, State, Data);
 handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
-    handle_get_snapshot(Keys, StateRevision, State, Data).
+    handle_get_snapshot(Keys, StateRevision, State, Data);
+handle_query({prepare_txn, Fun}, _StateRevision, State, Data) ->
+    handle_prepare_txn(Fun, State, Data).
 
 apply_command({add, Key, Value}, Revision, StateRevision, State, Data) ->
     apply_add(Key, Value, Revision, StateRevision, State, Data);
@@ -554,6 +625,17 @@ handle_get_snapshot(Keys, StateRevision, State, Data) ->
     Snapshot = maps:with(Keys, State),
     Missing = Keys -- maps:keys(Snapshot),
     {reply, {ok, {Snapshot, StateRevision, Missing}}, Data}.
+
+handle_prepare_txn(Fun, State, Data) ->
+    Result =
+        try txn_with_conditions(fun () -> Fun({txn_slow, State}) end)
+        of R -> {ok, R}
+        catch
+            T:E:Stack ->
+                {error, {raised, T, E, Stack}}
+        end,
+
+    {reply, Result, Data}.
 
 apply_add(Key, Value, Revision, StateRevision, State, Data) ->
     case check_condition({missing, Key}, Revision, StateRevision, State) of
@@ -699,4 +781,80 @@ get_from_kv_table(Table, Key) ->
     catch
         error:badarg ->
             {error, no_table}
+    end.
+
+txn_get_from_table(Key, Table, TableSeqno) ->
+    case get_from_kv_table(Table, Key) of
+        {ok, {_Value, {_HistoryId, Seqno} = Revision}} = Ok ->
+            case Seqno =< TableSeqno of
+                true ->
+                    txn_require_revision(Key, Revision),
+                    Ok;
+                false ->
+                    throw(use_slow_path)
+            end;
+        {error, Error} when Error =:= no_table;
+                            Error =:= not_found ->
+            throw(use_slow_path)
+    end.
+
+txn_get_from_map(Key, Map) ->
+    case maps:find(Key, Map) of
+        {ok, {_, Revision}} = Ok ->
+            txn_require_revision(Key, Revision),
+            Ok;
+        error ->
+            txn_require_missing(Key),
+            {error, not_found}
+    end.
+
+txn_get_from_map_many(Keys, Map) ->
+    lists:foldl(
+      fun (Key, Acc) ->
+              case txn_get_from_map(Key, Map) of
+                  {ok, ValueRev} ->
+                      Acc#{Key => ValueRev};
+                  {error, not_found} ->
+                      Acc
+              end
+      end, #{}, Keys).
+
+txn_get_from_table_many(Keys, Table, TableSeqno) ->
+    lists:foldl(
+      fun (Key, Acc) ->
+              {ok, ValueRev} = txn_get_from_table(Key, Table, TableSeqno),
+              Acc#{Key => ValueRev}
+      end, #{}, Keys).
+
+-define(TXN_CONDITIONS, '$txn_conditions').
+
+txn_add_condition(Condition) ->
+    Conditions = erlang:get(?TXN_CONDITIONS),
+    erlang:put(?TXN_CONDITIONS, [Condition | Conditions]),
+    ok.
+
+txn_require_revision(Key, Revision) ->
+    txn_add_condition({revision, Key, Revision}).
+
+txn_require_missing(Key) ->
+    txn_add_condition({missing, Key}).
+
+txn_init_conditions() ->
+    case erlang:put(?TXN_CONDITIONS, []) of
+        undefined ->
+            ok;
+        false ->
+            error(nested_transactions_detected)
+    end.
+
+txn_take_conditions() ->
+    erlang:erase(?TXN_CONDITIONS).
+
+txn_with_conditions(Body) ->
+    txn_init_conditions(),
+    try Body() of
+        Result ->
+            {Result, txn_take_conditions()}
+    after
+        _ = txn_take_conditions()
     end.
