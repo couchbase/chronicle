@@ -30,7 +30,9 @@
                           next_term/2,
                           term_number/1,
                           compare_positions/2,
-                          max_position/2]).
+                          max_position/2,
+                          sanitize_entry/1,
+                          sanitize_entries/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer),
@@ -1314,13 +1316,13 @@ check_append_history_id(HistoryId, Entries, Data) ->
                                     value = #config{}} | _] ->
                             ok;
                         _ ->
-                            %% TODO: sanitize entries
                             ?ERROR("Malformed entries in an append "
                                    "request starting a new history.~n"
                                    "Old history id: ~p~n"
                                    "New history id: ~p~n"
                                    "Entries:~n~p",
-                                   [OldHistoryId, HistoryId, Entries]),
+                                   [OldHistoryId, HistoryId,
+                                    sanitize_entries(Entries)]),
                             {error, {protocol_error,
                                      {missing_config_starting_history,
                                       OldHistoryId, HistoryId, Entries}}}
@@ -1404,8 +1406,10 @@ preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
             ?ERROR("Received an ill-formed append request.~n"
                    "At seqno: ~p"
                    "Stumbled upon this entry: ~p~n"
-                   "All entries:~n~p",
-                   [AtSeqno, Entry, Entries]),
+                   "Some entries:~n~p",
+                   [AtSeqno,
+                    sanitize_entry(Entry),
+                    sanitize_entries(Entries)]),
             {error, {protocol_error,
                      {malformed_append, Entry, AtSeqno, Entries}}};
         {error, _} = Error ->
@@ -1451,7 +1455,6 @@ preprocess_entries_loop(PrevSeqno,
                                             Error
                                     end;
                                 false ->
-                                    %% TODO: don't log entries
                                     ?ERROR("Unexpected mismatch in entries "
                                            "sent by the proposer.~n"
                                            "Seqno: ~p~n"
@@ -1459,7 +1462,8 @@ preprocess_entries_loop(PrevSeqno,
                                            "Our entry:~n~p~n"
                                            "Received entry:~n~p",
                                            [EntrySeqno, CommittedSeqno,
-                                            OurEntry, Entry]),
+                                            sanitize_entry(OurEntry),
+                                            sanitize_entry(Entry)]),
                                     {error,
                                      {protocol_error,
                                       {mismatched_entry,

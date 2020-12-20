@@ -858,3 +858,24 @@ queue_dropwhile_test() ->
 
 log_entry_revision(#log_entry{history_id = HistoryId, seqno = Seqno}) ->
     {HistoryId, Seqno}.
+
+sanitize_entry(#log_entry{value = Value} = LogEntry) ->
+    SanitizedValue =
+        case Value of
+            #rsm_command{} = Command ->
+                Command#rsm_command{command = sanitized};
+            _ ->
+                Value
+        end,
+
+    LogEntry#log_entry{value = SanitizedValue}.
+
+sanitize_entries(Entries) ->
+    sanitize_entries(Entries, 5).
+
+sanitize_entries([], _) ->
+    [];
+sanitize_entries(_, 0) ->
+    ['...'];
+sanitize_entries([Entry | Entries], MaxEntries) ->
+    [sanitize_entry(Entry) | sanitize_entries(Entries, MaxEntries - 1)].
