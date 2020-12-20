@@ -53,7 +53,7 @@
 -define(SNAPSHOT_TIMEOUT, 60000).
 -define(SNAPSHOT_RETRIES, 5).
 -define(SNAPSHOT_RETRY_AFTER, 10000).
--define(SNAPSHOT_INTERVAL, 1024).
+-define(SNAPSHOT_INTERVAL, 100).
 
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is
