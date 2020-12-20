@@ -19,7 +19,7 @@
 
 -export([start/0, stop/0]).
 -export([init/2, content_types_provided/2, json_api/2,
-         content_types_accepted/2, allowed_methods/2, resource_exists/2,
+         content_types_accepted/2, allowed_methods/2,
          allow_missing_post/2, delete_resource/2]).
 
 -record(state, {domain, op}).
@@ -90,15 +90,6 @@ content_types_accepted(Req, State) ->
     {[
       {<<"application/json">>, json_api}
      ], Req, State}.
-
-resource_exists(Req, State) ->
-    case get_value(Req) of
-        {ok, Value} ->
-            ?LOG_DEBUG("Resource exists: ~p", [Value]),
-            {true, Req, State};
-        _ ->
-            {false, Req, State}
-    end.
 
 delete_resource(Req, State) ->
     Key = cowboy_req:binding(key, Req),
