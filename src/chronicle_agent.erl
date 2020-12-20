@@ -1265,16 +1265,6 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
                 store_meta(Metadata, Data)
         end,
 
-    ?DEBUG("Appended entries.~n"
-           "History id: ~p~n"
-           "Term: ~p~n"
-           "High Seqno: ~p~n"
-           "Committed Seqno: ~p~n"
-           "Entries: ~p~n"
-           "Config: ~p",
-           [HistoryId, Term, EndSeqno,
-            NewCommittedSeqno, Entries, get_config(NewData0)]),
-
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 

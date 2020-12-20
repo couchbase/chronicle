@@ -707,10 +707,6 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
 
 handle_append_ok(Peer, PeerHighSeqno,
                  PeerCommittedSeqno, proposing = State, Data) ->
-    ?DEBUG("Append ok on peer ~p.~n"
-           "High Seqno: ~p~n"
-           "Committed Seqno: ~p",
-           [Peer, PeerHighSeqno, PeerCommittedSeqno]),
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
     check_committed_seqno_advanced(State, Data).
 
@@ -724,10 +720,6 @@ check_committed_seqno_advanced(Options, State, Data) ->
     QuorumSeqno = deduce_quorum_seqno(Data),
     case QuorumSeqno > CommittedSeqno andalso QuorumSeqno >= SafeCommitSeqno of
         true ->
-            ?DEBUG("Committed seqno advanced.~n"
-                   "New committed seqno: ~p~n"
-                   "Old committed seqno: ~p",
-                   [QuorumSeqno, CommittedSeqno]),
             NewData0 = Data#data{committed_seqno = QuorumSeqno},
 
             case handle_config_post_append(Data, NewData0) of
@@ -762,9 +754,6 @@ check_committed_seqno_advanced(Options, State, Data) ->
     end.
 
 handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
-    ?DEBUG("Peer heartbeat response from ~p (round ~p):~n~p",
-           [Peer, Round, Result]),
-
     case Result of
         {ok, Metadata} ->
             maybe_set_peer_active(Peer, Metadata, Data),
@@ -1568,15 +1557,6 @@ send_append(Peers, PeerSeqnos,
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
                   {ok, AtTerm, Entries} ->
-                      ?DEBUG("Sending append request to peer ~p.~n"
-                             "History Id: ~p~n"
-                             "Term: ~p~n"
-                             "Committed Seqno: ~p~n"
-                             "Peer Seqno: ~p~n"
-                             "Entries:~n~p",
-                             [Peer, HistoryId, Term,
-                              CommittedSeqno, PeerSeqno, Entries]),
-
                       case chronicle_agent:append(Peer, Opaque, HistoryId,
                                                   Term, CommittedSeqno,
                                                   AtTerm, PeerSeqno, Entries,

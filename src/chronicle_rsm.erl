@@ -82,7 +82,6 @@ command(Name, Command, Timeout) ->
                   end)).
 
 command(Leader, Name, HistoryId, Command, Timeout) ->
-    ?DEBUG("Sending Command to ~p: ~p", [Leader, Command]),
     call(?SERVER(Leader, Name), {command, HistoryId, Command}, Timeout).
 
 query(Name, Query) ->
@@ -432,13 +431,6 @@ apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
           fun (Entry, Acc) ->
                   apply_entry(Entry, Acc, Data)
           end, {HistoryId, AppliedSeqno, ModState, ModData, []}, Entries),
-
-    ?DEBUG("Applied commands to rsm '~p'.~n"
-           "New applied seqno: ~p~n"
-           "New read seqno: ~p~n"
-           "Commands:~n~p~n"
-           "Replies:~n~p",
-           [Data#data.name, NewAppliedSeqno, HighSeqno, Entries, Replies]),
 
     NewData0 = Data#data{mod_state = NewModState,
                          mod_data = NewModData,
