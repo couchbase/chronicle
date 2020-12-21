@@ -383,16 +383,8 @@ get_snapshot(Name, Keys) ->
 
 -spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
-    case get_snapshot(Name, Keys, get_timeout(Opts), Opts) of
-        {ok, {Snapshot, Revision, _Missing}} ->
-            {ok, {Snapshot, Revision}};
-        Other ->
-            Other
-    end.
-
-get_snapshot(Name, Keys, Timeout, Opts) ->
     optimistic_query(
-      Name, {get_snapshot, Keys}, Timeout, Opts,
+      Name, {get_snapshot, Keys}, get_timeout(Opts), Opts,
       fun () ->
               get_snapshot_fast_path(Name, Keys)
       end).
@@ -403,7 +395,7 @@ get_snapshot_fast_path(Name, Keys) ->
             {_, TableSeqno} = Revision = get_revision(Name),
             case get_snapshot_fast_path_loop(Table, TableSeqno, Keys, #{}) of
                 {ok, Snapshot} ->
-                    {ok, {Snapshot, Revision, []}};
+                    {ok, {Snapshot, Revision}};
                 use_slow_path ->
                     use_slow_path
             end;
@@ -645,8 +637,7 @@ handle_get_full_snapshot(StateRevision, State, Data) ->
 
 handle_get_snapshot(Keys, StateRevision, State, Data) ->
     Snapshot = maps:with(Keys, State),
-    Missing = Keys -- maps:keys(Snapshot),
-    {reply, {ok, {Snapshot, StateRevision, Missing}}, Data}.
+    {reply, {ok, {Snapshot, StateRevision}}, Data}.
 
 handle_prepare_txn(Fun, State, Data) ->
     Result =

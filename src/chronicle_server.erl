@@ -655,6 +655,12 @@ simple_test__(Nodes) ->
                                         end
                                 end),
 
+                          {ok, {Snap, _}} =
+                              chronicle_kv:get_snapshot(kv, [a, b, c]),
+                          {85, _} = maps:get(a, Snap),
+                          {d, _} = maps:get(b, Snap),
+                          {42, _} = maps:get(c, Snap),
+
                           {ok, {42, _}} = chronicle_kv:get(kv, c),
 
                           {ok, _} = chronicle_kv:update(kv, a, fun (V) -> V+1 end),
