@@ -177,38 +177,27 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
 -type txn_ops() :: [txn_op()].
 -type txn_op() :: {set, key(), value()}
                 | {delete, key()}.
+-type txn_options() :: options() | #{retries => non_neg_integer()}.
 -type txn_fun() :: fun ((snapshot()) ->
                                {commit, txn_ops()} |
                                {commit, txn_ops(), Extra::any()} |
                                {abort, Result::any()}).
 -type txn_result() :: {ok, revision()}
                     | {ok, revision(), Extra::any()}
-                    | {error, {conflict, revision()}}
+                    | {error, exceeded_retries}
                     | (Aborted::any()).
 
 -spec transaction(name(), [key()], txn_fun()) -> txn_result().
 transaction(Name, Keys, Fun) ->
     transaction(Name, Keys, Fun, #{}).
 
--spec transaction(name(), [key()], txn_fun(), options()) -> txn_result().
+-spec transaction(name(), [key()], txn_fun(), txn_options()) -> txn_result().
 transaction(Name, Keys, Fun, Opts) ->
-    TRef = start_timeout(get_timeout(Opts)),
-    {ok, {Snapshot, _, Missing}} = get_snapshot(Name, Keys, TRef, Opts),
-    case Fun(Snapshot) of
-        {commit, Updates} ->
-            Conditions = transaction_conditions(Snapshot, Missing),
-            submit_transaction(Name, Conditions, Updates, TRef, Opts);
-        {commit, Updates, Extra} ->
-            Conditions = transaction_conditions(Snapshot, Missing),
-            case submit_transaction(Name, Conditions, Updates, TRef, Opts) of
-                {ok, Revision} ->
-                    {ok, Revision, Extra};
-                Other ->
-                    Other
-            end;
-        {abort, Result} ->
-            Result
-    end.
+    txn(Name,
+        fun (Txn) ->
+                Snapshot = txn_get_many(Keys, Txn),
+                Fun(Snapshot)
+        end, Opts).
 
 txn_get(Key, Txn) ->
     case Txn of
@@ -304,13 +293,6 @@ prepare_txn_fast(Name, Fun) ->
         {error, no_table} ->
             use_slow_path
     end.
-
-transaction_conditions(Snapshot, Missing) ->
-    ConditionsMissing = [{missing, Key} || Key <- Missing],
-    maps:fold(
-      fun (Key, {_, Revision}, Acc) ->
-              [{revision, Key, Revision} | Acc]
-      end, ConditionsMissing, Snapshot).
 
 submit_transaction(Name, Conditions, Updates, Opts) ->
     submit_transaction(Name, Conditions, Updates, get_timeout(Opts), Opts).
