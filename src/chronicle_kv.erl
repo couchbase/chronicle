@@ -46,6 +46,7 @@
 
 %% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
+-define(TXN_RETRIES, 10).
 
 -type name() :: atom().
 -type key() :: any().
@@ -230,24 +231,53 @@ txn(Name, Fun) ->
 
 txn(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
+    Retries = maps:get(retries, Opts, ?TXN_RETRIES),
+    txn_loop(Name, Fun, Opts, TRef, Retries).
+
+txn_loop(Name, Fun, Opts, TRef, Retries) ->
     case prepare_txn(Name, Fun, TRef, Opts) of
         {ok, {TxnResult, Conditions}} ->
             case TxnResult of
                 {commit, Updates} ->
-                    submit_transaction(Name, Conditions, Updates, TRef, Opts);
+                    txn_loop_commit(Name, Fun, Opts, TRef, Retries,
+                                    Updates, Conditions, no_extra);
                 {commit, Updates, Extra} ->
-                    case submit_transaction(Name, Conditions,
-                                            Updates, TRef, Opts) of
-                        {ok, Revision} ->
-                            {ok, Revision, Extra};
-                        Other ->
-                            Other
-                    end;
+                    txn_loop_commit(Name, Fun, Opts, TRef, Retries,
+                                    Updates, Conditions, {extra, Extra});
                 {abort, Result} ->
                     Result
             end;
         {error, {raised, T, E, Stack}} ->
             erlang:raise(T, E, Stack)
+    end.
+
+txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
+    case submit_transaction(Name, Conditions, Updates, TRef, Opts) of
+        {ok, Revision} = Ok ->
+            case Extra of
+                no_extra ->
+                    Ok;
+                {extra, ActualExtra} ->
+                    {ok, Revision, ActualExtra}
+            end;
+        {error, {conflict, Revision}} ->
+            case Retries > 0 of
+                true ->
+                    %% If read_own_writes is true, the following should
+                    %% normally hit the fast path. So it shouldn't be a big
+                    %% deal that we're doing this "redundant" sync.
+                    chronicle_rsm:sync_revision(Name, Revision, TRef),
+
+                    %% Don't trigger extra synchronization when retrying.
+                    NewOpts = Opts#{read_concurrency => local},
+
+                    txn_loop(Name, Fun, NewOpts,
+                             TRef, Retries - 1);
+                false ->
+                    {error, exceeded_retries}
+            end;
+        Other ->
+            Other
     end.
 
 prepare_txn(Name, Fun, TRef, Opts) ->
