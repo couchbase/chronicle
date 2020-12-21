@@ -99,20 +99,25 @@ set(Name, Key, Value, ExpectedRevision, Opts) ->
                    {set, Key, Value, ExpectedRevision},
                    get_timeout(Opts), Opts).
 
+-type update_result() :: {ok, revision()}
+                       | {error, not_found | exceeded_retries}.
 -type update_fun() :: fun ((value()) -> value()).
 
--spec update(name(), key(), update_fun()) -> op_result().
+-spec update(name(), key(), update_fun()) -> update_result().
 update(Name, Key, Fun) ->
     update(Name, Key, Fun, #{}).
 
--spec update(name(), key(), update_fun(), options()) -> op_result().
+-spec update(name(), key(), update_fun(), txn_options()) -> update_result().
 update(Name, Key, Fun, Opts) ->
-    case get(Name, Key) of
-        {ok, {Value, Revision}} ->
-            set(Name, Key, Fun(Value), Revision, Opts);
-        {error, _} = Error ->
-            Error
-    end.
+    txn(Name,
+        fun (Txn) ->
+                case txn_get(Key, Txn) of
+                    {ok, {Value, _}} ->
+                        {commit, [{set, Key, Fun(Value)}]};
+                    {error, not_found} = Error ->
+                        {abort, Error}
+                end
+        end, Opts).
 
 -spec delete(name(), key()) -> op_result().
 delete(Name, Key) ->
