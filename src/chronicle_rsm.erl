@@ -16,6 +16,8 @@
 -module(chronicle_rsm).
 -compile(export_all).
 
+-behavior(gen_statem).
+
 %% If it takes longer than this time to initialize, then we probably hit some
 %% bug.
 -define(INIT_TIMEOUT, 60000).
