@@ -89,7 +89,19 @@ check_key_conflicts(Keys, Writers) ->
                   case sets:size(Intersection) > 0 of
                       true ->
                           IntersectionList = sets:to_list(Intersection),
-                          throw({key_conflict, Pid, IntersectionList});
+
+                          case is_process_alive(Pid) of
+                              true ->
+                                  throw({key_conflict, Pid, IntersectionList});
+                              false ->
+                                  %% The process is dead by we haven't
+                                  %% received/processed the monitor
+                                  %% notification yet. Other processes might
+                                  %% have done so already. So don't error out
+                                  %% unnecessarily. We'll eventually see the
+                                  %% DOWN message.
+                                  ok
+                          end;
                       false ->
                           ok
                   end
