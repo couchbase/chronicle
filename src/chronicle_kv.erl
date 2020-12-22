@@ -183,7 +183,7 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
 -type txn_op() :: {set, key(), value()}
                 | {delete, key()}.
 -type txn_options() :: options() | #{retries => non_neg_integer()}.
--type txn_fun() :: fun ((snapshot()) ->
+-type txn_fun(Data) :: fun ((Data) ->
                                {commit, txn_ops()} |
                                {commit, txn_ops(), Extra::any()} |
                                {abort, Result::any()}).
@@ -192,11 +192,16 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
                     | {error, exceeded_retries}
                     | (Aborted::any()).
 
--spec transaction(name(), [key()], txn_fun()) -> txn_result().
+-type txn_opaque() ::
+        {txn_fast, Table::reference(), TableSeqno::chronicle:seqno()} |
+        {txn_slow, snapshot()}.
+
+-spec transaction(name(), [key()], txn_fun(snapshot())) -> txn_result().
 transaction(Name, Keys, Fun) ->
     transaction(Name, Keys, Fun, #{}).
 
--spec transaction(name(), [key()], txn_fun(), txn_options()) -> txn_result().
+-spec transaction(name(), [key()], txn_fun(snapshot()), txn_options()) ->
+          txn_result().
 transaction(Name, Keys, Fun, Opts) ->
     txn(Name,
         fun (Txn) ->
@@ -204,6 +209,7 @@ transaction(Name, Keys, Fun, Opts) ->
                 Fun(Snapshot)
         end, Opts).
 
+-spec txn_get(key(), txn_opaque()) -> get_result().
 txn_get(Key, Txn) ->
     case Txn of
         {txn_fast, Table, TableSeqno} ->
@@ -212,6 +218,7 @@ txn_get(Key, Txn) ->
             txn_get_from_map(Key, Map)
     end.
 
+-spec txn_get_many([key()], txn_opaque()) -> snapshot().
 txn_get_many(Keys, Txn) ->
     case Txn of
         {txn_fast, Table, TableSeqno} ->
@@ -220,9 +227,11 @@ txn_get_many(Keys, Txn) ->
             txn_get_from_map_many(Keys, Map)
     end.
 
+-spec txn(name(), txn_fun(txn_opaque())) -> txn_result().
 txn(Name, Fun) ->
     txn(Name, Fun, #{}).
 
+-spec txn(name(), txn_fun(txn_opaque()), txn_options()) -> txn_result().
 txn(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     Retries = maps:get(retries, Opts, ?TXN_RETRIES),
