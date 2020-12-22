@@ -659,15 +659,17 @@ handle_register_rsm(Name, Pid, From, State,
                           rsms_by_mref = MRefs} = Data) ->
     case check_register_rsm(Name, State, Data) of
         ok ->
+            NewData0 = maybe_cleanup_old_rsm(Name, Data),
+
             ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
 
             MRef = erlang:monitor(process, Pid),
             NewRSMs = RSMs#{Name => {MRef, Pid}},
             NewMRefs = MRefs#{MRef => Name},
 
-            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, NewData0),
             Info0 = #{committed_seqno => CommittedSeqno},
-            Info1 = case need_rsm_snapshot(Name, Data) of
+            Info1 = case need_rsm_snapshot(Name, NewData0) of
                         {true, NeedSnapshotSeqno} ->
                             Info0#{need_snapshot_seqno => NeedSnapshotSeqno};
                         false ->
@@ -675,8 +677,8 @@ handle_register_rsm(Name, Pid, From, State,
                     end,
 
             Reply = {ok, Info1},
-            NewData = Data#data{rsms_by_name = NewRSMs,
-                                rsms_by_mref = NewMRefs},
+            NewData = NewData0#data{rsms_by_name = NewRSMs,
+                                    rsms_by_mref = NewMRefs},
 
             {keep_state, NewData, {reply, From, Reply}};
         {error, _} = Error ->
@@ -687,13 +689,26 @@ check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
     case check_provisioned(State) of
         ok ->
             case maps:find(Name, RSMs) of
-                {ok, {OtherPid, _}} ->
-                    {error, {already_registered, Name, OtherPid}};
+                {ok, {_, OtherPid}} ->
+                    case is_process_alive(OtherPid) of
+                        true ->
+                            {error, {already_registered, Name, OtherPid}};
+                        false ->
+                            ok
+                    end;
                 error ->
                     ok
             end;
         {error, _} = Error ->
             Error
+    end.
+
+maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
+    case maps:find(Name, RSMs) of
+        {ok, {MRef, Pid}} ->
+            handle_rsm_down(Name, MRef, Pid, not_alive, Data);
+        error ->
+            Data
     end.
 
 handle_get_latest_snapshot(Pid, From, State,
@@ -727,10 +742,9 @@ handle_release_snapshot(MRef, _State,
                                   Data#data{snapshot_readers = NewReaders})}.
 
 handle_down(MRef, Pid, Reason, State,
-            #data{rsms_by_name = RSMs,
-                  rsms_by_mref = MRefs,
+            #data{rsms_by_mref = MRefs,
                   snapshot_readers = Readers} = Data) ->
-    case maps:take(MRef, MRefs) of
+    case maps:find(MRef, MRefs) of
         error ->
             case maps:is_key(MRef, Readers) of
                 true ->
@@ -738,13 +752,19 @@ handle_down(MRef, Pid, Reason, State,
                 false ->
                     {stop, {unexpected_process_down, MRef, Pid, Reason}, Data}
             end;
-        {Name, NewMRefs} ->
-            ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
-
-            NewRSMs = maps:remove(Name, RSMs),
-            {keep_state, Data#data{rsms_by_name = NewRSMs,
-                                   rsms_by_mref = NewMRefs}}
+        {ok, Name} ->
+            {keep_state, handle_rsm_down(Name, MRef, Pid, Reason, Data)}
     end.
+
+handle_rsm_down(Name, MRef, Pid, Reason, #data{rsms_by_name = RSMs,
+                                               rsms_by_mref = MRefs} = Data) ->
+    ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
+
+    erlang:demonitor(MRef, [flush]),
+    NewRSMs = maps:remove(Name, RSMs),
+    NewMRefs = maps:remove(MRef, MRefs),
+
+    Data#data{rsms_by_name = NewRSMs, rsms_by_mref = NewMRefs}.
 
 handle_snapshot_result(RSM, Pid, Result, State, Data) ->
     case Result of
