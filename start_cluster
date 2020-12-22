@@ -48,6 +48,7 @@ def start_node(i, hostname, ebin_path, data_dir, app):
             '-name', name,
             '-noinput',
             '-kernel', 'logger_level', 'debug',
+            '-kernel', 'error_logger_format_depth', '40',
             '-chronicle', 'data_dir', '"{}"'.format(node_data_dir),
             '-{}'.format(app), 'instance', '{}'.format(i),
             '-eval', script]
