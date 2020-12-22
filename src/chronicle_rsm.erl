@@ -172,6 +172,21 @@ take_snapshot(Pid, Seqno) ->
 callback_mode() ->
     handle_event_function.
 
+format_status(Opt, [_PDict, State, Data]) ->
+    case Opt of
+        normal ->
+            [{data, [{"State", {State, Data}}]}];
+        terminate ->
+            {State,
+             case Data of
+                 #data{} ->
+                     Data#data{mod_state = omitted};
+                 _ ->
+                     %% During gen_statem initialization Data may be undefined.
+                     Data
+             end}
+    end.
+
 init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
