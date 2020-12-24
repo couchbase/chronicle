@@ -561,6 +561,7 @@ setup_vnet(Nodes) ->
                                 prepare_vnode_dir(),
                                 chronicle_env:set_env(logger_function,
                                                       {?MODULE, debug_log}),
+                                application:load(chronicle),
                                 ok = chronicle_env:setup(),
 
                                 {ok, P} = chronicle_sup:start_link(),

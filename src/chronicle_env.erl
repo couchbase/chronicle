@@ -33,12 +33,9 @@ data_dir() ->
     end.
 
 setup() ->
-    case check_data_dir() of
-        ok ->
-            setup_logger();
-        {error, _} = Error ->
-            Error
-    end.
+    ?CHECK(check_data_dir(),
+           setup_logger_filter(),
+           setup_logger()).
 
 check_data_dir() ->
     try data_dir() of
@@ -80,6 +77,97 @@ setup_logger() ->
             Error
     end.
 
+setup_logger_filter() ->
+    case get_env(setup_logger_filter, true) of
+        true ->
+            {ok, Modules} = application:get_key(chronicle, modules),
+            ModulesMap = maps:from_list([{Mod, true} || Mod <- Modules]),
+            Filter = {fun logger_filter/2, ModulesMap},
+            case logger:add_primary_filter(chronicle_filter, Filter) of
+                ok ->
+                    ok;
+                {error, {already_exist, _}} ->
+                    ok;
+                {error, _} = Error ->
+                    Error
+            end;
+        false ->
+            ok
+    end.
+
+logger_filter(Event, Modules) ->
+    case maps:find(msg, Event) of
+        {ok, {report, Report}} when is_map(Report) ->
+            case maps:find(label, Report) of
+                {ok, Label} ->
+                    Action =
+                        case Label of
+                            {gen_statem, terminate} ->
+                                gen_statem_filter(Report, Modules);
+                            {proc_lib, crash} ->
+                                proc_lib_filter(Report, Modules);
+                            _ ->
+                                ignore
+                        end,
+
+                    case Action of
+                        ignore ->
+                            ignore;
+                        NewReport ->
+                            Event#{msg => {report, NewReport}}
+                    end;
+                error ->
+                    ignore
+            end;
+        _ ->
+            ignore
+    end.
+
+gen_statem_filter(Report, Modules) ->
+    case maps:find(modules, Report) of
+        {ok, [Module|_]} when is_map_key(Module, Modules) ->
+            case Report of
+                #{queue := Queue,
+                  postponed := Postponed} ->
+                    Report#{queue => sanitize_events(Module, Queue),
+                            postponed => sanitize_events(Module, Postponed)};
+                _ ->
+                    ignored
+            end;
+        _ ->
+            ignore
+    end.
+
+sanitize_events(Module, Events) ->
+    case erlang:function_exported(Module, sanitize_event, 2) of
+        true ->
+            [try Module:sanitize_event(Type, Event) of
+                 Sanitized -> Sanitized
+             catch
+                 _:_ ->
+                     {crashed, {Module, sanitize_event, 2}}
+             end || {Type, Event} <- Events];
+        false ->
+            Events
+    end.
+
+proc_lib_filter(Report, Modules) ->
+    case maps:find(report, Report) of
+        {ok, [Info | Rest]} when is_list(Info) ->
+            case lists:keyfind(initial_call, 1, Info) of
+                {_, {Module, init, _}} when is_map_key(Module, Modules) ->
+                    %% Messages can be large and may contain sensitive
+                    %% information.
+                    NewInfo = lists:keyreplace(messages, 1, Info,
+                                               {messages, omitted}),
+                    Report#{report => [NewInfo | Rest]};
+                _ ->
+                    ignore
+            end;
+        _ ->
+            ignore
+    end.
+
 -ifndef(TEST).
 
 get_env(Parameter) ->
@@ -97,3 +185,11 @@ set_env(Parameter, Value) ->
     application:set_env(chronicle, peer_param(Parameter), Value).
 
 -endif.
+
+get_env(Parameter, Default) ->
+    case get_env(Parameter) of
+        {ok, Value} ->
+            Value;
+        undefined ->
+            Default
+    end.
