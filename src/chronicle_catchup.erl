@@ -20,7 +20,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call_async/3]).
+-import(chronicle_utils, [sanitize_stacktrace/1]).
 
 -define(MAX_PARALLEL_CATCHUPS, 4).
 
@@ -133,7 +133,8 @@ spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
                             T:E:Stacktrace ->
                                 ?ERROR("Catchup to peer ~p failed: ~p~n"
                                        "Stacktrace:~n~p",
-                                       [Peer, {T, E}, Stacktrace]),
+                                       [Peer, {T, E},
+                                        sanitize_stacktrace(Stacktrace)]),
                                 {error, {catchup_failed, {T, E}}}
                         end,
 

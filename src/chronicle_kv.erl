@@ -17,7 +17,8 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [start_timeout/1]).
+-import(chronicle_utils, [start_timeout/1,
+                          sanitize_stacktrace/1]).
 
 %% APIs
 -export([event_manager/1]).
@@ -654,7 +655,7 @@ handle_prepare_txn(Fun, State, Data) ->
         of R -> {ok, R}
         catch
             T:E:Stack ->
-                {error, {raised, T, E, Stack}}
+                {error, {raised, T, E, sanitize_stacktrace(Stack)}}
         end,
 
     {reply, Result, Data}.

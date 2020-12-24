@@ -245,7 +245,7 @@ do_call(ServerRef, Call, LoggedCall, Timeout) ->
             erlang:raise(
               Class,
               {Reason, {gen, call, [ServerRef, LoggedCall, Timeout]}},
-              Stack)
+              sanitize_stacktrace(Stack))
     end.
 
 start_timeout({timeout, _, _} = Timeout) ->
@@ -885,3 +885,8 @@ sanitize_entries(_, 0) ->
     ['...'];
 sanitize_entries([Entry | Entries], MaxEntries) ->
     [sanitize_entry(Entry) | sanitize_entries(Entries, MaxEntries - 1)].
+
+sanitize_stacktrace([{Mod, Fun, [_|_] = Args, Info} | Rest]) ->
+    [{Mod, Fun, length(Args), Info} | Rest];
+sanitize_stacktrace(Stacktrace) ->
+    Stacktrace.

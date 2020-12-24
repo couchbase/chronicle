@@ -32,7 +32,8 @@
                           compare_positions/2,
                           max_position/2,
                           sanitize_entry/1,
-                          sanitize_entries/1]).
+                          sanitize_entries/1,
+                          sanitize_stacktrace/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer),
@@ -1843,7 +1844,8 @@ spawn_rsm_snapshot_saver(RSM, RSMPid, Seqno,
                                        "snapshot for RSM ~p~p at seqno ~p: ~p~n"
                                        "Stacktrace:~n~p",
                                        [RSM, RSMPid,
-                                        Seqno, {T, E}, Stacktrace]),
+                                        Seqno, {T, E},
+                                        sanitize_stacktrace(Stacktrace)]),
                                 failed
                         end,
 
