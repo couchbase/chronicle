@@ -231,9 +231,12 @@ call(ServerRef, Call) ->
 %% the form of {timeout, StartTime, Timeout} tuple in place of a literal timeout
 %% value.
 call(ServerRef, Call, Timeout) ->
-    do_call(ServerRef, Call, read_timeout(Timeout)).
+    call(ServerRef, Call, Call, Timeout).
 
-do_call(ServerRef, Call, Timeout) ->
+call(ServerRef, Call, LoggedCall, Timeout) ->
+    do_call(ServerRef, Call, LoggedCall, read_timeout(Timeout)).
+
+do_call(ServerRef, Call, LoggedCall, Timeout) ->
     try gen:call(ServerRef, '$gen_call', Call, Timeout) of
         {ok, Reply} ->
             Reply
@@ -241,7 +244,7 @@ do_call(ServerRef, Call, Timeout) ->
         Class:Reason:Stack ->
             erlang:raise(
               Class,
-              {Reason, {gen, call, [ServerRef, Call, Timeout]}},
+              {Reason, {gen, call, [ServerRef, LoggedCall, Timeout]}},
               Stack)
     end.
 

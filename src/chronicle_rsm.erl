@@ -24,7 +24,8 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call/2, call/3, read_timeout/1,
+-import(chronicle_utils, [call/2, call/3, call/4,
+                          read_timeout/1,
                           with_leader/2, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
@@ -84,13 +85,14 @@ command(Name, Command, Timeout) ->
                   end)).
 
 command(Leader, Name, HistoryId, Command, Timeout) ->
-    call(?SERVER(Leader, Name), {command, HistoryId, Command}, Timeout).
+    call(?SERVER(Leader, Name),
+         {command, HistoryId, Command}, command, Timeout).
 
 query(Name, Query) ->
     query(Name, Query, 5000).
 
 query(Name, Query, Timeout) ->
-    call(?SERVER(Name), {query, Query}, Timeout).
+    call(?SERVER(Name), {query, Query}, query, Timeout).
 
 get_applied_revision(Name, Type, Timeout)
   when Type =:= leader;

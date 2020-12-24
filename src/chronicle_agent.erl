@@ -25,7 +25,7 @@
 -behavior(gen_statem).
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call/2, call/3,
+-import(chronicle_utils, [call/2, call/3, call/4,
                           call_async/4,
                           next_term/2,
                           term_number/1,
@@ -396,6 +396,7 @@ install_snapshot(Peer, HistoryId, Term,
          {install_snapshot,
           HistoryId, Term,
           SnapshotSeqno, SnapshotTerm, SnapshotConfig, RSMSnapshots},
+         install_snapshot,
          ?INSTALL_SNAPSHOT_TIMEOUT).
 
 -type local_mark_committed_result() ::
