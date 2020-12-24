@@ -144,6 +144,11 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
+sanitize_event(cast, {append_commands, _}) ->
+    {cast, {append_commands, '...'}};
+sanitize_event(Type, Event) ->
+    {Type, Event}.
+
 init([Parent, HistoryId, Term]) ->
     chronicle_peers:monitor(),
 

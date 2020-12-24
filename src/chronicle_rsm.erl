@@ -189,6 +189,13 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
+sanitize_event({call, _} = Type, {command, HistoryId, _}) ->
+    {Type, {command, HistoryId, '...'}};
+sanitize_event({call, _} = Type, {query, _}) ->
+    {Type, {query, '...'}};
+sanitize_event(Type, Event) ->
+    {Type, Event}.
+
 init([Name, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->

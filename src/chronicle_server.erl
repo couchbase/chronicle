@@ -95,6 +95,11 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
+sanitize_event(cast, {rsm_command, Pid, Tag, HistoryId, Term, RSMName, _}) ->
+    {cast, {rsm_command, Pid, Tag, HistoryId, Term, RSMName, '...'}};
+sanitize_event(Type, Event) ->
+    {Type, Event}.
+
 init([]) ->
     process_flag(trap_exit, true),
 

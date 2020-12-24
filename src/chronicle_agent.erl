@@ -446,6 +446,19 @@ is_wipe_requested() ->
 callback_mode() ->
     handle_event_function.
 
+sanitize_event({call, _} = Type,
+               {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, _}) ->
+    {Type, {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, '...'}};
+sanitize_event({call, _} = Type,
+               {install_snapshot,
+                HistoryId, Term,
+                SnapshotSeqno, SnapshotTerm, SnapshotConfig, _}) ->
+    {Type, {install_snapshot,
+            HistoryId, Term,
+            SnapshotSeqno, SnapshotTerm, SnapshotConfig, '...'}};
+sanitize_event(Type, Event) ->
+    {Type, Event}.
+
 init([]) ->
     Data = init_data(),
     State =
