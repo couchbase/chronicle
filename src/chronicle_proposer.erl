@@ -129,6 +129,21 @@ append_commands(Pid, Commands) ->
 callback_mode() ->
     [handle_event_function, state_enter].
 
+format_status(Opt, [_PDict, State, Data]) ->
+    case Opt of
+        normal ->
+            [{data, [{"State", {State, Data}}]}];
+        terminate ->
+            {State,
+             case Data of
+                 #data{} ->
+                     sanitize_data(Data);
+                 _ ->
+                     %% During gen_statem initialization Data may be undefined.
+                     Data
+             end}
+    end.
+
 init([Parent, HistoryId, Term]) ->
     chronicle_peers:monitor(),
 
@@ -1984,3 +1999,11 @@ config_needs_transition_test() ->
     ?assertEqual(true,
                  do_config_needs_transition([a, b, c], [c, a, e, d, b])).
 -endif.
+
+sanitize_data(#data{pending_entries = PendingQ} = Data) ->
+    Pending = queue:to_list(PendingQ),
+    Sanitized = chronicle_utils:sanitize_entries(Pending),
+
+    Data#data{pending_entries = {sanitized,
+                                 length(Pending),
+                                 Sanitized}}.
