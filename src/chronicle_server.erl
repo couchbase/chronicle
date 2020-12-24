@@ -80,6 +80,21 @@ proposer_stopping(Pid, Reason) ->
 callback_mode() ->
     [handle_event_function, state_enter].
 
+format_status(Opt, [_PDict, State, Data]) ->
+    case Opt of
+        normal ->
+            [{data, [{"State", {State, Data}}]}];
+        terminate ->
+            {State,
+             case Data of
+                 #data{} ->
+                     sanitize_data(Data);
+                 _ ->
+                     %% During gen_statem initialization Data may be undefined.
+                     Data
+             end}
+    end.
+
 init([]) ->
     process_flag(trap_exit, true),
 
@@ -469,6 +484,18 @@ foreach_rsm(Fun, #data{rsms = RSMs}) ->
       fun (_MRef, {_Name, Pid}) ->
               Fun(Pid)
       end, RSMs).
+
+sanitize_data(#data{commands_batch = undefined} = Data) ->
+    Data;
+sanitize_data(#data{commands_batch = Commands} = Data) ->
+    SanitizedCommands =
+        chronicle_utils:batch_map(
+          fun (Requests) ->
+                  [{ReplyTo, {rsm_command, Name, ommitted}} ||
+                      {ReplyTo, {rsm_command, Name, _}} <- Requests]
+          end, Commands),
+
+    Data#data{commands_batch = SanitizedCommands}.
 
 -ifdef(TEST).
 

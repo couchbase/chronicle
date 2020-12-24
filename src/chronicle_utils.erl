@@ -372,6 +372,9 @@ batch_flush(#batch{id = Id,
     {lists:reverse(Reqs),
      Batch#batch{reqs = [], timer = undefined}}.
 
+batch_map(Fun, #batch{reqs = Requests} = Batch) ->
+    Batch#batch{reqs = Fun(Requests)}.
+
 gb_trees_filter(Pred, Tree) ->
     Iter = gb_trees:iterator(Tree),
     gb_trees_filter_loop(Pred, Iter, []).
