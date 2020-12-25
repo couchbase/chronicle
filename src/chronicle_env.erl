@@ -106,6 +106,12 @@ logger_filter(Event, Modules) ->
                                 gen_statem_filter(Report, Modules);
                             {proc_lib, crash} ->
                                 proc_lib_filter(Report, Modules);
+                            {supervisor, Error}
+                              when Error =:= child_terminated;
+                                   Error =:= start_error;
+                                   Error =:= shutdown_error;
+                                   Error =:= shutdown ->
+                                supervisor_filter(Report, Modules);
                             _ ->
                                 ignore
                         end,
@@ -184,6 +190,27 @@ proc_lib_filter(Report, Modules) ->
                         end,
 
                     Report#{report => [NewInfo1 | Rest]};
+                _ ->
+                    ignore
+            end;
+        _ ->
+            ignore
+    end.
+
+supervisor_filter(Report, Modules) ->
+    case maps:find(report, Report) of
+        {ok, Info} when is_list(Info) ->
+            case lists:keyfind(supervisor, 1, Info) of
+                {_, {_, Module}} when is_map_key(Module, Modules) ->
+                    case lists:keyfind(reason, 1, Info) of
+                        {_, Reason} ->
+                            NewReason = chronicle_utils:sanitize_reason(Reason),
+                            NewInfo = lists:keyreplace(reason, 1, Info,
+                                                       {reason, NewReason}),
+                            Report#{report => NewInfo};
+                        false ->
+                            ignore
+                    end;
                 _ ->
                     ignore
             end;
