@@ -364,21 +364,6 @@ handle_log_entry(Entry, Storage) ->
                               Meta, Truncate, Entries, Storage);
         {meta, Meta} ->
             add_meta(Meta, Storage);
-        {truncate, Seqno} ->
-            #storage{low_seqno = LowSeqno, high_seqno = HighSeqno} = Storage,
-
-            mem_log_delete_range(Seqno + 1, HighSeqno, Storage),
-            NewStorage0 = config_index_truncate(Seqno, Storage),
-            NewStorage = NewStorage0#storage{high_seqno = Seqno},
-
-            %% For the first log segment it's possible for truncate to go
-            %% below the low seqno. So it needs to be adjusted accordingly.
-            case Seqno < LowSeqno of
-                true ->
-                    NewStorage#storage{low_seqno = Seqno + 1};
-                false ->
-                    NewStorage
-            end;
         {snapshot, Seqno, Term, Config} ->
             add_snapshot(Seqno, Term, Config, Storage);
         {install_snapshot, Seqno, Term, Config, Meta} ->
