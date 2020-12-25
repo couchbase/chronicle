@@ -110,8 +110,8 @@ json_api(Req, #state{domain=kv, op=get}=State) ->
                   },
                   {<<"value">>, jiffy:decode(Val)}]},
             {jiffy:encode(R), Req, State};
-        _ ->
-            {<<"">>, Req, State}
+        not_found ->
+            {stop, reply(404, <<>>, Req), State}
     end;
 json_api(Req, #state{domain=kv, op=post}=State) ->
     {Result, Req1} = set_value(Req, any),
@@ -164,9 +164,12 @@ node_api(Req, #state{domain=node, op=status}) ->
 
 %% internal module functions
 reply_json(Status, Response, Req) ->
+    reply(Status, jiffy:encode(Response), Req).
+
+reply(Status, Response, Req) ->
     cowboy_req:reply(Status,
                      #{<<"content-type">> => <<"application/json">>},
-                     jiffy:encode(Response), Req).
+                     Response, Req).
 
 method_to_atom(<<"GET">>) ->
     get;
