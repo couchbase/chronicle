@@ -128,9 +128,16 @@ gen_statem_filter(Report, Modules) ->
         {ok, [Module|_]} when is_map_key(Module, Modules) ->
             case Report of
                 #{queue := Queue,
-                  postponed := Postponed} ->
-                    Report#{queue => sanitize_events(Module, Queue),
-                            postponed => sanitize_events(Module, Postponed)};
+                  postponed := Postponed,
+                  reason := {Class, Reason, Stack}} ->
+                    NewQueue = sanitize_events(Module, Queue),
+                    NewPostponed = sanitize_events(Module, Postponed),
+                    NewReason = chronicle_utils:sanitize_reason(Reason),
+                    NewStack = chronicle_utils:sanitize_stacktrace(Stack),
+
+                    Report#{queue => NewQueue,
+                            postponed => NewPostponed,
+                            reason => {Class, NewReason, NewStack}};
                 _ ->
                     ignored
             end;
