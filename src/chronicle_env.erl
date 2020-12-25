@@ -165,9 +165,25 @@ proc_lib_filter(Report, Modules) ->
                 {_, {Module, init, _}} when is_map_key(Module, Modules) ->
                     %% Messages can be large and may contain sensitive
                     %% information.
-                    NewInfo = lists:keyreplace(messages, 1, Info,
-                                               {messages, omitted}),
-                    Report#{report => [NewInfo | Rest]};
+                    NewInfo0 = lists:keyreplace(messages, 1, Info,
+                                                {messages, omitted}),
+                    NewInfo1 =
+                        case lists:keyfind(error_info, 1, NewInfo0) of
+                            {_, {Class, Reason, Stack}} ->
+                                NewReason =
+                                    chronicle_utils:sanitize_reason(Reason),
+                                NewStack =
+                                    chronicle_utils:sanitize_stacktrace(Stack),
+
+                                lists:keyreplace(error_info, 1, NewInfo0,
+                                                 {error_info,
+                                                  {Class,
+                                                   NewReason, NewStack}});
+                            _ ->
+                                NewInfo0
+                        end,
+
+                    Report#{report => [NewInfo1 | Rest]};
                 _ ->
                     ignore
             end;
