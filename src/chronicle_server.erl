@@ -20,7 +20,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [call/3]).
+-import(chronicle_utils, [call/3, sanitize_reason/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -234,7 +234,8 @@ handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
     end.
 
 handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
-    ?INFO("Proposer ~p terminated with reason ~p", [Pid, Reason]),
+    ?INFO("Proposer ~p terminated with reason ~p",
+          [Pid, sanitize_reason(Reason)]),
 
     NewData = Data#data{proposer = undefined},
     case Status of
@@ -249,7 +250,7 @@ handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
             %% Some requests may have never been processed by the proposer and
             %% the only way to indicate to the callers that something went
             %% wrong is to terminate chronicle_server.
-            {stop, {proposer_terminated, Reason}, NewData}
+            {stop, proposer_terminated, NewData}
     end.
 
 handle_proposer_msg({proposer_ready, HistoryId, Term, HighSeqno},
@@ -272,7 +273,7 @@ handle_proposer_stopping(Reason,
                          #leader{history_id = HistoryId, term = Term},
                          Data) ->
     ?INFO("Proposer for term ~p in history ~p is terminating. Reason: ~p",
-          [Term, HistoryId, Reason]),
+          [Term, HistoryId, sanitize_reason(Reason)]),
     {next_state, #follower{}, Data}.
 
 reply_request(ReplyTo, Reply) ->
@@ -423,8 +424,7 @@ handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
             {stop, {unexpected_process_down, MRef, Pid, Reason}};
         {{Name, RSMPid}, NewRSMs} ->
             true = (Pid =:= RSMPid),
-            ?DEBUG("RSM ~p~p terminated with reason: ~p",
-                   [Name, RSMPid, Reason]),
+            ?DEBUG("RSM ~p~p terminated", [Name, RSMPid]),
             {keep_state, Data#data{rsms = NewRSMs}}
     end.
 

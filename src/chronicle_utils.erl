@@ -174,8 +174,9 @@ with_trap_exit_maybe_exit() ->
         {'EXIT', _Pid, normal} = Exit ->
             ?DEBUG("Ignoring exit message with reason normal: ~p", [Exit]),
             with_trap_exit_maybe_exit();
-        {'EXIT', _Pid, Reason} = Exit ->
-            ?DEBUG("Terminating due to exit message ~p", [Exit]),
+        {'EXIT', Pid, Reason} ->
+            ?DEBUG("Terminating due to ~p terminating with reason ~p",
+                   [Pid, sanitize_reason(Reason)]),
             %% exit/2 is used instead of exit/1, so it can't be caught by a
             %% try..catch block.
             exit(self(), Reason)
@@ -244,7 +245,8 @@ do_call(ServerRef, Call, LoggedCall, Timeout) ->
         Class:Reason:Stack ->
             erlang:raise(
               Class,
-              {Reason, {gen, call, [ServerRef, LoggedCall, Timeout]}},
+              {sanitize_reason(Reason),
+               {gen, call, [ServerRef, LoggedCall, Timeout]}},
               sanitize_stacktrace(Stack))
     end.
 
@@ -890,3 +892,41 @@ sanitize_stacktrace([{Mod, Fun, [_|_] = Args, Info} | Rest]) ->
     [{Mod, Fun, length(Args), Info} | Rest];
 sanitize_stacktrace(Stacktrace) ->
     Stacktrace.
+
+sanitize_reason({Reason, Stack} = Pair) ->
+    Sanitize =
+        case Reason of
+            {badmatch, _} ->
+                true;
+            {case_clause, _} ->
+                true;
+            {try_clause, _} ->
+                true;
+            {bad_fun, _} ->
+                true;
+            {bad_arity, _} ->
+                true;
+            {nocatch, _} ->
+                true;
+            _ when Reason =:= badarg;
+                   Reason =:= badarith;
+                   Reason =:= function_clause;
+                   Reason =:= if_clause;
+                   Reason =:= undef;
+                   Reason =:= timeout_value;
+                   Reason =:= noproc;
+                   Reason =:= noconnection;
+                   Reason =:= system_limit ->
+                true;
+            _ ->
+                false
+        end,
+
+    case Sanitize of
+        true ->
+            {Reason, sanitize_stacktrace(Stack)};
+        false ->
+            Pair
+    end;
+sanitize_reason(Reason) ->
+    Reason.

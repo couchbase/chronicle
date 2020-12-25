@@ -29,7 +29,8 @@
                           have_quorum/2,
                           is_quorum_feasible/3,
                           log_entry_revision/1,
-                          term_number/1]).
+                          term_number/1,
+                          sanitize_reason/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -1072,14 +1073,14 @@ handle_nodedown(Peer, Info, _State, _Data) ->
 handle_down(MRef, Pid, Reason, State, Data) ->
     {ok, Peer, NewData} = take_monitor(MRef, Data),
     ?INFO("Observed agent ~p on peer ~p "
-          "go down with reason ~p", [Pid, Peer, Reason]),
+          "go down with reason ~p",
+          [Pid, Peer, sanitize_reason(Reason)]),
 
     case Peer =:= ?SELF_PEER of
         true ->
-            ?ERROR("Terminating proposer because local "
-                   "agent ~p terminated with reason ~p",
-                   [Pid, Reason]),
-            stop({agent_terminated, Reason}, State, Data);
+            ?ERROR("Terminating proposer "
+                   "because local agent ~p terminated", [Pid]),
+            stop(local_agent_terminated, State, Data);
         false ->
             maybe_cancel_peer_catchup(Peer, NewData),
             remove_peer_status(Peer, NewData),

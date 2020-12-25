@@ -33,6 +33,7 @@
                           max_position/2,
                           sanitize_entry/1,
                           sanitize_entries/1,
+                          sanitize_reason/1,
                           sanitize_stacktrace/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
@@ -721,7 +722,7 @@ check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
 maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
     case maps:find(Name, RSMs) of
         {ok, {MRef, Pid}} ->
-            handle_rsm_down(Name, MRef, Pid, not_alive, Data);
+            handle_rsm_down(Name, MRef, Pid, Data);
         error ->
             Data
     end.
@@ -768,12 +769,12 @@ handle_down(MRef, Pid, Reason, State,
                     {stop, {unexpected_process_down, MRef, Pid, Reason}, Data}
             end;
         {ok, Name} ->
-            {keep_state, handle_rsm_down(Name, MRef, Pid, Reason, Data)}
+            {keep_state, handle_rsm_down(Name, MRef, Pid, Data)}
     end.
 
-handle_rsm_down(Name, MRef, Pid, Reason, #data{rsms_by_name = RSMs,
-                                               rsms_by_mref = MRefs} = Data) ->
-    ?DEBUG("RSM ~p~p terminated with reason: ~p", [Name, Pid, Reason]),
+handle_rsm_down(Name, MRef, Pid, #data{rsms_by_name = RSMs,
+                                       rsms_by_mref = MRefs} = Data) ->
+    ?DEBUG("RSM ~p~p terminated", [Name, Pid]),
 
     erlang:demonitor(MRef, [flush]),
     NewRSMs = maps:remove(Name, RSMs),
@@ -1871,10 +1872,10 @@ rsm_snapshot_saver(RSM, RSMPid, Seqno, Storage) ->
     receive
         {snapshot, Snapshot} ->
             chronicle_storage:save_rsm_snapshot(Seqno, RSM, Snapshot, Storage);
-        {'DOWN', MRef, process, RSMPid, Reason} ->
-            ?ERROR("RSM ~p~p died with reason ~p "
+        {'DOWN', MRef, process, RSMPid, _Reason} ->
+            ?ERROR("RSM ~p~p died "
                    "before passing a snapshot for seqno ~p.",
-                   [RSM, RSMPid, Reason, Seqno]),
+                   [RSM, RSMPid, Seqno]),
             failed
     end.
 
