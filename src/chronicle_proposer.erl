@@ -1018,12 +1018,7 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
       end, Peers).
 
 get_machines(ConfigEntry) ->
-    config_machines(ConfigEntry#log_entry.value).
-
-config_machines(#config{state_machines = Machines}) ->
-    maps:keys(Machines);
-config_machines(#transition{future_config = FutureConfig}) ->
-    config_machines(FutureConfig).
+    maps:keys(chronicle_utils:config_rsms(ConfigEntry#log_entry.value)).
 
 handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
     ?INFO("Peer ~p came up", [Peer]),
