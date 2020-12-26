@@ -704,8 +704,24 @@ config_index_replace(Config, #storage{config_index_tab = Tab}) ->
     ets:delete_all_objects(Tab),
     ets:insert(Tab, Config).
 
-config_index_truncate(Seqno, #storage{config_index_tab = Tab} = Storage) ->
-    NewConfig = truncate_ordered_table(Tab, Seqno),
+config_index_truncate(Seqno, #storage{config_index_tab = Table} = Storage) ->
+    LastSeqno = ets:last(Table),
+    NewConfig =
+        case LastSeqno of
+            '$end_of_table' ->
+                undefined;
+            _ ->
+                delete_ordered_table_range(Table, Seqno, LastSeqno),
+                NewLastSeqno = ets:last(Table),
+                case NewLastSeqno of
+                    '$end_of_table' ->
+                        undefined;
+                    _ ->
+                        [Entry] = ets:lookup(Table, NewLastSeqno),
+                        Entry
+                end
+        end,
+
     Storage#storage{config = NewConfig}.
 
 config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
@@ -722,23 +738,28 @@ config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
 
     Storage#storage{config = NewConfig}.
 
-truncate_ordered_table(Table, Seqno) ->
-    truncate_ordered_table_loop(Table, ets:last(Table), Seqno).
+delete_ordered_table_range(Table, FromKey, ToKey) ->
+    StartKey =
+        case ets:member(Table, FromKey) of
+            true ->
+                FromKey;
+            false ->
+                ets:next(Table, FromKey)
+        end,
 
-truncate_ordered_table_loop(Table, Last, Seqno) ->
-    case Last of
+    delete_ordered_table_range_loop(Table, StartKey, ToKey).
+
+delete_ordered_table_range_loop(Table, Key, ToKey) ->
+    case Key of
         '$end_of_table' ->
-            undefined;
-        EntrySeqno ->
-            case EntrySeqno > Seqno of
-                true ->
-                    Prev = ets:prev(Table, EntrySeqno),
-                    ets:delete(Table, EntrySeqno),
-                    truncate_ordered_table_loop(Table, Prev, Seqno);
-                false ->
-                    [Entry] = ets:lookup(Table, EntrySeqno),
-                    Entry
-            end
+            ok;
+        _ when Key =< ToKey ->
+            NextKey = ets:next(Table, Key),
+            ets:delete(Table, Key),
+            delete_ordered_table_range_loop(Table, NextKey, ToKey);
+        _ ->
+            true = (Key > ToKey),
+            ok
     end.
 
 mem_log_append(EndSeqno, Entries,
