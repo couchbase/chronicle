@@ -37,6 +37,8 @@
 -define(TABLE, ?ETS_TABLE(?MODULE)).
 -define(MAX_BACKOFF, 16).
 
+-define(EXTRA_WAIT_TIME, 10).
+
 -record(leader, { peer, history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
 -record(observer, { electable }).
@@ -685,7 +687,6 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
 
     case maps:take(Ref, Refs) of
         {Peer, NewRefs} ->
-            ?DEBUG("peer ~p result ~p", [Peer, Result]),
             case Result of
                 {ok, PeerTerm} ->
                     NewVotes = [Peer | Votes],
@@ -693,9 +694,7 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
 
                     case have_quorum(NewVotes, Quorum) of
                         true ->
-                            %% TODO: wait a little more to receive
-                            %% more responses
-                            {ok, NewTerm};
+                            election_worker_extra_wait(NewTerm, NewRefs);
                         false ->
                             election_worker_loop(NewRefs,
                                                  Quorum, NewVotes, NewTerm)
@@ -709,6 +708,34 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
             %% Possible if we got a DOWN message from the peer, but it did end
             %% up sending a response to us and it got delivered.
             election_worker_loop(Refs, Quorum, Votes, Term)
+    end.
+
+election_worker_extra_wait(Term, Refs) ->
+    erlang:send_after(?EXTRA_WAIT_TIME, self(), extra_wait_timeout),
+    election_worker_extra_wait_loop(Term, Refs).
+
+election_worker_extra_wait_loop(Term, Refs) ->
+    case maps:size(Refs) =:= 0 of
+        true ->
+            {ok, Term};
+        false ->
+            receive
+                {Ref, Response} when is_reference(Ref) ->
+                    NewRefs = maps:remove(Ref, Refs),
+                    NewTerm =
+                        case Response of
+                            {ok, PeerTerm} ->
+                                max(Term, PeerTerm);
+                            {error, _} ->
+                                Term
+                        end,
+                    election_worker_extra_wait_loop(NewTerm, NewRefs);
+                {'DOWN', Ref, process, _Pid, _Reason} ->
+                    NewRefs = maps:remove(Ref, Refs),
+                    election_worker_extra_wait_loop(Term, NewRefs);
+                extra_wait_timeout ->
+                    {ok, Term}
+            end
     end.
 
 handle_send_heartbeat(State, Data) ->
