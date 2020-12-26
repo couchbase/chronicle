@@ -139,4 +139,3 @@ supervisor_filter(Report, Modules) ->
         _ ->
             ignore
     end.
-
