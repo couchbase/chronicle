@@ -17,7 +17,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [with_leader/2]).
+-import(chronicle_utils, [peer_voters/1, peer_replicas/1, with_leader/2]).
 
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
@@ -271,9 +271,11 @@ get_peers() ->
 -spec get_peers(timeout()) -> get_peers_result().
 get_peers(Timeout) ->
     get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       {ok, #{voters => Config#config.voters,
-                              replicas => Config#config.replicas}}
+               fun (#config{peers = Peers}, _ConfigRevision) ->
+                       Voters = peer_voters(Peers),
+                       Replicas = peer_replicas(Peers),
+                       {ok, #{voters => lists:sort(Voters),
+                              replicas => lists:sort(Replicas)}}
                end).
 
 -spec get_voters() -> {ok, peers()}.
@@ -283,8 +285,9 @@ get_voters() ->
 -spec get_voters(timeout()) -> {ok, peers()}.
 get_voters(Timeout) ->
     get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       {ok, Config#config.voters}
+               fun (#config{peers = Peers}, _ConfigRevision) ->
+                       Voters = peer_voters(Peers),
+                       {ok, lists:sort(Voters)}
                end).
 
 -spec get_replicas() -> {ok, peers()}.
@@ -294,8 +297,9 @@ get_replicas() ->
 -spec get_replicas(timeout()) -> {ok, peers()}.
 get_replicas(Timeout) ->
     get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       {ok, Config#config.replicas}
+               fun (#config{peers = Peers}, _ConfigRevision) ->
+                       Replicas = peer_replicas(Peers),
+                       {ok, lists:sort(Replicas)}
                end).
 
 -spec get_cluster_info() -> cluster_info().
@@ -334,34 +338,15 @@ get_config(Leader, TRef, Fun) ->
 
 update_peers(Fun, Lock, Timeout) ->
     update_config(
-      fun (#config{voters = Voters, replicas = Replicas} = Config) ->
-              CurrentPeers = maps:from_list(
-                               [{V, voter} || V <- Voters] ++
-                                   [{R, replica} || R <- Replicas]),
-
-              case Fun(CurrentPeers) of
+      fun (#config{peers = OldPeers} = Config) ->
+              case Fun(OldPeers) of
                   {ok, NewPeers} ->
-                      {NewVoters0, NewReplicas0} =
-                          maps:fold(
-                            fun (Peer, Role, {AccVoters, AccReplicas}) ->
-                                    case Role of
-                                        voter ->
-                                            {[Peer | AccVoters], AccReplicas};
-                                        replica ->
-                                            {AccVoters, [Peer | AccReplicas]}
-                                    end
-                            end, {[], []}, NewPeers),
-
-                      case NewVoters0 of
+                      NewVoters = peer_voters(NewPeers),
+                      case NewVoters of
                           [] ->
                               {stop, {error, no_voters_left}};
                           _ ->
-                              NewVoters = lists:sort(NewVoters0),
-                              NewReplicas = lists:sort(NewReplicas0),
-
-                              NewConfig = Config#config{voters = NewVoters,
-                                                        replicas = NewReplicas},
-                              {ok, NewConfig}
+                              {ok, Config#config{peers = NewPeers}}
                       end;
                   {error, _} = Error ->
                       {stop, Error}

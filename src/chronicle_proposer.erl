@@ -30,7 +30,8 @@
                           is_quorum_feasible/3,
                           log_entry_revision/1,
                           term_number/1,
-                          sanitize_reason/1]).
+                          sanitize_reason/1,
+                          peer_voters/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -658,7 +659,8 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     %% decided not to bother.
     %%
     %% TODO: figure out what to do with replicas
-    NewConfig = Config#config{voters = Branch#branch.peers, replicas = []},
+    NewPeers = maps:from_list([{Peer, voter} || Peer <- Branch#branch.peers]),
+    NewConfig = Config#config{peers = NewPeers},
 
     ?INFO("Resolving a branch.~n"
           "High seqno: ~p~n"
@@ -1976,8 +1978,9 @@ translate_quorum({joint, Quorum1, Quorum2}, Self) ->
      translate_quorum(Quorum1, Self),
      translate_quorum(Quorum2, Self)}.
 
-config_needs_transition(#config{voters = NewVoters},
-                        #config{voters = OldVoters}) ->
+config_needs_transition(#config{peers = NewPeers}, #config{peers = OldPeers}) ->
+    NewVoters = peer_voters(NewPeers),
+    OldVoters = peer_voters(OldPeers),
     do_config_needs_transition(NewVoters, OldVoters).
 
 do_config_needs_transition(NewVoters, OldVoters) ->

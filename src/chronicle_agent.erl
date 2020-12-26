@@ -859,7 +859,7 @@ handle_reprovision(From, State, Data) ->
             HighSeqno = get_high_seqno(Data),
             Peer = get_peer_name(),
             NewTerm = next_term(Term, Peer),
-            NewConfig = Config#config{voters = [Peer]},
+            NewConfig = Config#config{peers = #{Peer => voter}},
             Seqno = HighSeqno + 1,
 
             ConfigEntry = #log_entry{history_id = HistoryId,
@@ -891,13 +891,13 @@ check_reprovision(State, Data) ->
             ConfigEntry = get_config(Data),
             Config = ConfigEntry#log_entry.value,
             case Config of
-                #config{voters = Voters,
-                        replicas = Replicas} ->
-                    case Voters =:= [Peer] andalso Replicas =:= [] of
+                #config{peers = Peers} ->
+                    case maps:size(Peers) =:= 1 andalso
+                        maps:find(Peer, Peers) =:= {ok, voter} of
                         true ->
                             {ok, Config};
-                        _ ->
-                            {error, {bad_config, Peer, Voters, Replicas}}
+                        false ->
+                            {error, {bad_config, Peer, Peers}}
                     end;
                 #transition{} ->
                     {error, {unstable_config, Config}}
@@ -918,8 +918,7 @@ handle_provision(Machines0, From, State, Data) ->
                          [{Name, #rsm_config{module = Module, args = Args}} ||
                              {Name, Module, Args} <- Machines0]),
 
-            Config = #config{voters = [Peer],
-                             replicas = [],
+            Config = #config{peers = #{Peer => voter},
                              state_machines = Machines},
             ConfigEntry = #log_entry{history_id = HistoryId,
                                      term = Term,

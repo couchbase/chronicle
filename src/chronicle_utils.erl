@@ -484,7 +484,8 @@ get_establish_quorum(Metadata) ->
 get_establish_peers(Metadata) ->
     get_quorum_peers(get_establish_quorum(Metadata)).
 
-get_append_quorum(#config{voters = Voters}) ->
+get_append_quorum(#config{peers = Peers}) ->
+    Voters = peer_voters(Peers),
     {majority, sets:from_list(Voters)};
 get_append_quorum(#transition{current_config = Current,
                               future_config = Future}) ->
@@ -522,11 +523,9 @@ is_quorum_feasible(Peers, FailedVotes, Quorum) ->
     PossibleVotes = Peers -- FailedVotes,
     have_quorum(PossibleVotes, Quorum).
 
-config_peers(#config{voters = Voters,
-                     replicas = Replicas}) ->
-    Voters ++ Replicas;
-config_peers(#transition{current_config = Current,
-                         future_config = Future}) ->
+config_peers(#config{peers = Peers}) ->
+    maps:keys(Peers);
+config_peers(#transition{current_config = Current, future_config = Future}) ->
     lists:usort(config_peers(Current) ++ config_peers(Future)).
 
 config_rsms(#config{state_machines = RSMs}) ->
@@ -536,6 +535,18 @@ config_rsms(#transition{current_config = Config}) ->
     %% the cluster is provisioned, so this is correct. Reconsider once state
     %% machines can be added dynamically.
     config_rsms(Config).
+
+peer_voters(Peers) ->
+    peers_of_type(voter, Peers).
+
+peer_replicas(Peers) ->
+    peers_of_type(replica, Peers).
+
+peers_of_type(Type, Peers) ->
+    maps:keys(maps:filter(
+                fun (_, PeerType) ->
+                        PeerType =:= Type
+                end, Peers)).
 
 -ifdef(HAVE_SYNC_DIR).
 
