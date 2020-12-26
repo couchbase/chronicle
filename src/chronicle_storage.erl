@@ -724,6 +724,20 @@ config_index_truncate(Seqno, #storage{config_index_tab = Table} = Storage) ->
 
     Storage#storage{config = NewConfig}.
 
+config_index_compact(#storage{low_seqno = LowSeqno,
+                              config_index_tab = Table}) ->
+    LastSeqno = ets:last(Table),
+    case LastSeqno of
+        '$end_of_table' ->
+            ok;
+        _ when LastSeqno < LowSeqno ->
+            %% Need to preserve the last entry, because otherwise there'll be
+            %% nothing left in the table.
+            delete_ordered_table_range(Table, ?NO_SEQNO, LastSeqno - 1);
+        _ ->
+            delete_ordered_table_range(Table, ?NO_SEQNO, LowSeqno - 1)
+    end.
+
 config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
                                       config = Config} = Storage) ->
     ConfigEntries = lists:filter(fun is_config_entry/1, Entries),
@@ -1258,7 +1272,12 @@ do_compact_log(#storage{low_seqno = LowSeqno,
     %% the log (with lower start seqnos) around.
     NewLowSeqno = max(LowSeqno, LogStartSeqno),
 
-    Storage#storage{log_segments = Keep, low_seqno = NewLowSeqno}.
+    NewStorage = Storage#storage{log_segments = Keep,
+                                 low_seqno = NewLowSeqno},
+
+    config_index_compact(NewStorage),
+
+    NewStorage.
 
 classify_logs(SnapshotSeqno, Logs) ->
     classify_logs_loop(SnapshotSeqno, Logs, []).
