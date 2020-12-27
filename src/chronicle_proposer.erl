@@ -1204,31 +1204,39 @@ handle_get_cluster_info(ReplyTo,
              config => ConfigEntry},
     start_sync_quorum(ReplyTo, Info, Data).
 
-handle_cas_config(ReplyTo, NewConfig, CasRevision,
-                  #data{config = ConfigEntry} = Data) ->
-    #log_entry{value = Config} = ConfigEntry,
-    ConfigRevision = log_entry_revision(ConfigEntry),
-
-    %% TODO: this protects against the client proposing transition. But in
-    %% reality, it should be solved in some other way
-    #config{} = NewConfig,
-    #config{} = Config,
-    case CasRevision =:= ConfigRevision of
-        true ->
+handle_cas_config(ReplyTo, NewConfig, CasRevision, Data) ->
+    case check_cas_config(NewConfig, CasRevision, Data) of
+        {ok, OldConfig} ->
             FinalConfig =
-                case config_needs_transition(NewConfig, Config) of
+                case config_needs_transition(NewConfig, OldConfig) of
                     true ->
-                        #transition{current_config = Config,
+                        #transition{current_config = OldConfig,
                                     future_config = NewConfig};
                     false ->
                         NewConfig
                 end,
             NewData = propose_config(FinalConfig, ReplyTo, Data),
             {keep_state, replicate(NewData)};
-        false ->
-            Reply = {error, {cas_failed, ConfigRevision}},
-            reply_request(ReplyTo, Reply),
+        {error, _} = Error ->
+            reply_request(ReplyTo, Error),
             keep_state_and_data
+    end.
+
+check_cas_config(NewConfig, CasRevision, #data{config = ConfigEntry}) ->
+    #log_entry{value = Config} = ConfigEntry,
+    ConfigRevision = log_entry_revision(ConfigEntry),
+    #config{} = Config,
+
+    case CasRevision =:= ConfigRevision of
+        true ->
+            case NewConfig of
+                #config{} ->
+                    {ok, Config};
+                _ ->
+                    {error, {invalid_config, NewConfig}}
+            end;
+        false ->
+            {error, {cas_failed, ConfigRevision}}
     end.
 
 handle_stop(From, State,

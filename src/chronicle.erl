@@ -383,6 +383,8 @@ update_config_loop(Fun, Lock, Leader, TRef) ->
                                   {error, {cas_failed, _}} ->
                                       update_config_loop(Fun,
                                                          Lock, Leader, TRef);
+                                  {error, {invalid_config, _} = Error} ->
+                                      error(Error);
                                   {error, _} = Error ->
                                       Error
                               end;
