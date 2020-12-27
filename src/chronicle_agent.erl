@@ -256,8 +256,7 @@ provision(Machines) ->
 -type reprovision_result() :: ok
                             | {error, reprovision_error()}.
 -type reprovision_error() :: not_provisioned
-                           | {unstable_config, #transition{}}
-                           | {bad_config, peer(), [peer()], [peer()]}.
+                           | {bad_config, peer(), #config{} | #transition{}}.
 
 -spec reprovision() -> reprovision_result().
 reprovision() ->
@@ -897,10 +896,10 @@ check_reprovision(State, Data) ->
                         true ->
                             {ok, Config};
                         false ->
-                            {error, {bad_config, Peer, Peers}}
+                            {error, {bad_config, Peer, Config}}
                     end;
                 #transition{} ->
-                    {error, {unstable_config, Config}}
+                    {error, {bad_config, Peer, Config}}
             end;
         Error ->
             Error
