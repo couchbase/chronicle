@@ -484,8 +484,8 @@ get_establish_quorum(Metadata) ->
 get_establish_peers(Metadata) ->
     get_quorum_peers(get_establish_quorum(Metadata)).
 
-get_append_quorum(#config{peers = Peers}) ->
-    Voters = peer_voters(Peers),
+get_append_quorum(#config{} = Config) ->
+    Voters = chronicle_config:get_voters(Config),
     {majority, sets:from_list(Voters)};
 get_append_quorum(#transition{current_config = Current,
                               future_config = Future}) ->
@@ -535,18 +535,6 @@ config_rsms(#transition{current_config = Config}) ->
     %% the cluster is provisioned, so this is correct. Reconsider once state
     %% machines can be added dynamically.
     config_rsms(Config).
-
-peer_voters(Peers) ->
-    peers_of_type(voter, Peers).
-
-peer_replicas(Peers) ->
-    peers_of_type(replica, Peers).
-
-peers_of_type(Type, Peers) ->
-    maps:keys(maps:filter(
-                fun (_, PeerType) ->
-                        PeerType =:= Type
-                end, Peers)).
 
 -ifdef(HAVE_SYNC_DIR).
 

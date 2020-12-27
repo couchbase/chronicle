@@ -17,7 +17,7 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [peer_voters/1, peer_replicas/1, with_leader/2]).
+-import(chronicle_utils, [with_leader/2]).
 
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
@@ -81,7 +81,7 @@ acquire_lock(Timeout) ->
     Lock = chronicle_utils:random_uuid(),
     Result = update_config(
                fun (Config) ->
-                       {ok, Config#config{lock = Lock}}
+                       {ok, chronicle_config:set_lock(Lock, Config)}
                end, Timeout),
 
     case Result of
@@ -122,9 +122,9 @@ remove_peers(Lock, Peers) ->
 -spec remove_peers(lockreq(), peers(), timeout()) -> remove_peers_result().
 remove_peers(Lock, Peers, Timeout) ->
     validate_peers(Peers),
-    update_peers(
-      fun (CurrentPeers) ->
-              {ok, maps:without(Peers, CurrentPeers)}
+    update_config(
+      fun (Config) ->
+              chronicle_config:remove_peers(Peers, Config)
       end, Lock, Timeout).
 
 -spec add_voter(peer()) -> add_peers_result().
@@ -202,20 +202,10 @@ add_peers(Lock, Peers) ->
 -spec add_peers(lockreq(), peers_and_roles(), timeout()) -> add_peers_result().
 add_peers(Lock, Peers, Timeout) ->
     validate_peers_and_roles(Peers),
-    update_peers(
-      fun (CurrentPeers) ->
-              add_peers_loop(Peers, CurrentPeers)
+    update_config(
+      fun (Config) ->
+              chronicle_config:add_peers(Peers, Config)
       end, Lock, Timeout).
-
-add_peers_loop([], AccPeers) ->
-    {ok, AccPeers};
-add_peers_loop([{Peer, Role} | Rest], AccPeers) ->
-    case maps:find(Peer, AccPeers) of
-        {ok, CurrentRole} ->
-            {error, {already_member, Peer, CurrentRole}};
-        error ->
-            add_peers_loop(Rest, AccPeers#{Peer => Role})
-    end.
 
 -type set_peer_roles_result() :: ok | {error, set_peer_roles_error()}.
 -type set_peer_roles_error() :: lock_revoked_error()
@@ -247,20 +237,10 @@ set_peer_roles(Lock, Peers) ->
           set_peer_roles_result().
 set_peer_roles(Lock, Peers, Timeout) ->
     validate_peers_and_roles(Peers),
-    update_peers(
-      fun (CurrentPeers) ->
-              set_peer_roles_loop(Peers, CurrentPeers)
+    update_config(
+      fun (Config) ->
+              chronicle_config:set_peer_roles(Peers, Config)
       end, Lock, Timeout).
-
-set_peer_roles_loop([], AccPeers) ->
-    {ok, AccPeers};
-set_peer_roles_loop([{Peer, Role} | Rest], AccPeers) ->
-    case maps:is_key(Peer, AccPeers) of
-        true ->
-            set_peer_roles_loop(Rest, AccPeers#{Peer => Role});
-        false ->
-            {error, {not_member, Peer}}
-    end.
 
 -type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
 
@@ -271,11 +251,10 @@ get_peers() ->
 -spec get_peers(timeout()) -> get_peers_result().
 get_peers(Timeout) ->
     get_config(Timeout,
-               fun (#config{peers = Peers}, _ConfigRevision) ->
-                       Voters = peer_voters(Peers),
-                       Replicas = peer_replicas(Peers),
-                       {ok, #{voters => lists:sort(Voters),
-                              replicas => lists:sort(Replicas)}}
+               fun (Config, _ConfigRevision) ->
+                       Voters = chronicle_config:get_voters(Config),
+                       Replicas = chronicle_config:get_replicas(Config),
+                       {ok, #{voters => Voters, replicas => Replicas}}
                end).
 
 -spec get_voters() -> {ok, peers()}.
@@ -285,9 +264,8 @@ get_voters() ->
 -spec get_voters(timeout()) -> {ok, peers()}.
 get_voters(Timeout) ->
     get_config(Timeout,
-               fun (#config{peers = Peers}, _ConfigRevision) ->
-                       Voters = peer_voters(Peers),
-                       {ok, lists:sort(Voters)}
+               fun (Config, _ConfigRevision) ->
+                       {ok, chronicle_config:get_voters(Config)}
                end).
 
 -spec get_replicas() -> {ok, peers()}.
@@ -297,9 +275,8 @@ get_replicas() ->
 -spec get_replicas(timeout()) -> {ok, peers()}.
 get_replicas(Timeout) ->
     get_config(Timeout,
-               fun (#config{peers = Peers}, _ConfigRevision) ->
-                       Replicas = peer_replicas(Peers),
-                       {ok, lists:sort(Replicas)}
+               fun (Config, _ConfigRevision) ->
+                       {ok, chronicle_config:get_replicas(Config)}
                end).
 
 -spec get_cluster_info() -> cluster_info().
@@ -336,23 +313,6 @@ get_config(Leader, TRef, Fun) ->
             Error
     end.
 
-update_peers(Fun, Lock, Timeout) ->
-    update_config(
-      fun (#config{peers = OldPeers} = Config) ->
-              case Fun(OldPeers) of
-                  {ok, NewPeers} ->
-                      NewVoters = peer_voters(NewPeers),
-                      case NewVoters of
-                          [] ->
-                              {stop, {error, no_voters_left}};
-                          _ ->
-                              {ok, Config#config{peers = NewPeers}}
-                      end;
-                  {error, _} = Error ->
-                      {stop, Error}
-              end
-      end, Lock, Timeout).
-
 update_config(Fun, Timeout) ->
     update_config(Fun, unlocked, Timeout).
 
@@ -367,10 +327,8 @@ update_config_loop(Fun, Lock, Leader, TRef) ->
     get_config(
       Leader, TRef,
       fun (Config, ConfigRevision) ->
-              ConfigLock = Config#config.lock,
-
-              case Lock =:= unlocked orelse ConfigLock =:= Lock of
-                  true ->
+              case chronicle_config:check_lock(Lock, Config) of
+                  ok ->
                       case Fun(Config) of
                           {ok, NewConfig}
                             when Config =:= NewConfig ->
@@ -388,11 +346,11 @@ update_config_loop(Fun, Lock, Leader, TRef) ->
                                   {error, _} = Error ->
                                       Error
                               end;
-                          {stop, Return} ->
-                              Return
+                          {error, _} = Error ->
+                              Error
                       end;
-                  false ->
-                      {error, {lock_revoked, Lock, ConfigLock}}
+                  {error, _} = Error ->
+                      Error
               end
       end).
 

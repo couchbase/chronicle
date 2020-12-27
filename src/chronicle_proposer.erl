@@ -30,8 +30,7 @@
                           is_quorum_feasible/3,
                           log_entry_revision/1,
                           term_number/1,
-                          sanitize_reason/1,
-                          peer_voters/1]).
+                          sanitize_reason/1]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -1208,7 +1207,7 @@ handle_cas_config(ReplyTo, NewConfig, CasRevision, Data) ->
     case check_cas_config(NewConfig, CasRevision, Data) of
         {ok, OldConfig} ->
             FinalConfig =
-                case config_needs_transition(NewConfig, OldConfig) of
+                case chronicle_config:needs_transition(NewConfig, OldConfig) of
                     true ->
                         #transition{current_config = OldConfig,
                                     future_config = NewConfig};
@@ -1980,37 +1979,6 @@ translate_quorum({joint, Quorum1, Quorum2}, Self) ->
     {joint,
      translate_quorum(Quorum1, Self),
      translate_quorum(Quorum2, Self)}.
-
-config_needs_transition(#config{peers = NewPeers}, #config{peers = OldPeers}) ->
-    NewVoters = peer_voters(NewPeers),
-    OldVoters = peer_voters(OldPeers),
-    do_config_needs_transition(NewVoters, OldVoters).
-
-do_config_needs_transition(NewVoters, OldVoters) ->
-    Added = NewVoters -- OldVoters,
-    Removed = OldVoters -- NewVoters,
-    NumChanges = length(Added) + length(Removed),
-
-    %% If there's no more than one change, then all quorums in the new config
-    %% interesect all quorums in the old config. So we don't need to go
-    %% through a transitional configuration.
-    NumChanges > 1.
-
--ifdef(TEST).
-config_needs_transition_test() ->
-    ?assertEqual(false,
-                 do_config_needs_transition([a, b, c], [a, b, c, d])),
-    ?assertEqual(false,
-                 do_config_needs_transition([a, b, c], [a, b])),
-    ?assertEqual(false,
-                 do_config_needs_transition([a, b, c], [c, a, d, b])),
-    ?assertEqual(true,
-                 do_config_needs_transition([a, b, c], [a, b, c, d, e])),
-    ?assertEqual(true,
-                 do_config_needs_transition([a, b, c], [a, b, d])),
-    ?assertEqual(true,
-                 do_config_needs_transition([a, b, c], [c, a, e, d, b])).
--endif.
 
 sanitize_data(#data{pending_entries = PendingQ} = Data) ->
     Pending = queue:to_list(PendingQ),
