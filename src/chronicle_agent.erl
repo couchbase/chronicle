@@ -1113,7 +1113,7 @@ check_not_wipe_requested(Data) ->
     end.
 
 check_in_peers(#log_entry{value = Config}, Data) ->
-    Peers = chronicle_utils:config_peers(Config),
+    Peers = chronicle_config:get_peers(Config),
 
     Peer = get_meta(?META_PEER, Data),
     true = (Peer =/= ?NO_PEER),
@@ -2289,7 +2289,7 @@ cancel_snapshot(#data{snapshot_state = SnapshotState,
     Data#data{snapshot_state = undefined}.
 
 get_rsms(#log_entry{value = Config}) ->
-    chronicle_utils:config_rsms(Config).
+    chronicle_config:get_rsms(Config).
 
 read_rsm_snapshot(Name, Seqno, Storage) ->
     case chronicle_storage:read_rsm_snapshot(Name, Seqno, Storage) of

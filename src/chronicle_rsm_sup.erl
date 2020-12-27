@@ -52,10 +52,10 @@ init([]) ->
               period => 10},
 
     Config = chronicle_utils:get_config(Metadata),
-    {ok, Flags, chronicle_utils:config_rsms(Config)}.
+    {ok, Flags, chronicle_config:get_rsms(Config)}.
 
 handle_event({new_config, Config}, _) ->
-    {noreply, chronicle_utils:config_rsms(Config)}.
+    {noreply, chronicle_config:get_rsms(Config)}.
 
 child_specs(RSMs) ->
     lists:map(

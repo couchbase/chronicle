@@ -468,7 +468,7 @@ get_config(#metadata{config = ConfigEntry}) ->
 get_all_peers(Metadata) ->
     case Metadata#metadata.pending_branch of
         undefined ->
-            config_peers(get_config(Metadata));
+            chronicle_config:get_peers(get_config(Metadata));
         #branch{peers = BranchPeers} ->
             BranchPeers
     end.
@@ -522,19 +522,6 @@ do_have_quorum(AllVotes, {majority, QuorumNodes}) ->
 is_quorum_feasible(Peers, FailedVotes, Quorum) ->
     PossibleVotes = Peers -- FailedVotes,
     have_quorum(PossibleVotes, Quorum).
-
-config_peers(#config{peers = Peers}) ->
-    maps:keys(Peers);
-config_peers(#transition{current_config = Current, future_config = Future}) ->
-    lists:usort(config_peers(Current) ++ config_peers(Future)).
-
-config_rsms(#config{state_machines = RSMs}) ->
-    RSMs;
-config_rsms(#transition{current_config = Config}) ->
-    %% TODO: currently there's no way to change the set of state machines once
-    %% the cluster is provisioned, so this is correct. Reconsider once state
-    %% machines can be added dynamically.
-    config_rsms(Config).
 
 -ifdef(HAVE_SYNC_DIR).
 

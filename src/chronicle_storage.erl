@@ -1026,7 +1026,7 @@ validate_snapshot(DataDir, Seqno, Config) ->
     end.
 
 validate_existing_snapshot(SnapshotDir, Config) ->
-    RSMs = chronicle_utils:config_rsms(Config#log_entry.value),
+    RSMs = chronicle_config:get_rsms(Config#log_entry.value),
     Errors =
         lists:filtermap(
           fun (RSM) ->

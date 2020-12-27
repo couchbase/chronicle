@@ -23,6 +23,7 @@
 
 -export([init/2, reinit/2]).
 -export([set_lock/2, check_lock/2]).
+-export([get_rsms/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
 -export([needs_transition/2]).
@@ -49,8 +50,18 @@ check_lock(LockReq, #config{lock = Lock}) ->
             {error, {lock_revoked, LockReq, Lock}}
     end.
 
+get_rsms(#config{state_machines = RSMs}) ->
+    RSMs;
+get_rsms(#transition{current_config = Config}) ->
+    %% TODO: currently there's no way to change the set of state machines once
+    %% the cluster is provisioned, so this is correct. Reconsider once state
+    %% machines can be added dynamically.
+    get_rsms(Config).
+
 get_peers(#config{peers = Peers}) ->
-    lists:sort(maps:keys(Peers)).
+    lists:sort(maps:keys(Peers));
+get_peers(#transition{current_config = Current, future_config = Future}) ->
+    lists:umerge(get_peers(Current), get_peers(Future)).
 
 get_replicas(#config{peers = Peers}) ->
     lists:sort(peers_replicas(Peers)).

@@ -1017,7 +1017,7 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
       end, Peers).
 
 get_machines(ConfigEntry) ->
-    maps:keys(chronicle_utils:config_rsms(ConfigEntry#log_entry.value)).
+    maps:keys(chronicle_config:get_rsms(ConfigEntry#log_entry.value)).
 
 handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
     ?INFO("Peer ~p came up", [Peer]),
@@ -1959,7 +1959,7 @@ get_append_quorum(#log_entry{value = Config}, #data{peer = Self}) ->
     translate_quorum(chronicle_utils:get_append_quorum(Config), Self).
 
 config_peers(#log_entry{value = Config}, #data{peer = Self}) ->
-    translate_peers(chronicle_utils:config_peers(Config), Self).
+    translate_peers(chronicle_config:get_peers(Config), Self).
 
 translate_peers(Peers, Self) when is_list(Peers) ->
     sets:to_list(translate_peers(sets:from_list(Peers), Self));
