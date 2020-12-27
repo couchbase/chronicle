@@ -21,10 +21,22 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-export([init/2, reinit/2]).
 -export([set_lock/2, check_lock/2]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
 -export([needs_transition/2]).
+
+init(Peer, Machines) ->
+    MachinesMap =
+        maps:from_list(
+          [{Name, #rsm_config{module = Module, args = Args}} ||
+              {Name, Module, Args} <- Machines]),
+    Peers = #{Peer => voter},
+    #config{peers = Peers, state_machines = MachinesMap}.
+
+reinit(Peer, Config) ->
+    Config#config{peers = #{Peer => voter}}.
 
 set_lock(Lock, #config{} = Config) ->
     Config#config{lock = Lock}.
