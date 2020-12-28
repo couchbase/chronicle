@@ -851,14 +851,14 @@ foreach_rsm(Fun, #data{rsms_by_name = RSMs}) ->
 
 handle_reprovision(From, State, Data) ->
     case check_reprovision(State, Data) of
-        {ok, Config} ->
+        {ok, OldPeer, Config} ->
             #{?META_HISTORY_ID := HistoryId,
               ?META_TERM := Term} = get_meta(Data),
 
             HighSeqno = get_high_seqno(Data),
             Peer = get_peer_name(),
             NewTerm = next_term(Term, Peer),
-            NewConfig = chronicle_config:reinit(Peer, Config),
+            NewConfig = chronicle_config:reinit(Peer, OldPeer, Config),
             Seqno = HighSeqno + 1,
 
             ConfigEntry = #log_entry{history_id = HistoryId,
@@ -896,7 +896,7 @@ check_reprovision(State, Data) ->
 
                     case Voters =:= [Peer] andalso Replicas =:= [] of
                         true ->
-                            {ok, Config};
+                            {ok, Peer, Config};
                         false ->
                             {error, {bad_config, Peer, Config}}
                     end;

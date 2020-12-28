@@ -23,7 +23,7 @@
 
 -export([is_config/1, is_stable/1]).
 -export([transition/2, next_config/1]).
--export([init/2, reinit/2, branch/2]).
+-export([init/2, reinit/3, branch/2]).
 -export([set_lock/2, check_lock/2]).
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
@@ -31,7 +31,8 @@
 
 -export_type([peers/0]).
 
--type peers() :: #{chronicle:peer() => chronicle:role()}.
+-type peers() :: #{chronicle:peer() =>
+                       #{id := chronicle:uuid(), role := chronicle:role()}}.
 
 is_config(Value) ->
     case Value of
@@ -65,15 +66,18 @@ init(Peer, Machines) ->
         maps:from_list(
           [{Name, #rsm_config{module = Module, args = Args}} ||
               {Name, Module, Args} <- Machines]),
-    Peers = #{Peer => voter},
+    Peers = #{Peer => peer_info(voter)},
     #config{peers = Peers, state_machines = MachinesMap}.
 
-reinit(Peer, Config) ->
-    Config#config{peers = #{Peer => voter}}.
+reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
+    PeerId = get_peer_id(OldPeer, Config),
+    Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}.
 
 branch(Peers, Config) ->
     %% TODO: figure out what to do with replicas
-    Config#config{peers = maps:from_list([{Peer, voter} || Peer <- Peers]),
+    PeerInfos = [{Peer, peer_info(get_peer_id(Peer, Config), voter)} ||
+                    Peer <- Peers],
+    Config#config{peers = maps:from_list(PeerInfos),
                   old_peers = undefined}.
 
 set_lock(Lock, #config{} = Config) ->
@@ -125,7 +129,7 @@ add_peers_loop([{Peer, Role} | Rest], AccPeers) ->
         {ok, CurrentRole} ->
             {error, {already_member, Peer, CurrentRole}};
         error ->
-            add_peers_loop(Rest, AccPeers#{Peer => Role})
+            add_peers_loop(Rest, AccPeers#{Peer => peer_info(Role)})
     end.
 
 remove_peers(Peers, Config) ->
@@ -143,10 +147,11 @@ set_peer_roles(Peers, Config) ->
 set_peer_roles_loop([], AccPeers) ->
     {ok, AccPeers};
 set_peer_roles_loop([{Peer, Role} | Rest], AccPeers) ->
-    case maps:is_key(Peer, AccPeers) of
-        true ->
-            set_peer_roles_loop(Rest, AccPeers#{Peer => Role});
-        false ->
+    case maps:find(Peer, AccPeers) of
+        {ok, Info} ->
+            NewInfo = Info#{role => Role},
+            set_peer_roles_loop(Rest, AccPeers#{Peer => NewInfo});
+        error ->
             {error, {not_member, Peer}}
     end.
 
@@ -164,17 +169,17 @@ update_peers(Fun, #config{peers = OldPeers} = Config) ->
             Error
     end.
 
-peers_of_type(Type, Peers) ->
+peers_of_role(Role, Peers) ->
     maps:keys(maps:filter(
-                fun (_, PeerType) ->
-                        PeerType =:= Type
+                fun (_, #{role := PeerRole}) ->
+                        PeerRole =:= Role
                 end, Peers)).
 
 peers_voters(Peers) ->
-    peers_of_type(voter, Peers).
+    peers_of_role(voter, Peers).
 
 peers_replicas(Peers) ->
-    peers_of_type(replica, Peers).
+    peers_of_role(replica, Peers).
 
 peers_quorum(Peers) ->
     Voters = peers_voters(Peers),
@@ -204,3 +209,30 @@ needs_transition_test() ->
     ?assertEqual(true, do_needs_transition([a, b, c], [a, b, d])),
     ?assertEqual(true, do_needs_transition([a, b, c], [c, a, e, d, b])).
 -endif.
+
+peer_info(Role) ->
+    peer_info(chronicle_utils:random_uuid(), Role).
+
+peer_info(Id, Role) ->
+    #{id => Id, role => Role}.
+
+get_peer_id(Peer, #config{peers = Peers, old_peers = OldPeers} = Config) ->
+    MaybePeerInfo =
+        case maps:find(Peer, Peers) of
+            {ok, _} = Ok ->
+                Ok;
+            error ->
+                case OldPeers =:= undefined of
+                    true ->
+                        error;
+                    false ->
+                        maps:find(Peer, OldPeers)
+                end
+        end,
+
+    case MaybePeerInfo of
+        error ->
+            error({unknown_peer, Peer, Config});
+        {ok, #{id := PeerId}} ->
+            PeerId
+    end.
