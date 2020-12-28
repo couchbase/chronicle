@@ -601,12 +601,14 @@ get_external_state(State) ->
 
 build_metadata(Data) ->
     #{?META_PEER := Peer,
+      ?META_PEER_ID := PeerId,
       ?META_HISTORY_ID := HistoryId,
       ?META_TERM := Term,
       ?META_COMMITTED_SEQNO := CommittedSeqno,
       ?META_PENDING_BRANCH := PendingBranch} = get_meta(Data),
 
     #metadata{peer = Peer,
+              peer_id = PeerId,
               history_id = HistoryId,
               term = Term,
               high_term = get_high_term(Data),
@@ -921,12 +923,15 @@ handle_provision(Machines, From, State, Data) ->
                                      seqno = Seqno,
                                      value = Config},
 
+            PeerId = chronicle_config:get_peer_id(Peer, Config),
+
             ?DEBUG("Provisioning with history ~p. Config:~n~p",
                    [HistoryId, Config]),
 
             NewData = append_entry(ConfigEntry,
                                    #{?META_STATE => ?META_STATE_PROVISIONED,
                                      ?META_PEER => Peer,
+                                     ?META_PEER_ID => PeerId,
                                      ?META_HISTORY_ID => HistoryId,
                                      ?META_TERM => Term,
                                      ?META_COMMITTED_SEQNO => Seqno},
@@ -1065,7 +1070,11 @@ check_cluster_info(ClusterInfo) ->
 handle_join_cluster(ClusterInfo, From, State, Data) ->
     case check_join_cluster(ClusterInfo, State, Data) of
         {ok, Config, Seqno} ->
-            Meta = #{?META_STATE => {?META_STATE_JOIN_CLUSTER,
+            Peer = get_meta(?META_PEER, Data),
+            PeerId = chronicle_config:get_peer_id(Peer, Config#log_entry.value),
+
+            Meta = #{?META_PEER_ID => PeerId,
+                     ?META_STATE => {?META_STATE_JOIN_CLUSTER,
                                      #{seqno => Seqno,
                                        config => Config}}},
             NewData = store_meta(Meta, Data),
@@ -2061,6 +2070,7 @@ storage_open() ->
             false ->
                 SeedMeta = #{?META_STATE => not_provisioned,
                              ?META_PEER => ?NO_PEER,
+                             ?META_PEER_ID => ?NO_PEER_ID,
                              ?META_HISTORY_ID => ?NO_HISTORY,
                              ?META_TERM => ?NO_TERM,
                              ?META_COMMITTED_SEQNO => ?NO_SEQNO,

@@ -28,11 +28,12 @@
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
+-export([get_peer_id/2]).
 
 -export_type([peers/0]).
 
 -type peers() :: #{chronicle:peer() =>
-                       #{id := chronicle:uuid(), role := chronicle:role()}}.
+                       #{id := chronicle:peer_id(), role := chronicle:role()}}.
 
 is_config(Value) ->
     case Value of

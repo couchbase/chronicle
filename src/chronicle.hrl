@@ -33,6 +33,7 @@
 
 -define(SELF_PEER, 'self@nohost').
 -define(NO_PEER, 'nonode@nohost').
+-define(NO_PEER_ID, <<>>).
 -define(NO_HISTORY, <<"no-history">>).
 -define(NO_TERM, {0, ?NO_PEER}).
 -define(NO_SEQNO, 0).
@@ -56,6 +57,7 @@
           value :: noop | #config{} | #rsm_command{}}).
 
 -record(metadata, { peer,
+                    peer_id,
                     history_id,
                     term,
                     high_term,
@@ -132,6 +134,7 @@
 
 -define(META_STATE, state).
 -define(META_PEER, peer).
+-define(META_PEER_ID, peer_id).
 -define(META_HISTORY_ID, history_id).
 -define(META_TERM, term).
 -define(META_COMMITTED_SEQNO, committed_seqno).

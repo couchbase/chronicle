@@ -42,6 +42,7 @@
                          config := #log_entry{}}}.
 -type meta() :: #{ ?META_STATE => meta_state(),
                    ?META_PEER => chronicle:peer(),
+                   ?META_PEER_ID => chronicle:peer_id(),
                    ?META_HISTORY_ID => chronicle:history_id(),
                    ?META_TERM => chronicle:leader_term(),
                    ?META_COMMITTED_SEQNO => chronicle:seqno(),

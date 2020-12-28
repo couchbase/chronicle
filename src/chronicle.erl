@@ -33,7 +33,7 @@
 -export([set_peer_role/2, set_peer_role/3, set_peer_role/4,
          set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
 
--export_type([uuid/0, peer/0, history_id/0,
+-export_type([uuid/0, peer/0, peer_id/0, history_id/0,
               leader_term/0, seqno/0, peer_position/0,
               revision/0, cluster_info/0]).
 
@@ -41,6 +41,7 @@
 
 -type uuid() :: binary().
 -type peer() :: atom().
+-type peer_id() :: uuid().
 -type peers() :: [peer()].
 -type peers_and_roles() :: [{peer(), role()}].
 -type history_id() :: binary().
