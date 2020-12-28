@@ -476,22 +476,13 @@ get_all_peers(Metadata) ->
 get_establish_quorum(Metadata) ->
     case Metadata#metadata.pending_branch of
         undefined ->
-            get_append_quorum(get_config(Metadata));
+            chronicle_config:get_quorum(get_config(Metadata));
         #branch{peers = BranchPeers} ->
             {all, sets:from_list(BranchPeers)}
     end.
 
 get_establish_peers(Metadata) ->
     get_quorum_peers(get_establish_quorum(Metadata)).
-
-get_append_quorum(#config{} = Config) ->
-    Voters = chronicle_config:get_voters(Config),
-    {majority, sets:from_list(Voters)};
-get_append_quorum(#transition{current_config = Current,
-                              future_config = Future}) ->
-    {joint,
-     get_append_quorum(Current),
-     get_append_quorum(Future)}.
 
 get_quorum_peers(Quorum) ->
     sets:to_list(do_get_quorum_peers(Quorum)).

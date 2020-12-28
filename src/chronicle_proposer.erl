@@ -656,10 +656,7 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     %% will get truncated from the history. This can be confusing and it's
     %% possible to deal with this situation better. But for the time being I
     %% decided not to bother.
-    %%
-    %% TODO: figure out what to do with replicas
-    NewPeers = maps:from_list([{Peer, voter} || Peer <- Branch#branch.peers]),
-    NewConfig = Config#config{peers = NewPeers},
+    NewConfig = chronicle_config:branch(Branch#branch.peers, Config),
 
     ?INFO("Resolving a branch.~n"
           "High seqno: ~p~n"
@@ -878,15 +875,17 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
     end.
 
 maybe_complete_config_transition(#data{config = ConfigEntry} = Data) ->
-    case ConfigEntry#log_entry.value of
-        #config{} ->
+    Config = ConfigEntry#log_entry.value,
+    case chronicle_config:is_stable(Config) of
+        true ->
             Data;
-        #transition{future_config = FutureConfig} ->
+        false ->
             case is_config_committed(Data) of
                 true ->
+                    NextConfig = chronicle_config:next_config(Config),
                     %% Preserve config_change_from if any.
                     ReplyTo = Data#data.config_change_reply_to,
-                    propose_config(FutureConfig, ReplyTo, Data);
+                    propose_config(NextConfig, ReplyTo, Data);
                 false ->
                     Data
             end
@@ -894,8 +893,8 @@ maybe_complete_config_transition(#data{config = ConfigEntry} = Data) ->
 
 maybe_reply_config_change(#data{config = ConfigEntry,
                                 config_change_reply_to = ReplyTo} = Data) ->
-    case ConfigEntry#log_entry.value of
-        #config{} ->
+    case chronicle_config:is_stable(ConfigEntry#log_entry.value) of
+        true ->
             case ReplyTo =/= undefined of
                 true ->
                     true = is_config_committed(Data),
@@ -905,7 +904,7 @@ maybe_reply_config_change(#data{config = ConfigEntry,
                 false ->
                     Data
             end;
-        #transition{} ->
+        false ->
             %% We only reply once the stable config gets committed.
             Data
     end.
@@ -1187,7 +1186,7 @@ handle_get_config(ReplyTo, #data{config = ConfigEntry} = Data) ->
     true = is_config_committed(Data),
 
     Config = ConfigEntry#log_entry.value,
-    #config{} = Config,
+    true = chronicle_config:is_stable(Config),
     ConfigRevision = log_entry_revision(ConfigEntry),
 
     Reply = {ok, Config, ConfigRevision},
@@ -1206,14 +1205,7 @@ handle_get_cluster_info(ReplyTo,
 handle_cas_config(ReplyTo, NewConfig, CasRevision, Data) ->
     case check_cas_config(NewConfig, CasRevision, Data) of
         {ok, OldConfig} ->
-            FinalConfig =
-                case chronicle_config:needs_transition(NewConfig, OldConfig) of
-                    true ->
-                        #transition{current_config = OldConfig,
-                                    future_config = NewConfig};
-                    false ->
-                        NewConfig
-                end,
+            FinalConfig = chronicle_config:transition(NewConfig, OldConfig),
             NewData = propose_config(FinalConfig, ReplyTo, Data),
             {keep_state, replicate(NewData)};
         {error, _} = Error ->
@@ -1224,14 +1216,15 @@ handle_cas_config(ReplyTo, NewConfig, CasRevision, Data) ->
 check_cas_config(NewConfig, CasRevision, #data{config = ConfigEntry}) ->
     #log_entry{value = Config} = ConfigEntry,
     ConfigRevision = log_entry_revision(ConfigEntry),
-    #config{} = Config,
+    true = chronicle_config:is_stable(Config),
 
     case CasRevision =:= ConfigRevision of
         true ->
-            case NewConfig of
-                #config{} ->
+            case chronicle_config:is_config(NewConfig)
+                andalso chronicle_config:is_stable(NewConfig) of
+                true ->
                     {ok, Config};
-                _ ->
+                false ->
                     {error, {invalid_config, NewConfig}}
             end;
         false ->
@@ -1956,7 +1949,7 @@ get_all_peers(#metadata{peer = Self} = Metadata) ->
     translate_peers(chronicle_utils:get_all_peers(Metadata), Self).
 
 get_append_quorum(#log_entry{value = Config}, #data{peer = Self}) ->
-    translate_quorum(chronicle_utils:get_append_quorum(Config), Self).
+    translate_quorum(chronicle_config:get_quorum(Config), Self).
 
 config_peers(#log_entry{value = Config}, #data{peer = Self}) ->
     translate_peers(chronicle_config:get_peers(Config), Self).

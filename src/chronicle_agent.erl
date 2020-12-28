@@ -889,8 +889,8 @@ check_reprovision(State, Data) ->
             Peer = get_meta(?META_PEER, Data),
             ConfigEntry = get_config(Data),
             Config = ConfigEntry#log_entry.value,
-            case Config of
-                #config{} ->
+            case chronicle_config:is_stable(Config) of
+                true ->
                     Voters = chronicle_config:get_voters(Config),
                     Replicas = chronicle_config:get_replicas(Config),
 
@@ -900,7 +900,7 @@ check_reprovision(State, Data) ->
                         false ->
                             {error, {bad_config, Peer, Config}}
                     end;
-                #transition{} ->
+                false ->
                     {error, {bad_config, Peer, Config}}
             end;
         Error ->

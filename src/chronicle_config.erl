@@ -21,12 +21,44 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--export([init/2, reinit/2]).
+-export([is_config/1, is_stable/1]).
+-export([transition/2, next_config/1]).
+-export([init/2, reinit/2, branch/2]).
 -export([set_lock/2, check_lock/2]).
--export([get_rsms/1]).
+-export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
--export([needs_transition/2]).
+
+is_config(Value) ->
+    case Value of
+        #config{} ->
+            true;
+        #transition{} ->
+            true;
+        _ ->
+            false
+    end.
+
+is_stable(Config) ->
+    case Config of
+        #config{} ->
+            true;
+        #transition{} ->
+            false
+    end.
+
+next_config(#config{} = Config) ->
+    Config;
+next_config(#transition{future_config = FutureConfig}) ->
+    FutureConfig.
+
+transition(NewConfig, OldConfig) ->
+    case needs_transition(NewConfig, OldConfig) of
+        true ->
+            #transition{current_config = OldConfig, future_config = NewConfig};
+        false ->
+            NewConfig
+    end.
 
 init(Peer, Machines) ->
     MachinesMap =
@@ -38,6 +70,11 @@ init(Peer, Machines) ->
 
 reinit(Peer, Config) ->
     Config#config{peers = #{Peer => voter}}.
+
+branch(Peers, Config) ->
+    %% TODO: figure out what to do with replicas
+    %% TODO: should not assume that the config is stable
+    Config#config{peers = maps:from_list([{Peer, voter} || Peer <- Peers])}.
 
 set_lock(Lock, #config{} = Config) ->
     Config#config{lock = Lock}.
@@ -57,6 +94,12 @@ get_rsms(#transition{current_config = Config}) ->
     %% the cluster is provisioned, so this is correct. Reconsider once state
     %% machines can be added dynamically.
     get_rsms(Config).
+
+get_quorum(#config{} = Config) ->
+    Voters = chronicle_config:get_voters(Config),
+    {majority, sets:from_list(Voters)};
+get_quorum(#transition{current_config = Current, future_config = Future}) ->
+    {joint, get_quorum(Current), get_quorum(Future)}.
 
 get_peers(#config{peers = Peers}) ->
     lists:sort(maps:keys(Peers));

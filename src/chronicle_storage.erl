@@ -420,14 +420,7 @@ add_snapshot(Seqno, Term, Config,
     Storage#storage{snapshots = [{Seqno, Term, Config} | CurrentSnapshots]}.
 
 is_config_entry(#log_entry{value = Value}) ->
-    case Value of
-        #config{} ->
-            true;
-        #transition{} ->
-            true;
-        _ ->
-            false
-    end.
+    chronicle_config:is_config(Value).
 
 -spec get_meta(#storage{}) -> meta().
 get_meta(Storage) ->
