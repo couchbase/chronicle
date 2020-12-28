@@ -39,10 +39,10 @@
 
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
+
 -record(config, { lock :: undefined | binary(),
-                  peers :: #{chronicle:peer() => chronicle:role()},
-                  old_peers :: undefined
-                             | #{chronicle:peer() => chronicle:role()},
+                  peers :: chronicle_config:peers(),
+                  old_peers :: undefined | chronicle_config:peers(),
                   state_machines :: #{atom() => #rsm_config{} }}).
 
 -record(rsm_command,

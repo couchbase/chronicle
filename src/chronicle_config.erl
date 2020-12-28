@@ -29,6 +29,10 @@
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
 
+-export_type([peers/0]).
+
+-type peers() :: #{chronicle:peer() => chronicle:role()}.
+
 is_config(Value) ->
     case Value of
         #config{} ->
