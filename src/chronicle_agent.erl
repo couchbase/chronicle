@@ -1263,19 +1263,6 @@ handle_append(HistoryId, Term,
             {keep_state_and_data, {reply, From, Error}}
     end.
 
-extract_latest_config(Entries) ->
-    lists:foldl(
-      fun (Entry, Acc) ->
-              case Entry#log_entry.value of
-                  #config{} ->
-                      Entry;
-                  #transition{} ->
-                      Entry;
-                  _ ->
-                      Acc
-              end
-      end, false, Entries).
-
 complete_append(HistoryId, Term, Info, From, State, Data) ->
     #{entries := Entries,
       start_seqno := StartSeqno,
