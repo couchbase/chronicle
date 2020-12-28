@@ -256,7 +256,7 @@ provision(Machines) ->
 -type reprovision_result() :: ok
                             | {error, reprovision_error()}.
 -type reprovision_error() :: not_provisioned
-                           | {bad_config, peer(), #config{} | #transition{}}.
+                           | {bad_config, peer(), #config{}}.
 
 -spec reprovision() -> reprovision_result().
 reprovision() ->

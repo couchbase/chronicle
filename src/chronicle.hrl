@@ -41,10 +41,10 @@
                       args = [] :: list() }).
 -record(config, { lock :: undefined | binary(),
                   peers :: #{chronicle:peer() => chronicle:role()},
+                  old_peers :: undefined
+                             | #{chronicle:peer() => chronicle:role()},
                   state_machines :: #{atom() => #rsm_config{} }}).
--record(transition,
-        { current_config :: #config{},
-          future_config :: #config{} }).
+
 -record(rsm_command,
         { rsm_name :: atom(),
           command :: term() }).
@@ -53,7 +53,7 @@
         { history_id :: chronicle:history_id(),
           term :: chronicle:leader_term(),
           seqno :: chronicle:seqno(),
-          value :: noop | #config{} | #transition{} | #rsm_command{}}).
+          value :: noop | #config{} | #rsm_command{}}).
 
 -record(metadata, { peer,
                     history_id,

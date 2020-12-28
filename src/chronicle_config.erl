@@ -33,29 +33,25 @@ is_config(Value) ->
     case Value of
         #config{} ->
             true;
-        #transition{} ->
-            true;
         _ ->
             false
     end.
 
-is_stable(Config) ->
-    case Config of
-        #config{} ->
-            true;
-        #transition{} ->
-            false
-    end.
+is_stable(#config{old_peers = OldPeers}) ->
+    OldPeers =:= undefined.
 
-next_config(#config{} = Config) ->
-    Config;
-next_config(#transition{future_config = FutureConfig}) ->
-    FutureConfig.
+next_config(#config{old_peers = OldPeers} = Config) ->
+    case OldPeers =:= undefined of
+        true ->
+            Config;
+        false ->
+            Config#config{old_peers = undefined}
+    end.
 
 transition(NewConfig, OldConfig) ->
     case needs_transition(NewConfig, OldConfig) of
         true ->
-            #transition{current_config = OldConfig, future_config = NewConfig};
+            NewConfig#config{old_peers = OldConfig#config.peers};
         false ->
             NewConfig
     end.
@@ -73,8 +69,8 @@ reinit(Peer, Config) ->
 
 branch(Peers, Config) ->
     %% TODO: figure out what to do with replicas
-    %% TODO: should not assume that the config is stable
-    Config#config{peers = maps:from_list([{Peer, voter} || Peer <- Peers])}.
+    Config#config{peers = maps:from_list([{Peer, voter} || Peer <- Peers]),
+                  old_peers = undefined}.
 
 set_lock(Lock, #config{} = Config) ->
     Config#config{lock = Lock}.
@@ -88,23 +84,23 @@ check_lock(LockReq, #config{lock = Lock}) ->
     end.
 
 get_rsms(#config{state_machines = RSMs}) ->
-    RSMs;
-get_rsms(#transition{current_config = Config}) ->
-    %% TODO: currently there's no way to change the set of state machines once
-    %% the cluster is provisioned, so this is correct. Reconsider once state
-    %% machines can be added dynamically.
-    get_rsms(Config).
+    RSMs.
 
-get_quorum(#config{} = Config) ->
-    Voters = chronicle_config:get_voters(Config),
-    {majority, sets:from_list(Voters)};
-get_quorum(#transition{current_config = Current, future_config = Future}) ->
-    {joint, get_quorum(Current), get_quorum(Future)}.
+get_quorum(#config{peers = Peers, old_peers = OldPeers}) ->
+    case OldPeers =:= undefined of
+        true ->
+            peers_quorum(Peers);
+        false ->
+            {joint, peers_quorum(Peers), peers_quorum(OldPeers)}
+    end.
 
-get_peers(#config{peers = Peers}) ->
-    lists:sort(maps:keys(Peers));
-get_peers(#transition{current_config = Current, future_config = Future}) ->
-    lists:umerge(get_peers(Current), get_peers(Future)).
+get_peers(#config{peers = Peers, old_peers = OldPeers}) ->
+    case OldPeers =:= undefined of
+        true ->
+            lists:sort(maps:keys(Peers));
+        false ->
+            lists:usort(maps:keys(Peers) ++ maps:keys(OldPeers))
+    end.
 
 get_replicas(#config{peers = Peers}) ->
     lists:sort(peers_replicas(Peers)).
@@ -175,6 +171,10 @@ peers_voters(Peers) ->
 
 peers_replicas(Peers) ->
     peers_of_type(replica, Peers).
+
+peers_quorum(Peers) ->
+    Voters = peers_voters(Peers),
+    {majority, sets:from_list(Voters)}.
 
 needs_transition(NewConfig, OldConfig) ->
     NewVoters = get_voters(NewConfig),
