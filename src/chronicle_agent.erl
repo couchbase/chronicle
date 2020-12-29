@@ -475,15 +475,9 @@ init([]) ->
                 not_provisioned
         end,
 
-    {FinalState, FinalData} =
-        case State of
-            #join_cluster{} ->
-                %% It's possible the agent crashed right before logging that
-                %% we got provisioned. So we need to check again.
-                check_join_cluster_done(State, Data);
-            _ ->
-                {State, Data}
-        end,
+    %% It's possible the agent crashed right before logging that we got
+    %% provisioned. So we need to check again.
+    {FinalState, FinalData} = check_join_cluster_done(State, Data),
 
     {ok, FinalState, FinalData}.
 
