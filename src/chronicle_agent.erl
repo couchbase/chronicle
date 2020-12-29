@@ -923,7 +923,7 @@ handle_provision(Machines, From, State, Data) ->
                                      seqno = Seqno,
                                      value = Config},
 
-            PeerId = chronicle_config:get_peer_id(Peer, Config),
+            {ok, PeerId} = chronicle_config:get_peer_id(Peer, Config),
 
             ?DEBUG("Provisioning with history ~p. Config:~n~p",
                    [HistoryId, Config]),
@@ -1071,7 +1071,8 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
     case check_join_cluster(ClusterInfo, State, Data) of
         {ok, Config, Seqno} ->
             Peer = get_meta(?META_PEER, Data),
-            PeerId = chronicle_config:get_peer_id(Peer, Config#log_entry.value),
+            {ok, PeerId} =
+                chronicle_config:get_peer_id(Peer, Config#log_entry.value),
 
             Meta = #{?META_PEER_ID => PeerId,
                      ?META_STATE => {?META_STATE_JOIN_CLUSTER,

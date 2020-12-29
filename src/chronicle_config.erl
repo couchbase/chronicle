@@ -71,12 +71,12 @@ init(Peer, Machines) ->
     #config{peers = Peers, state_machines = MachinesMap}.
 
 reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
-    PeerId = get_peer_id(OldPeer, Config),
+    {ok, PeerId} = get_peer_id(OldPeer, Config),
     Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}.
 
 branch(Peers, Config) ->
     %% TODO: figure out what to do with replicas
-    PeerInfos = [{Peer, peer_info(get_peer_id(Peer, Config), voter)} ||
+    PeerInfos = [{Peer, peer_info(Peer, Config, voter)} ||
                     Peer <- Peers],
     Config#config{peers = maps:from_list(PeerInfos),
                   old_peers = undefined}.
@@ -214,10 +214,18 @@ needs_transition_test() ->
 peer_info(Role) ->
     peer_info(chronicle_utils:random_uuid(), Role).
 
+peer_info(Peer, Config, Role) ->
+    case get_peer_id(Peer, Config) of
+        {ok, PeerId} ->
+            peer_info(PeerId, Role);
+        not_peer ->
+            exit({unknown_peer, Peer, Config})
+    end.
+
 peer_info(Id, Role) ->
     #{id => Id, role => Role}.
 
-get_peer_id(Peer, #config{peers = Peers, old_peers = OldPeers} = Config) ->
+get_peer_id(Peer, #config{peers = Peers, old_peers = OldPeers}) ->
     MaybePeerInfo =
         case maps:find(Peer, Peers) of
             {ok, _} = Ok ->
@@ -233,7 +241,7 @@ get_peer_id(Peer, #config{peers = Peers, old_peers = OldPeers} = Config) ->
 
     case MaybePeerInfo of
         error ->
-            error({unknown_peer, Peer, Config});
+            not_peer;
         {ok, #{id := PeerId}} ->
-            PeerId
+            {ok, PeerId}
     end.
