@@ -741,19 +741,9 @@ check_committed_seqno_advanced(Options, State, Data) ->
         true ->
             NewData0 = Data#data{committed_seqno = QuorumSeqno},
 
-            %% It's imporant that replicate() is called before
-            %% handle_config_post_append(). When nodes are being removed from
-            %% the cluster, they are temporarily preserved in the set of nodes
-            %% to replicate to (see update_config/2). handle_update_config()
-            %% restores the set of nodes to agree with the config (so removed
-            %% nodes are no longer replicated to). But we want to at least
-            %% attempt to notify those nodes that the config that removed them
-            %% got committed.
-            NewData1 = replicate(NewData0),
-
-            case handle_config_post_append(Data, NewData1) of
+            case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
-                    {keep_state, NewData, Effects};
+                    {keep_state, replicate(NewData), Effects};
                 {stop, Reason, NewData} ->
                     stop(Reason, State, NewData)
             end;
@@ -1299,6 +1289,10 @@ handle_new_peers(#data{peers = OldPeers},
                        handle_removed_peers(RemovedPeers, NewData1)).
 
 handle_removed_peers(Peers, Data) ->
+    %% Attempt to replicate to the removed nodes. In the normal case where the
+    %% removed nodes are healthy, this will notify them about the config that
+    %% got them removed (via reset_peers()).
+    replicate(Peers, Data),
     remove_peer_statuses(Peers, Data),
     demonitor_agents(Peers, Data).
 
