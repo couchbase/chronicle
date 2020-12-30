@@ -745,7 +745,7 @@ check_committed_seqno_advanced(Options, State, Data) ->
                 {ok, NewData, Effects} ->
                     {keep_state, replicate(NewData), Effects};
                 {stop, Reason, NewData} ->
-                    stop(Reason, State, NewData)
+                    stop(Reason, State, replicate(NewData))
             end;
         false ->
             %% Note, that it's possible for the deduced committed seqno to go
