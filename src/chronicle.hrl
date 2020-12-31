@@ -131,6 +131,7 @@
 -define(META_STATE_NOT_PROVISIONED, not_provisioned).
 -define(META_STATE_PREPARE_JOIN, prepare_join).
 -define(META_STATE_JOIN_CLUSTER, join_cluster).
+-define(META_STATE_REMOVED, removed).
 
 -define(META_STATE, state).
 -define(META_PEER, peer).

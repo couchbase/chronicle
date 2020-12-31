@@ -160,6 +160,8 @@ init([]) ->
         case chronicle_agent:get_system_state() of
             {provisioned, Metadata} ->
                 metadata2data(Metadata);
+            {removed, Metadata} ->
+                metadata2data(Metadata);
             {joining_cluster, HistoryId} ->
                 #data{history_id = HistoryId};
             Other ->

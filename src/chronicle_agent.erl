@@ -102,14 +102,16 @@ monitor(Peer) ->
 -spec get_system_state() ->
           not_provisioned |
           {joining_cluster, chronicle:history_id()} |
-          {provisioned, #metadata{}}.
+          {provisioned, #metadata{}} |
+          {removed, #metadata{}}.
 get_system_state() ->
     call(?SERVER, get_system_state).
 
 -spec get_metadata() -> #metadata{}.
 get_metadata() ->
     case get_system_state() of
-        {provisioned, Metadata} ->
+        {State, Metadata} when State =:= provisioned;
+                               State =:= removed ->
             Metadata;
         _ ->
             exit(not_provisioned)
@@ -255,7 +257,8 @@ provision(Machines) ->
 
 -type reprovision_result() :: ok
                             | {error, reprovision_error()}.
--type reprovision_error() :: not_provisioned
+-type reprovision_error() :: {bad_state,
+                              not_provisioned | joining_cluster | removed}
                            | {bad_config, peer(), #config{}}.
 
 -spec reprovision() -> reprovision_result().
@@ -305,7 +308,7 @@ join_cluster(ClusterInfo) ->
         {error, establish_term_error()}.
 
 -type establish_term_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | removed} |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {behind, chronicle:peer_position()}.
@@ -335,7 +338,7 @@ establish_term(Peer, Opaque, HistoryId, Term, Position, Options) ->
         {error, ensure_term_error()}.
 
 -type ensure_term_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | removed} |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()}.
 
@@ -352,7 +355,7 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | removed} |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {missing_entries, #metadata{}} |
@@ -378,7 +381,7 @@ append(Peer, Opaque, HistoryId, Term,
 
 -type install_snapshot_result() :: ok | {error, install_snapshot_error()}.
 -type install_snapshot_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | removed} |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
@@ -403,7 +406,7 @@ install_snapshot(Peer, HistoryId, Term,
 -type local_mark_committed_result() ::
         ok | {error, local_mark_committed_error()}.
 -type local_mark_committed_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | joining_cluster | removed} |
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
@@ -421,7 +424,7 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
         {ok, #metadata{}} |
         {error, store_branch_error()}.
 -type store_branch_error() ::
-        not_provisioned |
+        {bad_state, not_provisioned | joining_cluster | removed} |
         {coordinator_not_in_peers, chronicle:peer(), [chronicle:peer()]} |
         {concurrent_branch, OurBranch::#branch{}}.
 
@@ -472,12 +475,14 @@ init([]) ->
             {?META_STATE_JOIN_CLUSTER, #{config := Config, seqno := Seqno}} ->
                 #join_cluster{config = Config, seqno = Seqno};
             ?META_STATE_NOT_PROVISIONED ->
-                not_provisioned
+                not_provisioned;
+            ?META_STATE_REMOVED ->
+                removed
         end,
 
-    %% It's possible the agent crashed right before logging that we got
-    %% provisioned. So we need to check again.
-    {FinalState, FinalData} = check_join_cluster_done(State, Data),
+    %% It's possible the agent crashed right before logging the new state to
+    %% disk.
+    {FinalState, FinalData} = check_state_transitions(State, Data),
 
     {ok, FinalState, FinalData}.
 
@@ -567,16 +572,18 @@ terminate(_Reason, Data) ->
 
 %% internal
 handle_get_system_state(From, State, Data) ->
+    ExtState = get_external_state(State),
     Reply =
-        case get_external_state(State) of
-            provisioned = ExtState ->
-                {ExtState, build_metadata(Data)};
-            joining_cluster = ExtState ->
+        case ExtState of
+            joining_cluster ->
                 HistoryId = get_meta(?META_HISTORY_ID, Data),
                 true = (HistoryId =/= ?NO_HISTORY),
 
                 {ExtState, HistoryId};
-            ExtState ->
+            _ when ExtState =:= provisioned;
+                   ExtState =:= removed ->
+                {ExtState, build_metadata(Data)};
+            _ ->
                 ExtState
         end,
     {keep_state_and_data, {reply, From, Reply}}.
@@ -590,7 +597,9 @@ get_external_state(State) ->
         #join_cluster{} ->
             joining_cluster;
         not_provisioned ->
-            not_provisioned
+            not_provisioned;
+        removed ->
+            removed
     end.
 
 build_metadata(Data) ->
@@ -627,8 +636,9 @@ handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->
 
 check_prepared(State) ->
     case State of
-        not_provisioned ->
-            {error, not_provisioned};
+        _ when State =:= not_provisioned;
+               State =:= removed ->
+            {error, {bad_state, get_external_state(State)}};
         _ ->
             ok
     end.
@@ -696,8 +706,18 @@ handle_register_rsm(Name, Pid, From, State,
             {keep_state_and_data, {reply, From, Error}}
     end.
 
+check_provisioned_or_removed(State) ->
+    case State of
+        provisioned ->
+            ok;
+        removed ->
+            ok;
+        _ ->
+            {error, get_external_state(State)}
+    end.
+
 check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
-    case check_provisioned(State) of
+    case check_provisioned_or_removed(State) of
         ok ->
             case maps:find(Name, RSMs) of
                 {ok, {_, OtherPid}} ->
@@ -725,7 +745,7 @@ maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
 handle_get_latest_snapshot(Pid, From, State,
                            #data{snapshot_readers = Readers,
                                  storage = Storage} = Data) ->
-    case check_provisioned(State) of
+    case check_provisioned_or_removed(State) of
         ok ->
             case get_and_hold_latest_snapshot(Data) of
                 {{Seqno, Term, Config}, NewData0} ->
@@ -952,7 +972,7 @@ check_provisioned(State) ->
         provisioned ->
             ok;
         _ ->
-            {error, not_provisioned}
+            {error, {bad_state, get_external_state(State)}}
     end.
 
 handle_wipe(From, State, #data{wipe_state = WipeState} = Data) ->
@@ -1079,7 +1099,7 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
 
             %% We might already have all entries we need.
             {FinalState, FinalData} =
-                check_join_cluster_done(NewState, NewData),
+                check_state_transitions(NewState, NewData),
 
             {next_state, FinalState, FinalData};
         {error, _} = Error ->
@@ -1293,21 +1313,31 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% state machines get deleted.
 
     {NewState, NewData} =
+        post_append(Term, NewCommittedSeqno, State, Data, NewData0),
+
+    {next_state, NewState, NewData, {reply, From, ok}}.
+
+post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
+    {FinalState, FinalData} =
         case State of
             provisioned ->
-                maybe_announce_term_established(Term, Data),
-                maybe_announce_new_config(Data, NewData0),
-                maybe_announce_committed_seqno(Data, NewData0),
+                maybe_announce_term_established(Term, OldData),
+                maybe_announce_new_config(OldData, NewData),
 
-                {State, NewData0};
+                OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
+                case OldCommittedSeqno =:= NewCommittedSeqno of
+                    true ->
+                        {State, NewData};
+                    false ->
+                        announce_committed_seqno(NewCommittedSeqno, NewData),
+                        check_got_removed(OldCommittedSeqno,
+                                          NewCommittedSeqno, State, NewData)
+                end;
             _ ->
-                check_join_cluster_done(State, NewData0)
+                check_state_transitions(State, NewData)
         end,
 
-
-    {next_state,
-     NewState, maybe_initiate_snapshot(NewState, NewData),
-     {reply, From, ok}}.
+    {FinalState, maybe_initiate_snapshot(FinalState, FinalData)}.
 
 check_append(HistoryId, Term, CommittedSeqno,
              AtTerm, AtSeqno, Entries, State, Data) ->
@@ -1643,21 +1673,12 @@ handle_install_snapshot(HistoryId, Term,
                             commit_seqno ->
                                 store_meta(Metadata, Data)
                         end,
+                    NewData1 = maybe_cancel_snapshot(NewData0),
 
                     {NewState, NewData} =
-                        case State of
-                            provisioned ->
-                                maybe_announce_term_established(Term, Data),
-                                maybe_announce_new_config(Data, NewData0),
-                                maybe_announce_committed_seqno(Data, NewData0),
+                        post_append(Term, SnapshotSeqno, State, Data, NewData1),
 
-                                {State, maybe_cancel_snapshot(NewData0)};
-                            _ ->
-                                check_join_cluster_done(State, NewData0)
-                        end,
-
-                    {next_state,
-                     NewState, maybe_initiate_snapshot(NewState, NewData),
+                    {next_state, NewState, NewData,
                      {reply, From, {ok, build_metadata(NewData)}}}
             end;
         {error, _} = Error ->
@@ -2015,16 +2036,6 @@ announce_new_config(Data) ->
     Config = ConfigEntry#log_entry.value,
     chronicle_events:sync_notify({new_config, Config, Metadata}).
 
-maybe_announce_committed_seqno(OldData, NewData) ->
-    OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
-    NewCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, NewData),
-    case OldCommittedSeqno =:= NewCommittedSeqno of
-        true ->
-            ok;
-        false ->
-            announce_committed_seqno(NewCommittedSeqno, NewData)
-    end.
-
 announce_committed_seqno(CommittedSeqno, Data) ->
     foreach_rsm(
       fun (_Name, Pid) ->
@@ -2149,6 +2160,9 @@ get_config(#data{storage = Storage}) ->
 
 get_config_for_seqno(Seqno, #data{storage = Storage}) ->
     chronicle_storage:get_config_for_seqno(Seqno, Storage).
+
+get_config_for_seqno_range(FromSeqno, ToSeqno, #data{storage = Storage}) ->
+    chronicle_storage:get_config_for_seqno_range(FromSeqno, ToSeqno, Storage).
 
 get_latest_snapshot_seqno(#data{storage = Storage}) ->
     chronicle_storage:get_latest_snapshot_seqno(Storage).
@@ -2290,3 +2304,40 @@ read_rsm_snapshot(Name, Seqno, Storage) ->
         {error, Error} ->
             exit({get_rsm_snapshot_failed, Name, Seqno, Error})
     end.
+
+check_got_removed(OldCommittedSeqno, NewCommittedSeqno, State, Data) ->
+    case get_config_for_seqno_range(OldCommittedSeqno + 1,
+                                    NewCommittedSeqno, Data) of
+        {ok, NewConfig} ->
+            check_got_removed_with_config(NewConfig, State, Data);
+        false ->
+            {State, Data}
+    end.
+
+check_got_removed(State, Data) ->
+    case State of
+        provisioned ->
+            CommittedConfig = get_committed_config(Data),
+            check_got_removed_with_config(CommittedConfig, State, Data);
+        _ ->
+            {State, Data}
+    end.
+
+check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
+    #{?META_PEER := Peer, ?META_PEER_ID := PeerId} = get_meta(Data),
+    case chronicle_config:is_peer(Peer, PeerId, Config) of
+        true ->
+            {State, Data};
+        false ->
+            NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
+            announce_system_state(removed, build_metadata(Data)),
+            {removed, NewData}
+    end.
+
+get_committed_config(Data) ->
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+    get_config_for_seqno(CommittedSeqno, Data).
+
+check_state_transitions(State, Data) ->
+    {NewState, NewData} = check_join_cluster_done(State, Data),
+    check_got_removed(NewState, NewData).

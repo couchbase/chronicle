@@ -479,7 +479,7 @@ handle_establish_term_result(Peer,
                                 %% handle_common_error. If we hit one, we
                                 %% record a failed vote, but keep going.
                                 true;
-                            not_provisioned ->
+                            {bad_state, _} ->
                                 true;
                             _ ->
                                 false
@@ -710,7 +710,7 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
             ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
 
             case Error of
-                not_provisioned
+                {bad_state, _}
                   when Peer =/= ?SELF_PEER ->
                     %% The peer may have gotten wiped or didn't get
                     %% initialized properly before being added to the
@@ -798,7 +798,7 @@ handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
                     stop(Reason, State, Data);
                 ignored ->
                     case Error of
-                        not_provisioned
+                        {bad_state, _}
                           when Peer =/= ?SELF_PEER ->
                             maybe_cancel_peer_catchup(Peer, Data),
                             remove_peer_status(Peer, Data),

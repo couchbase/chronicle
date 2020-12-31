@@ -54,6 +54,8 @@ init([]) ->
                 case chronicle_agent:get_system_state() of
                     {provisioned, _} ->
                         provisioned;
+                    {removed, _} ->
+                        removed;
                     {joining_cluster, _} ->
                         joining_cluster;
                     not_provisioned ->
@@ -83,6 +85,8 @@ child_specs(joining_cluster) ->
                type => worker},
 
     [Leader];
+child_specs(removed) ->
+    child_specs(provisioned);
 child_specs(provisioned) ->
     Server = #{id => chronicle_server,
                start => {chronicle_server, start_link, []},

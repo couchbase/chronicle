@@ -28,7 +28,7 @@
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
--export([get_peer_id/2]).
+-export([get_peer_id/2, is_peer/3]).
 
 -export_type([peers/0]).
 
@@ -244,4 +244,12 @@ get_peer_id(Peer, #config{peers = Peers, old_peers = OldPeers}) ->
             not_peer;
         {ok, #{id := PeerId}} ->
             {ok, PeerId}
+    end.
+
+is_peer(Peer, PeerId, Config) ->
+    case get_peer_id(Peer, Config) of
+        {ok, FoundPeerId} ->
+            FoundPeerId =:= PeerId;
+        not_peer ->
+            false
     end.

@@ -39,7 +39,8 @@
                        #{config := #log_entry{}}}
                     | {?META_STATE_JOIN_CLUSTER,
                        #{seqno := chronicle:seqno(),
-                         config := #log_entry{}}}.
+                         config := #log_entry{}}}
+                    | ?META_STATE_REMOVED.
 -type meta() :: #{ ?META_STATE => meta_state(),
                    ?META_PEER => chronicle:peer(),
                    ?META_PEER_ID => chronicle:peer_id(),
@@ -463,13 +464,29 @@ get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
 get_config(Storage) ->
     Storage#storage.config.
 
-get_config_for_seqno(Seqno, #storage{config_index_tab = Tab}) ->
-    case ets:prev(Tab, Seqno + 1) of
+get_config_for_seqno(Seqno, Storage) ->
+    case get_config_for_seqno_range(?NO_SEQNO, Seqno, Storage) of
+        {ok, Config} ->
+            Config;
+        false ->
+            exit({no_config_for_seqno, Seqno})
+    end.
+
+get_config_for_seqno_range(FromSeqno, ToSeqno,
+                           #storage{config_index_tab = Tab}) ->
+    true = (FromSeqno =< ToSeqno),
+
+    case ets:prev(Tab, ToSeqno + 1) of
         '$end_of_table' ->
-            exit({no_config_for_seqno, Seqno});
+            false;
         ConfigSeqno ->
-            [Config] = ets:lookup(Tab, ConfigSeqno),
-            Config
+            case ConfigSeqno >= FromSeqno of
+                true ->
+                    [Config] = ets:lookup(Tab, ConfigSeqno),
+                    {ok, Config};
+                false ->
+                    false
+            end
     end.
 
 -spec store_meta(meta(), #storage{}) -> #storage{}.
