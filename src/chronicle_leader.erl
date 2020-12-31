@@ -434,9 +434,14 @@ metadata2data(Metadata) ->
 
 metadata2data(Metadata, Data) ->
     Self = Metadata#metadata.peer,
+    SelfId = Metadata#metadata.peer_id,
+    ConfigEntry = Metadata#metadata.config,
+
     QuorumPeers = get_establish_peers(Metadata),
     AllPeers = get_all_peers(Metadata),
-    Electable = lists:member(Self, QuorumPeers),
+
+    Electable = lists:member(Self, QuorumPeers) andalso
+        chronicle_config:is_peer(Self, SelfId, ConfigEntry#log_entry.value),
 
     Data#data{history_id = chronicle_agent:get_history_id(Metadata),
               established_term = Metadata#metadata.term,
