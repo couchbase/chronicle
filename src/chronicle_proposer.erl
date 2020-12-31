@@ -1292,9 +1292,9 @@ handle_removed_peers(Peers, Data) ->
     %% Attempt to replicate to the removed nodes. In the normal case where the
     %% removed nodes are healthy, this will notify them about the config that
     %% got them removed (via reset_peers()).
-    replicate(Peers, Data),
-    remove_peer_statuses(Peers, Data),
-    demonitor_agents(Peers, Data).
+    NewData = replicate(Peers, Data),
+    remove_peer_statuses(Peers, NewData),
+    demonitor_agents(Peers, NewData).
 
 handle_added_peers(Peers, Data) ->
     send_heartbeat(Peers, Data).
