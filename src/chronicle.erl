@@ -19,6 +19,7 @@
 
 -import(chronicle_utils, [with_leader/2]).
 
+-export([get_system_state/0]).
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
@@ -58,6 +59,22 @@
 -type lock() :: binary().
 -type lockreq() :: lock() | unlocked.
 -type role() :: voter | replica.
+
+-spec get_system_state() ->
+          not_provisioned |
+          joining_cluster |
+          provisioned |
+          removed.
+get_system_state() ->
+    case chronicle_agent:get_system_state() of
+        not_provisioned ->
+            not_provisioned;
+        {State, _Extra}
+          when State =:= joining_cluster;
+               State =:= provisioned;
+               State =:= removed ->
+            State
+    end.
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.

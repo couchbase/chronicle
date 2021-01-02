@@ -2046,7 +2046,9 @@ announce_system_state(SystemState) ->
     announce_system_state(SystemState, no_extra).
 
 announce_system_state(SystemState, Extra) ->
-    chronicle_events:sync_notify({system_state, SystemState, Extra}).
+    chronicle_events:sync_notify({system_state, SystemState, Extra}),
+    gen_event:notify(?SERVER_NAME(?EXTERNAL_EVENTS),
+                     {system_state, SystemState}).
 
 announce_joining_cluster(HistoryId) ->
     announce_system_state(joining_cluster, HistoryId).

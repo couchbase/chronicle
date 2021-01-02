@@ -140,3 +140,5 @@
 -define(META_TERM, term).
 -define(META_COMMITTED_SEQNO, committed_seqno).
 -define(META_PENDING_BRANCH, pending_branch).
+
+-define(EXTERNAL_EVENTS, chronicle_external_events).
