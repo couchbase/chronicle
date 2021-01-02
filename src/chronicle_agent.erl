@@ -713,7 +713,7 @@ check_provisioned_or_removed(State) ->
         removed ->
             ok;
         _ ->
-            {error, get_external_state(State)}
+            {error, {bad_state, get_external_state(State)}}
     end.
 
 check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
