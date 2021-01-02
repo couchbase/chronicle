@@ -447,6 +447,9 @@ sync_leader() ->
 is_wipe_requested() ->
     call(?SERVER, is_wipe_requested).
 
+mark_removed(Peer, PeerId) ->
+    call(?SERVER, {mark_removed, Peer, PeerId}).
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -563,6 +566,8 @@ handle_call({undo_branch, BranchId}, From, State, Data) ->
     handle_undo_branch(BranchId, From, State, Data);
 handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, From, State, Data) ->
     handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, From, State, Data);
+handle_call({mark_removed, Peer, PeerId}, From, State, Data) ->
+    handle_mark_removed(Peer, PeerId, From, State, Data);
 handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
@@ -1910,6 +1915,33 @@ need_rsm_snapshot(RSM, Seqno, Data) ->
             false
     end.
 
+handle_mark_removed(Peer, PeerId, From, State, Data) ->
+    case check_mark_removed(Peer, PeerId, State, Data) of
+        ok ->
+            {NewState, NewData} = mark_removed(Data),
+            {next_state, NewState, NewData, {reply, From, ok}};
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
+    end.
+
+check_mark_removed(Peer, PeerId, State, Data) ->
+    ?CHECK(check_provisioned(State),
+           check_peer_and_id(Peer, PeerId, Data)).
+
+check_peer_and_id(Peer, PeerId, Data) ->
+    #{?META_PEER := OurPeer,
+      ?META_PEER_ID := OurPeerId} = get_meta(Data),
+
+    Theirs = {Peer, PeerId},
+    Ours = {OurPeer, OurPeerId},
+
+    case Ours =:= Theirs of
+        true ->
+            ok;
+        false ->
+            {error, {peer_mismatch, Ours, Theirs}}
+    end.
+
 check_branch_id(BranchId, Data) ->
     OurBranch = get_meta(?META_PENDING_BRANCH, Data),
     case OurBranch of
@@ -2331,10 +2363,13 @@ check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
         true ->
             {State, Data};
         false ->
-            NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
-            announce_system_state(removed, build_metadata(Data)),
-            {removed, NewData}
+            mark_removed(Data)
     end.
+
+mark_removed(Data) ->
+    NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
+    announce_system_state(removed, build_metadata(Data)),
+    {removed, NewData}.
 
 get_committed_config(Data) ->
     CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
