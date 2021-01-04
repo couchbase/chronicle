@@ -112,18 +112,19 @@ wait_for_leader_slow_path(Incarnation, Timeout) ->
 announce_leader_status() ->
     gen_statem:cast(?SERVER, announce_leader_status).
 
-request_vote(Peer, Candidate, HistoryId, Position) ->
+request_vote(Peers, Candidate, HistoryId, Position) ->
+    call_async_many(Peers, {request_vote, Candidate, HistoryId, Position}).
+
+call_async(Peer, Call) ->
     ServerRef = ?SERVER(Peer),
     MRef = chronicle_utils:monitor_process(ServerRef),
-    chronicle_utils:call_async(ServerRef, MRef,
-                               {request_vote, Candidate, HistoryId, Position},
-                               [noconnect]),
+    chronicle_utils:call_async(ServerRef, MRef, Call, [noconnect]),
     MRef.
 
-request_vote_many(Peers, Candidate, HistoryId, Position) ->
+call_async_many(Peers, Call) ->
     lists:foldl(
       fun (Peer, Acc) ->
-              Ref = request_vote(Peer, Candidate, HistoryId, Position),
+              Ref = call_async(Peer, Call),
               Acc#{Ref => Peer}
       end, #{}, Peers).
 
@@ -666,8 +667,8 @@ do_election_worker() ->
                     ?INFO("I'm the only peer, so I'm the leader."),
                     {ok, Leader, HistoryId, LatestTerm};
                 false ->
-                    Refs = request_vote_many(OtherPeers,
-                                             Leader, HistoryId, Position),
+                    Refs = request_vote(OtherPeers,
+                                        Leader, HistoryId, Position),
                     case election_worker_loop(Refs,
                                               Quorum, [Leader], LatestTerm) of
                         {ok, FinalTerm} ->
