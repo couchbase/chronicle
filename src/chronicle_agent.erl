@@ -450,6 +450,9 @@ is_wipe_requested() ->
 mark_removed(Peer, PeerId) ->
     call(?SERVER, {mark_removed, Peer, PeerId}).
 
+check_member(HistoryId, Peer, PeerId, PeerSeqno) ->
+    call(?SERVER, {check_member, HistoryId, Peer, PeerId, PeerSeqno}).
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -568,6 +571,9 @@ handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, From, State, Data) ->
     handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, From, State, Data);
 handle_call({mark_removed, Peer, PeerId}, From, State, Data) ->
     handle_mark_removed(Peer, PeerId, From, State, Data);
+handle_call({check_member, HistoryId, Peer, PeerId, PeerSeqno},
+            From, State, Data) ->
+    handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data);
 handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
@@ -1941,6 +1947,28 @@ check_peer_and_id(Peer, PeerId, Data) ->
         false ->
             {error, {peer_mismatch, Ours, Theirs}}
     end.
+
+handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data) ->
+    Reply =
+        case ?CHECK(check_provisioned(State),
+                    check_history_id(HistoryId, Data)) of
+            ok ->
+                CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+                case CommittedSeqno >= PeerSeqno of
+                    true ->
+                        ConfigEntry = get_config_for_seqno(CommittedSeqno,
+                                                           Data),
+                        Config = ConfigEntry#log_entry.value,
+                        IsPeer = chronicle_config:is_peer(Peer, PeerId, Config),
+                        {ok, IsPeer};
+                    false ->
+                        {error, {peer_ahead, PeerSeqno, CommittedSeqno}}
+                end;
+            {error, _} = Error ->
+                Error
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 check_branch_id(BranchId, Data) ->
     OurBranch = get_meta(?META_PENDING_BRANCH, Data),
