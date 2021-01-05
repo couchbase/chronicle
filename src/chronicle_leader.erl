@@ -38,12 +38,14 @@
 -define(MAX_BACKOFF, 16).
 
 -define(EXTRA_WAIT_TIME, 10).
+-define(CHECK_MEMBER_TIMEOUT, 10000).
 
 -record(leader, { peer, history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
--record(observer, { electable }).
+-record(observer, { electable, removed }).
 -record(voted_for, { peer, ts }).
 -record(candidate, {}).
+-record(check_member, {}).
 
 -record(data, { %% Since heartbeats are sent frequently, keep a precomputed
                 %% list of our peers.
@@ -53,9 +55,11 @@
                 established_term = ?NO_TERM,
 
                 electable = false,
+                removed = false,
 
-                %% used only when the state is #candidate{}
-                election_worker,
+                %% election worker in #candidate{} state, membership checker
+                %% in #check_member_state{}
+                worker,
 
                 %% used to track timers that get auto-canceled when the state
                 %% changes
@@ -63,7 +67,10 @@
 
                 leader_waiters = #{},
 
-                backoff_factor = 1}).
+                backoff_factor = 1,
+
+                check_member_tref
+              }).
 
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -128,6 +135,9 @@ call_async_many(Peers, Call) ->
               Acc#{Ref => Peer}
       end, #{}, Peers).
 
+check_member(Peers, HistoryId, Peer, PeerId, PeerSeqno) ->
+    call_async_many(Peers, {check_member, HistoryId, Peer, PeerId, PeerSeqno}).
+
 note_term_finished(HistoryId, Term) ->
     gen_statem:cast(?SERVER, {note_term_status, HistoryId, Term, finished}).
 
@@ -162,7 +172,7 @@ init([]) ->
             {provisioned, Metadata} ->
                 metadata2data(Metadata);
             {removed, Metadata} ->
-                metadata2data(Metadata);
+                metadata2data(true, Metadata, #data{});
             {joining_cluster, HistoryId} ->
                 #data{history_id = HistoryId};
             Other ->
@@ -189,6 +199,8 @@ handle_event(info, {timeout, TRef, leader_wait}, State, Data) ->
 handle_event(info, {state_timer, Name}, _State, Data) ->
     {ok, _, NewData} = take_state_timer(Name, Data),
     {keep_state, NewData, {next_event, internal, {state_timer, Name}}};
+handle_event(info, check_member_timeout, State, Data) ->
+    handle_check_member_timeout(State, Data);
 handle_event(internal, {state_timer, state}, State, Data) ->
     handle_state_timeout(State, Data);
 handle_event(internal, {state_timer, send_heartbeat}, State, Data) ->
@@ -200,6 +212,10 @@ handle_event(cast, {note_term_status, HistoryId, Term, Status}, State, Data) ->
 handle_event({call, From},
              {request_vote, Candidate, HistoryId, Position}, State, Data) ->
     handle_request_vote(Candidate, HistoryId, Position, From, State, Data);
+handle_event({call, From},
+             {check_member, HistoryId, Peer, PeerId, PeerSeqno},
+             State, Data) ->
+    handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data);
 handle_event({call, From},
              {wait_for_leader, Incarnation, Timeout}, State, Data) ->
     handle_wait_for_leader(Incarnation, Timeout, From, State, Data);
@@ -226,16 +242,15 @@ terminate(_Reason, State, Data) ->
     announce_leader_status(not_leader).
 
 %% internal
-handle_state_leave(OldState, #data{election_worker = Worker} = Data) ->
+handle_state_leave(_OldState, #data{worker = Worker} = Data) ->
     NewData = cancel_all_state_timers(Data),
 
     case Worker of
         undefined ->
             NewData;
         _ when is_pid(Worker) ->
-            #candidate{} = OldState,
             chronicle_utils:terminate_linked_process(Worker, kill),
-            NewData#data{election_worker = undefined}
+            NewData#data{worker = undefined}
     end.
 
 handle_leader_transition(OldState, NewState, Data) ->
@@ -265,13 +280,53 @@ send_stepping_down(#leader{} = OldState, Data) ->
 handle_state_enter(State, Data) ->
     NewData0 = start_state_timers(State, Data),
     NewData1 = maybe_reset_backoff(State, NewData0),
+    NewData2 = handle_check_member_timer(State, NewData1),
 
     case State of
         #candidate{} ->
-            {keep_state, start_election_worker(NewData1)};
+            {keep_state, start_election_worker(NewData2)};
+        #check_member{} ->
+            {keep_state, start_check_member_worker(NewData2)};
         _ ->
-            {keep_state, NewData1}
+            {keep_state, NewData2}
     end.
+
+handle_check_member_timer(State, Data) ->
+    case State of
+        #leader{} ->
+            cancel_check_member_timer(Data);
+        #follower{} ->
+            cancel_check_member_timer(Data);
+        #check_member{} ->
+            cancel_check_member_timer(Data);
+        #observer{removed = true} ->
+            cancel_check_member_timer(Data);
+        _ ->
+            maybe_start_check_member_timer(Data)
+    end.
+
+cancel_check_member_timer(#data{check_member_tref = TRef} = Data) ->
+    case TRef of
+        undefined ->
+            Data;
+        _ when is_reference(TRef) ->
+            _ = erlang:cancel_timer(TRef),
+            ?FLUSH(check_member_timeout),
+            Data#data{check_member_tref = undefined}
+    end.
+
+maybe_start_check_member_timer(#data{check_member_tref = TRef} = Data) ->
+    case TRef of
+        undefined ->
+            start_check_member_timer(Data);
+        _ when is_reference(TRef) ->
+            Data
+    end.
+
+start_check_member_timer(Data) ->
+    TRef = erlang:send_after(?CHECK_MEMBER_TIMEOUT, self(),
+                             check_member_timeout),
+    Data#data{check_member_tref = TRef}.
 
 start_state_timers(State, Data) ->
     lists:foldl(
@@ -312,6 +367,8 @@ get_state_timeout(State, Data) ->
             %% eventually other nodes will start trying to elect
             %% themselves. But this is probably ok.
             50 * HeartbeatInterval;
+        #check_member{} ->
+            10000;
         _ ->
             %% This is the amount of time that it will take followers or nodes
             %% that granted their vote to decide that the leader is missing
@@ -331,6 +388,8 @@ get_heartbeat_interval() ->
 
 is_interesting_event({system_state, provisioned, _}) ->
     true;
+is_interesting_event({system_state, removed, _}) ->
+    true;
 is_interesting_event({system_event, reprovisioned, _}) ->
     true;
 is_interesting_event({new_history, _, _}) ->
@@ -344,6 +403,8 @@ is_interesting_event(_) ->
 
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
+handle_chronicle_event({system_state, removed, Metadata}, State, Data) ->
+    handle_removed(Metadata, State, Data);
 handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
     handle_reprovisioned(Metadata, State, Data);
 handle_chronicle_event({new_config, Config, Metadata}, State, Data) ->
@@ -358,12 +419,23 @@ handle_provisioned(Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),
     NewState =
         case State of
-            #observer{electable = false} ->
+            #observer{} ->
                 make_observer(NewData);
             _ ->
                 State
         end,
     {next_state, NewState, NewData}.
+
+handle_removed(Metadata, State, Data) ->
+    ?INFO("Node got removed from the cluster."),
+    NewData = metadata2data(true, Metadata, Data),
+    case State of
+        #leader{} ->
+            %% The leader will terminate on it's own accord.
+            {keep_state, NewData};
+        _ ->
+            {next_state, make_observer(NewData), NewData}
+    end.
 
 handle_reprovisioned(Metadata, _State, Data) ->
     ?INFO("System reprovisioned."),
@@ -434,6 +506,9 @@ metadata2data(Metadata) ->
     metadata2data(Metadata, #data{}).
 
 metadata2data(Metadata, Data) ->
+    metadata2data(false, Metadata, Data).
+
+metadata2data(Removed, Metadata, Data) ->
     Self = Metadata#metadata.peer,
     SelfId = Metadata#metadata.peer_id,
     ConfigEntry = Metadata#metadata.config,
@@ -441,13 +516,15 @@ metadata2data(Metadata, Data) ->
     QuorumPeers = get_establish_peers(Metadata),
     AllPeers = get_all_peers(Metadata),
 
-    Electable = lists:member(Self, QuorumPeers) andalso
+    Electable0 = lists:member(Self, QuorumPeers) andalso
         chronicle_config:is_peer(Self, SelfId, ConfigEntry#log_entry.value),
+    Electable = not Removed andalso Electable0,
 
     Data#data{history_id = chronicle_agent:get_history_id(Metadata),
               established_term = Metadata#metadata.term,
               peers = AllPeers -- [Self],
-              electable = Electable}.
+              electable = Electable,
+              removed = Removed}.
 
 handle_note_term_status(HistoryId, Term, Status, State, Data) ->
     case check_is_leader(HistoryId, Term, State) of
@@ -528,24 +605,33 @@ handle_stepping_down(LeaderInfo, State, Data) ->
     end.
 
 handle_process_exit(Pid, Reason, State,
-                    #data{election_worker = Worker} = Data) ->
+                    #data{worker = Worker} = Data) ->
     case Pid =:= Worker of
         true ->
-            handle_election_worker_exit(Reason, State, Data);
+            handle_worker_exit(Reason, State, Data);
         false ->
             {stop, {linked_process_died, Pid, Reason}}
     end.
 
-handle_election_worker_exit(Reason, #candidate{}, Data) ->
+handle_worker_exit(Reason, State, Data) ->
     Result =
         case Reason of
-            {shutdown, {election_result, R}} ->
+            {shutdown, {worker_result, R}} ->
                 R;
             _ ->
-                {error, {election_worker_crashed, Reason}}
+                {error, {worker_crashed, Reason}}
         end,
 
-    NewData = Data#data{election_worker = undefined},
+    NewData = Data#data{worker = undefined},
+
+    case State of
+        #candidate{} ->
+            handle_election_result(Result, NewData);
+        #check_member{} ->
+            handle_check_member_result(Result, NewData)
+    end.
+
+handle_election_result(Result, Data) ->
     case Result of
         {ok, Peer, HistoryId, Term} ->
             NewTerm = chronicle_utils:next_term(Term, Peer),
@@ -555,11 +641,28 @@ handle_election_worker_exit(Reason, #candidate{}, Data) ->
                                history_id = HistoryId,
                                term = NewTerm,
                                status = tentative},
-            {next_state, NewState, NewData};
+            {next_state, NewState, Data};
         {error, _} = Error ->
             ?INFO("Election failed: ~p", [Error]),
-            {next_state, make_observer(NewData), backoff(NewData)}
+            {next_state, make_observer(Data), backoff(Data)}
     end.
+
+handle_check_member_result(Result, Data) ->
+    case Result of
+        ok ->
+            ok;
+        {removed, Peer, Self, SelfId} ->
+            ?INFO("Detected that we got "
+                  "removed from the cluster via node ~p", [Peer]),
+            case chronicle_agent:mark_removed(Self, SelfId) of
+                ok ->
+                    ok;
+                {error, Error} ->
+                    ?WARNING("Failed to mark node removed: ~p", [Error])
+            end
+    end,
+
+    {next_state, make_observer(Data), Data}.
 
 handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case check_grant_vote(HistoryId, Position, State) of
@@ -580,6 +683,8 @@ check_consider_granting_vote(State) ->
             ok;
         #candidate{} ->
             {error, in_election};
+        #check_member{} ->
+            {error, check_member};
         _ ->
             {error, {have_leader, state_leader_info(State)}}
     end.
@@ -591,6 +696,75 @@ check_grant_vote(HistoryId, PeerPosition, State) ->
         {error, _} = Error ->
             Error
     end.
+
+handle_check_member_timeout(_State, Data) ->
+    {next_state, #check_member{}, Data}.
+
+start_check_member_worker(Data) ->
+    Pid = proc_lib:spawn_link(fun check_member_worker/0),
+    Data#data{worker = Pid}.
+
+-spec check_member_worker() -> no_return().
+check_member_worker() ->
+    Result = do_check_member_worker(),
+    exit({shutdown, {worker_result, Result}}).
+
+do_check_member_worker() ->
+    Metadata = chronicle_agent:get_metadata(),
+
+    HistoryId = chronicle_agent:get_history_id(Metadata),
+    HighSeqno = Metadata#metadata.high_seqno,
+    Self = Metadata#metadata.peer,
+    SelfId = Metadata#metadata.peer_id,
+    Peers = get_all_peers(Metadata),
+
+    OtherPeers = Peers -- [Self],
+
+    case OtherPeers of
+        [] ->
+            ok;
+        _ ->
+            CheckPeers = lists:sublist(chronicle_utils:shuffle(OtherPeers), 5),
+            Refs = check_member(CheckPeers, HistoryId, Self, SelfId, HighSeqno),
+            case check_member_worker_loop(Refs) of
+                ok ->
+                    ok;
+                {removed, Peer} ->
+                    {removed, Peer, Self, SelfId}
+            end
+    end.
+
+check_member_worker_loop(Refs)
+  when map_size(Refs) =:= 0 ->
+    ok;
+check_member_worker_loop(Refs) ->
+    {Ref, Result} =
+        receive
+            {RespRef, _} = Resp when is_reference(RespRef) ->
+                Resp;
+            {'DOWN', DownRef, process, _Pid, Reason} ->
+                {DownRef, {error, {down, Reason}}}
+        end,
+
+    case maps:take(Ref, Refs) of
+        {Peer, NewRefs} ->
+            case Result of
+                {ok, true} ->
+                    check_member_worker_loop(NewRefs);
+                {ok, false} ->
+                    {removed, Peer};
+                {error, Error} ->
+                    ?DEBUG("Failed to check membership status on peer ~p: ~p",
+                           [Peer, Error]),
+                    check_member_worker_loop(NewRefs)
+            end;
+        error ->
+            check_member_worker_loop(Refs)
+    end.
+
+handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, _State, _Data) ->
+    Reply = chronicle_agent:check_member(HistoryId, Peer, PeerId, PeerSeqno),
+    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_wait_for_leader(Incarnation, Timeout, From, State, Data) ->
     case check_leader_incarnation(Incarnation, state_leader(State)) of
@@ -634,12 +808,12 @@ reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
 
 start_election_worker(Data) ->
     Pid = proc_lib:spawn_link(fun election_worker/0),
-    Data#data{election_worker = Pid}.
+    Data#data{worker = Pid}.
 
 -spec election_worker() -> no_return().
 election_worker() ->
     Result = do_election_worker(),
-    exit({shutdown, {election_result, Result}}).
+    exit({shutdown, {worker_result, Result}}).
 
 do_election_worker() ->
     Metadata = chronicle_agent:get_metadata(),
@@ -966,8 +1140,8 @@ get_active_leader_and_term(State) ->
             no_leader
     end.
 
-make_observer(#data{electable = Electable}) ->
-    #observer{electable = Electable}.
+make_observer(#data{electable = Electable, removed = Removed}) ->
+    #observer{electable = Electable, removed = Removed}.
 
 backoff(#data{backoff_factor = Factor} = Data) ->
     case Factor >= ?MAX_BACKOFF of

@@ -907,3 +907,6 @@ sanitize_reason({Reason, Stack} = Pair) ->
     end;
 sanitize_reason(Reason) ->
     Reason.
+
+shuffle(List) when is_list(List) ->
+    [N || {_R, N} <- lists:keysort(1, [{rand:uniform(), X} || X <- List])].
