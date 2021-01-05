@@ -189,8 +189,8 @@ handle_event(info, {timeout, TRef, leader_wait}, State, Data) ->
 handle_event(info, {state_timer, Name}, _State, Data) ->
     {ok, _, NewData} = take_state_timer(Name, Data),
     {keep_state, NewData, {next_event, internal, {state_timer, Name}}};
-handle_event(internal, {state_timer, election}, State, Data) ->
-    handle_election_timeout(State, Data);
+handle_event(internal, {state_timer, state}, State, Data) ->
+    handle_state_timeout(State, Data);
 handle_event(internal, {state_timer, send_heartbeat}, State, Data) ->
     handle_send_heartbeat(State, Data);
 handle_event(cast, announce_leader_status, State, Data) ->
@@ -280,8 +280,8 @@ start_state_timers(State, Data) ->
                   send_heartbeat ->
                       %% schedule to send a heartbeat immediately
                       schedule_send_heartbeat(0, AccData);
-                  election ->
-                      start_election_timer(State, AccData)
+                  state ->
+                      start_state_timer(State, AccData)
               end
       end, Data, state_timers(State)).
 
@@ -290,12 +290,12 @@ state_timers(#leader{}) ->
 state_timers(#observer{electable = false}) ->
     [];
 state_timers(_) ->
-    [election].
+    [state].
 
-start_election_timer(State, Data) ->
-    start_state_timer(election, get_election_timeout(State, Data), Data).
+start_state_timer(State, Data) ->
+    start_state_timer(state, get_state_timeout(State, Data), Data).
 
-get_election_timeout(State, Data) ->
+get_state_timeout(State, Data) ->
     HeartbeatInterval = get_heartbeat_interval(),
 
     case State of
@@ -468,8 +468,8 @@ handle_note_term_status(HistoryId, Term, Status, State, Data) ->
             keep_state_and_data
     end.
 
-handle_election_timeout(State, Data) ->
-    ?DEBUG("Election timeout when state is: ~p", [State]),
+handle_state_timeout(State, Data) ->
+    ?DEBUG("State timeout when state is: ~p", [State]),
 
     NewState =
         case State of
@@ -497,7 +497,7 @@ handle_heartbeat(LeaderInfo, State, Data) ->
 
             {next_state, NewState,
              %% We've received a heartbeat, so start the election timer anew.
-             start_election_timer(NewState, Data)};
+             start_state_timer(NewState, Data)};
         Error ->
             %% TODO: this may be too much to log
             ?DEBUG("Rejecting heartbeat ~p: ~p",
