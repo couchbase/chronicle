@@ -13,7 +13,6 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
-%% TODO: pull is needed to detect situations where a node gets shunned
 %% TODO: check more state invariants
 -module(chronicle_agent).
 
@@ -77,7 +76,6 @@
 -record(prepare_join, { config }).
 -record(join_cluster, { from, config, seqno }).
 
-%% TODO: get rid of the duplication between #data{} and #metadata{}.
 -record(data, { storage,
                 rsms_by_name,
                 rsms_by_mref,
@@ -1465,7 +1463,6 @@ preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
         {ok, _, _, _, _} = Ok ->
             Ok;
         {error, {malformed, Entry}} ->
-            %% TODO: remove logging of the entries
             ?ERROR("Received an ill-formed append request.~n"
                    "At seqno: ~p"
                    "Stumbled upon this entry: ~p~n"
