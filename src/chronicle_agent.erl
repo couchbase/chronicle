@@ -1981,11 +1981,12 @@ check_branch_id(BranchId, Data) ->
             end
     end.
 
-check_history_id(HistoryId, #data{} = Data) ->
+check_history_id(HistoryId, Data) ->
     OurHistoryId = get_effective_history_id(Data),
     true = (OurHistoryId =/= ?NO_HISTORY),
-    check_history_id(HistoryId, OurHistoryId);
-check_history_id(HistoryId, OurHistoryId) ->
+    do_check_history_id(HistoryId, OurHistoryId).
+
+do_check_history_id(HistoryId, OurHistoryId) ->
     case HistoryId =:= OurHistoryId of
         true ->
             ok;
