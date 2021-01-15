@@ -630,10 +630,9 @@ build_metadata(Data) ->
               pending_branch = PendingBranch}.
 
 handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->
-    OurHistoryId = get_effective_history_id(Data),
     Reply =
         case ?CHECK(check_prepared(State),
-                    check_history_id(PeerHistoryId, OurHistoryId),
+                    check_history_id(PeerHistoryId, Data),
                     check_peer_current(PeerPosition, State, Data)) of
             ok ->
                 {ok, get_meta(?META_TERM, Data)};
