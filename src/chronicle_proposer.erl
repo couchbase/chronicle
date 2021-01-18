@@ -38,6 +38,7 @@
 -define(STOP_TIMEOUT, 10000).
 -define(ESTABLISH_TERM_TIMEOUT, 10000).
 -define(CHECK_PEERS_INTERVAL, 1000).
+-define(MAX_INFLIGHT, 500).
 
 -record(data, { parent,
 
@@ -727,10 +728,12 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
 handle_append_ok(Peer, PeerHighSeqno,
                  PeerCommittedSeqno, proposing = State, Data) ->
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
-    check_committed_seqno_advanced(State, Data).
-
-check_committed_seqno_advanced(State, Data) ->
-    check_committed_seqno_advanced(#{}, State, Data).
+    check_committed_seqno_advanced(
+      %% Always check the peer we got the response from. So if we didn't
+      %% replicate some entries to it because there were too many in flight,
+      %% we do this as soon as possible.
+      #{must_replicate_to => Peer},
+      State, Data).
 
 check_committed_seqno_advanced(Options, State, Data) ->
     #data{committed_seqno = CommittedSeqno,
@@ -1001,12 +1004,15 @@ get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
 
 should_replicate_to(Peer, HighSeqno, CommitSeqno, Data) ->
     case get_peer_status(Peer, Data) of
-        {ok, #peer_status{sent_seqno = PeerSentSeqno,
+        {ok, #peer_status{acked_seqno = AckedSeqno,
+                          sent_seqno = PeerSentSeqno,
                           sent_commit_seqno = PeerSentCommitSeqno,
                           state = active}} ->
+            InFlight = (PeerSentSeqno - AckedSeqno),
             DoSync =
-                HighSeqno > PeerSentSeqno
-                orelse CommitSeqno > PeerSentCommitSeqno,
+                InFlight < ?MAX_INFLIGHT
+                andalso (HighSeqno > PeerSentSeqno
+                         orelse CommitSeqno > PeerSentCommitSeqno),
 
             case DoSync of
                 true ->
