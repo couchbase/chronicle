@@ -996,24 +996,27 @@ replicate(Peer, Data) when is_atom(Peer) ->
 get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
     lists:filtermap(
       fun (Peer) ->
-              case get_peer_status(Peer, Data) of
-                  {ok, #peer_status{sent_seqno = PeerSentSeqno,
-                                    sent_commit_seqno = PeerSentCommitSeqno,
-                                    state = active}} ->
-                      DoSync =
-                          HighSeqno > PeerSentSeqno
-                          orelse CommitSeqno > PeerSentCommitSeqno,
-
-                      case DoSync of
-                          true ->
-                              {true, {Peer, PeerSentSeqno}};
-                          false ->
-                              false
-                      end;
-                  _ ->
-                      false
-              end
+              should_replicate_to(Peer, HighSeqno, CommitSeqno, Data)
       end, Peers).
+
+should_replicate_to(Peer, HighSeqno, CommitSeqno, Data) ->
+    case get_peer_status(Peer, Data) of
+        {ok, #peer_status{sent_seqno = PeerSentSeqno,
+                          sent_commit_seqno = PeerSentCommitSeqno,
+                          state = active}} ->
+            DoSync =
+                HighSeqno > PeerSentSeqno
+                orelse CommitSeqno > PeerSentCommitSeqno,
+
+            case DoSync of
+                true ->
+                    {true, {Peer, PeerSentSeqno}};
+                false ->
+                    false
+            end;
+        _ ->
+            false
+    end.
 
 get_machines(ConfigEntry) ->
     maps:keys(chronicle_config:get_rsms(ConfigEntry#log_entry.value)).
