@@ -1781,7 +1781,8 @@ check_branch_compatible(NewBranch, Data) ->
     PendingBranch = get_meta(?META_PENDING_BRANCH, Data),
     case PendingBranch =:= undefined of
         true ->
-            ok;
+            HistoryId = NewBranch#branch.old_history_id,
+            check_committed_history_id(HistoryId, Data);
         false ->
             PendingId = PendingBranch#branch.history_id,
             NewId = NewBranch#branch.history_id,
@@ -1983,6 +1984,11 @@ check_branch_id(BranchId, Data) ->
 
 check_history_id(HistoryId, Data) ->
     OurHistoryId = get_effective_history_id(Data),
+    true = (OurHistoryId =/= ?NO_HISTORY),
+    do_check_history_id(HistoryId, OurHistoryId).
+
+check_committed_history_id(HistoryId, Data) ->
+    OurHistoryId = get_meta(?META_HISTORY_ID, Data),
     true = (OurHistoryId =/= ?NO_HISTORY),
     do_check_history_id(HistoryId, OurHistoryId).
 

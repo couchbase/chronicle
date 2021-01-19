@@ -48,11 +48,13 @@ handle_cast(Cast, State) ->
 
 %% internal
 handle_failover(RemainingPeers, State) ->
-    HistoryId = chronicle_utils:random_uuid(),
-    {reply, prepare_branch(HistoryId, RemainingPeers), State}.
+    #metadata{history_id = HistoryId} = chronicle_agent:get_metadata(),
+    NewHistoryId = chronicle_utils:random_uuid(),
+    {reply, prepare_branch(HistoryId, NewHistoryId, RemainingPeers), State}.
 
-prepare_branch(HistoryId, Peers) ->
-    Branch = #branch{history_id = HistoryId,
+prepare_branch(OldHistoryId, NewHistoryId, Peers) ->
+    Branch = #branch{history_id = NewHistoryId,
+                     old_history_id = OldHistoryId,
                      coordinator = self,
                      peers = Peers,
                      status = unknown},
@@ -62,24 +64,17 @@ prepare_branch(HistoryId, Peers) ->
     case store_branch(Branch) of
         {ok, Metadata} ->
             FinalBranch = Metadata#metadata.pending_branch,
-            prepare_branch_on_followers(Metadata, FinalBranch);
+            prepare_branch_on_followers(FinalBranch);
         {error, _} = Error ->
             Error
     end.
 
-prepare_branch_on_followers(SelfMetadata, #branch{coordinator = Self,
-                                                  peers = Peers} = Branch) ->
+prepare_branch_on_followers(#branch{coordinator = Self,
+                                    peers = Peers} = Branch) ->
     unknown = Branch#branch.status,
 
     Followers = Peers -- [Self],
-    Result =
-        case prepare_branch_on_peers(Followers, Branch) of
-            {ok, PeerResults0} ->
-                PeerResults = [{Self, SelfMetadata} | PeerResults0],
-                check_prepare_branch_results(PeerResults);
-            {error, _} = Error ->
-                Error
-        end,
+    Result = prepare_branch_on_peers(Followers, Branch),
     update_branch_status(Branch, Result),
     Result.
 
@@ -87,49 +82,31 @@ store_branch(Branch) ->
     store_branch(?SELF_PEER, Branch).
 
 store_branch(Peer, Branch) ->
-    ?DEBUG("Sending store_branch to ~p. Branch:~n~p", [Peer, Branch]),
+    ?DEBUG("Sending store_branch to ~p.~n"
+           "Branch:~n~p",
+           [Peer, Branch]),
     chronicle_agent:store_branch(Peer, Branch).
 
 prepare_branch_on_peers(Peers, Branch) ->
     CallFun = fun (Peer) -> store_branch(Peer, Branch) end,
     HandleFun =
-        fun (Peer, Response, Acc) ->
+        fun (_Peer, Response, _Acc) ->
                 case Response of
-                    {ok, Metadata} ->
-                        {continue, [{Peer, Metadata} | Acc]};
+                    {ok, _Metadata} ->
+                        {continue, ok};
                     {error, _} = Error ->
                         {stop, Error}
                 end
         end,
 
-    Result = parallel_mapfold(CallFun, HandleFun, [], Peers),
+    Result = parallel_mapfold(CallFun, HandleFun, ok, Peers),
     case Result of
+        ok ->
+            ok;
         {error, _} = Error ->
             ?WARNING("Failed to prepare branch: ~p.~nBranch:~n~p",
                      [Error, Branch]),
-            Error;
-        Results when is_list(Results) ->
-            {ok, Results}
-    end.
-
-check_prepare_branch_results(Results) ->
-    Histories = chronicle_utils:groupby(
-                  fun ({_Peer, Metadata}) ->
-                          Metadata#metadata.history_id
-                  end, Results),
-    case maps:size(Histories) =:= 1 of
-        true ->
-            %% All peers are on the same history so we are good to go.
-            ok;
-        false ->
-            %% Some peers are on different histories. So can't proceed.
-            ConflictingPeerGroups =
-                maps:map(
-                  fun (_HistoryId, HistoryPeers) ->
-                          [Peer || {Peer, _Metadata} <- HistoryPeers]
-                  end, Histories),
-            {error, {incompatible_histories,
-                     maps:to_list(ConflictingPeerGroups)}}
+            Error
     end.
 
 update_branch_status(Branch, Result) ->
@@ -149,7 +126,7 @@ branch_status_from_result(Result) ->
             ok;
         {error, {concurrent_branch, _} = Status} ->
             Status;
-        {error, {incompatible_histories, _} = Status} ->
+        {error, {history_mismatch, _} = Status} ->
             Status;
         _ ->
             unknown

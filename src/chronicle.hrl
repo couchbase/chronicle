@@ -67,6 +67,7 @@
                     pending_branch }).
 
 -record(branch, {history_id,
+                 old_history_id,
                  coordinator,
                  peers,
 
@@ -75,8 +76,7 @@
                  status :: ok
                          | unknown
                          | {concurrent_branch, #branch{}}
-                         | {incompatible_histories,
-                            [{chronicle:history_id(), [chronicle:peer()]}]},
+                         | {history_mismatch, chronicle:history_id()},
                  opaque}).
 
 -define(DEBUG(Fmt, Args), ?LOG(debug, Fmt, Args)).
