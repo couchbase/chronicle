@@ -2180,9 +2180,9 @@ append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
     chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 
-record_snapshot(Term, Seqno, ConfigEntry, #data{storage = Storage} = Data) ->
-    NewStorage = chronicle_storage:record_snapshot(Term,
-                                                   Seqno, ConfigEntry, Storage),
+record_snapshot(Seqno, Term, ConfigEntry, #data{storage = Storage} = Data) ->
+    NewStorage = chronicle_storage:record_snapshot(Seqno, Term,
+                                                   ConfigEntry, Storage),
     Data#data{storage = NewStorage}.
 
 install_snapshot(SnapshotSeqno, SnapshotTerm, SnapshotConfig,
