@@ -632,13 +632,6 @@ simple_test__(Nodes) ->
     ok = vnet:disconnect(b, c),
     ok = vnet:disconnect(b, d),
 
-    ok = rpc_node(a,
-                  fun () ->
-                          {error, {bad_failover, _}} =
-                              chronicle_failover:retry_failover(<<"failover">>),
-                          ok
-                  end),
-
     ok = rpc_node(b,
                   fun () ->
                           {ok, Rev} = chronicle_kv:add(kv, a, b),

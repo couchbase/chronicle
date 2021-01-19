@@ -32,18 +32,12 @@ start_link() ->
 failover(RemainingPeers) ->
     gen_server:call(?SERVER, {failover, RemainingPeers}).
 
-%% TODO: this needs to go the coordinator node
-retry_failover(HistoryId) ->
-    gen_server:call(?SERVER, {retry_failover, HistoryId}).
-
 %% gen_server callbacks
 init([]) ->
     {ok, #state{}}.
 
 handle_call({failover, RemainingPeers}, _From, State) ->
     handle_failover(RemainingPeers, State);
-handle_call({retry_failover, HistoryId}, _From, State) ->
-    handle_retry_failover(HistoryId, State);
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -56,24 +50,6 @@ handle_cast(Cast, State) ->
 handle_failover(RemainingPeers, State) ->
     HistoryId = chronicle_utils:random_uuid(),
     {reply, prepare_branch(HistoryId, RemainingPeers), State}.
-
-handle_retry_failover(HistoryId, State) ->
-    Metadata = chronicle_agent:get_metadata(),
-    #metadata{peer = Self,
-              pending_branch = Branch} = Metadata,
-    case Branch of
-        #branch{coordinator = Coordinator,
-                history_id = BranchId,
-                status = Status}
-          when Coordinator =:= Self
-               andalso Status =:= unknown
-               andalso BranchId =:= HistoryId ->
-            {reply, prepare_branch_on_followers(Metadata, Branch)};
-        _ ->
-            %% TODO: consider making the error more specific to the
-            %% exact cause of failure
-            {reply, {error, {bad_failover, Branch}}, State}
-    end.
 
 prepare_branch(HistoryId, Peers) ->
     Branch = #branch{history_id = HistoryId,
