@@ -58,6 +58,8 @@ get_options() ->
                                                          op=removenode}},
                   {"/config/provision", ?MODULE, #state{domain=config,
                                                         op=provision}},
+                  {"/config/partition", ?MODULE, #state{domain=config,
+                                                        op=partition}},
                   {"/node/wipe", ?MODULE, #state{domain=node, op=wipe}},
                   {"/node/status", ?MODULE, #state{domain=node, op=status}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
@@ -153,7 +155,24 @@ config_api(Req, #state{domain=config, op=provision}) ->
         {error, provisioned} ->
             ok
     end,
-    reply_json(200, <<"provisioned">>, Req).
+    reply_json(200, <<"provisioned">>, Req);
+config_api(Req, #state{domain=config, op=partition}) ->
+    {ok, Body, Req1} = cowboy_req:read_body(Req),
+    {Result, Message} = case parse_nodes(Body) of
+                            Nodes when is_list(Nodes) ->
+                                case chronicle_failover:failover(Nodes) of
+                                    ok ->
+                                        {true, <<"partitioned">>};
+                                    {error, Error} ->
+                                        {false,
+                                         iolist_to_binary(
+                                           io_lib:format("~w", [Error]))}
+                                end;
+                            {error, Msg} ->
+                                {false, Msg}
+                        end,
+    Status = case Result of true -> 200; _ -> 400 end,
+    reply_json(Status, Message, Req1).
 
 node_api(Req, #state{domain=node, op=wipe}) ->
     ok = chronicle:wipe(),
