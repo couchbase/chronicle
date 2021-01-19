@@ -37,6 +37,7 @@
 %% TODO: move these to the config
 -define(STOP_TIMEOUT, 10000).
 -define(ESTABLISH_TERM_TIMEOUT, 10000).
+-define(NO_QUORUM_TIMEOUT, 15000).
 -define(CHECK_PEERS_INTERVAL, 1000).
 -define(MAX_INFLIGHT, 500).
 
@@ -185,6 +186,8 @@ handle_event(info, check_peers, State, Data) ->
         {stopped, _} ->
             keep_state_and_data
     end;
+handle_event(info, {check_quorum, CommittedSeqno, SyncRound}, State, Data) ->
+    handle_check_quorum(CommittedSeqno, SyncRound, State, Data);
 handle_event(info, {{agent_response, Ref, Peer, Request}, Result}, State,
              #data{peers = Peers} = Data) ->
     case lists:member(Peer, Peers) of
@@ -279,7 +282,7 @@ handle_state_enter(proposing, Data) ->
 
     announce_proposer_ready(NewData),
 
-    {keep_state, check_peers(NewData)};
+    {keep_state, schedule_check_quorum(check_peers(NewData))};
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
@@ -434,6 +437,40 @@ check_peers(#data{peers = Peers,
     %% Some peers may be behind because we didn't replicate to them due to
     %% chronicle_agent:append() returning 'nosuspend'.
     replicate(NewData).
+
+handle_check_quorum(OldCommittedSeqno, OldSyncRound, State,
+                    #data{acked_sync_round = SyncRound,
+                          committed_seqno = CommittedSeqno} = Data) ->
+    case State of
+        proposing ->
+            case SyncRound =:= OldSyncRound
+                andalso CommittedSeqno =:= OldCommittedSeqno of
+                true ->
+                    stop(no_quorum, State, Data);
+                false ->
+                    {keep_state, schedule_check_quorum(Data)}
+            end;
+        {stopped, _} ->
+            keep_state_and_data
+    end.
+
+schedule_check_quorum(#data{sync_round = SyncRound,
+                            acked_sync_round = AckedSyncRound,
+                            committed_seqno = CommittedSeqno,
+                            high_seqno = HighSeqno} = Data) ->
+    NewData =
+        case SyncRound =/= AckedSyncRound orelse CommittedSeqno =/= HighSeqno of
+            true ->
+                %% There are some outstanding requests, so just piggy-back on
+                %% them.
+                Data;
+            false ->
+                send_heartbeat(Data#data{sync_round = SyncRound + 1})
+        end,
+
+    erlang:send_after(?NO_QUORUM_TIMEOUT, self(),
+                      {check_quorum, CommittedSeqno, AckedSyncRound}),
+    NewData.
 
 handle_agent_response(Peer,
                       {establish_term, _, _, _} = Request,
