@@ -366,9 +366,9 @@ handle_log_entry(Entry, Storage) ->
                               Meta, Truncate, Entries, Storage);
         {meta, Meta} ->
             add_meta(Meta, Storage);
-        {snapshot, Seqno, Term, Config} ->
-            add_snapshot(Seqno, Term, Config, Storage);
-        {install_snapshot, Seqno, Term, Config, Meta} ->
+        {snapshot, Seqno, HistoryId, Term, Config} ->
+            add_snapshot(Seqno, HistoryId, Term, Config, Storage);
+        {install_snapshot, Seqno, HistoryId, Term, Config, Meta} ->
             ets:delete_all_objects(Storage#storage.log_tab),
             ets:delete_all_objects(Storage#storage.config_index_tab),
             ets:insert(Storage#storage.config_index_tab, Config),
@@ -378,7 +378,7 @@ handle_log_entry(Entry, Storage) ->
                                          high_seqno = Seqno,
                                          config = Config,
                                          meta = maps:merge(CurrentMeta, Meta)},
-            add_snapshot(Seqno, Term, Config, NewStorage)
+            add_snapshot(Seqno, HistoryId, Term, Config, NewStorage)
     end.
 
 handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
@@ -417,9 +417,10 @@ handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
 add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
     Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
 
-add_snapshot(Seqno, Term, Config,
+add_snapshot(Seqno, HistoryId, Term, Config,
              #storage{snapshots = CurrentSnapshots} = Storage) ->
-    Storage#storage{snapshots = [{Seqno, Term, Config} | CurrentSnapshots]}.
+    Storage#storage{snapshots =
+                        [{Seqno, HistoryId, Term, Config} | CurrentSnapshots]}.
 
 is_config_entry(#log_entry{value = Value}) ->
     chronicle_config:is_config(Value).
@@ -451,7 +452,7 @@ get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
                     {ok, ?NO_TERM};
                 true ->
                     case lists:keyfind(Seqno, 1, Snapshots) of
-                        {_, Term, _} ->
+                        {_, _, Term, _} ->
                             {ok, Term};
                         false ->
                             {error, compacted}
@@ -600,7 +601,7 @@ find_logs(DataDir) ->
 
 cleanup_orphan_snapshots(#storage{data_dir = DataDir,
                                   snapshots = Snapshots}) ->
-    SnapshotSeqnos = [Seqno || {Seqno, _, _} <- Snapshots],
+    SnapshotSeqnos = [Seqno || {Seqno, _, _, _} <- Snapshots],
     DiskSnapshots = find_disk_snapshots(DataDir),
     OrphanSnapshots =
         lists:filtermap(
@@ -917,11 +918,11 @@ get_published_seqno_range() ->
             {LowSeqno, HighSeqno, CommittedSeqno}
     end.
 
-record_snapshot(Seqno, Term, Config, Storage) ->
-    record_snapshot(Seqno, Term, Config,
-                    {snapshot, Seqno, Term, Config}, Storage).
+record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
+    record_snapshot(Seqno, HistoryId, Term, Config,
+                    {snapshot, Seqno, HistoryId, Term, Config}, Storage).
 
-record_snapshot(Seqno, Term, Config, LogRecord,
+record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
                 #storage{data_dir = DataDir,
                          snapshots = Snapshots} = Storage) ->
     LatestSnapshotSeqno = get_latest_snapshot_seqno(Storage),
@@ -932,14 +933,15 @@ record_snapshot(Seqno, Term, Config, LogRecord,
 
     NewStorage0 = log_append([LogRecord], Storage),
 
-    NewSnapshots = [{Seqno, Term, Config} | Snapshots],
+    NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
     NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
     compact(NewStorage1).
 
-install_snapshot(Seqno, Term, Config, Meta,
+install_snapshot(Seqno, HistoryId, Term, Config, Meta,
                  #storage{meta = OldMeta} = Storage) ->
-    NewStorage = record_snapshot(Seqno, Term, Config,
-                                 {install_snapshot, Seqno, Term, Config, Meta},
+    NewStorage = record_snapshot(Seqno, HistoryId, Term, Config,
+                                 {install_snapshot,
+                                  Seqno, HistoryId, Term, Config, Meta},
                                  Storage),
 
     config_index_replace(Config, NewStorage),
@@ -1061,7 +1063,8 @@ validate_state(#storage{low_seqno = LowSeqno,
                         data_dir = DataDir} = Storage) ->
     {ValidSnapshots0, InvalidSnapshots} =
         lists:foldl(
-          fun ({Seqno, _, Config} = Snapshot, {AccValid, AccInvalid} = Acc) ->
+          fun ({Seqno, _, _, Config} = Snapshot,
+               {AccValid, AccInvalid} = Acc) ->
                   case validate_snapshot(DataDir, Seqno, Config) of
                       ok ->
                           {[Snapshot | AccValid], AccInvalid};
@@ -1099,7 +1102,7 @@ get_and_hold_latest_snapshot(Storage) ->
     case get_latest_snapshot(Storage) of
         no_snapshot ->
             no_snapshot;
-        {Seqno, _, _} = Snapshot ->
+        {Seqno, _, _, _} = Snapshot ->
             {Snapshot, hold_snapshot(Seqno, Storage)}
     end.
 
@@ -1141,7 +1144,7 @@ get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
         [] ->
             no_snapshot;
-        [{_, _, _} = Snapshot| _] ->
+        [{_, _, _, _} = Snapshot| _] ->
             Snapshot
     end.
 
@@ -1149,7 +1152,7 @@ get_latest_snapshot_seqno(Storage) ->
     case get_latest_snapshot(Storage) of
         no_snapshot ->
             ?NO_SEQNO;
-        {Seqno, _Term, _Config} ->
+        {Seqno, _, _Term, _Config} ->
             Seqno
     end.
 
@@ -1173,7 +1176,7 @@ compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
                         {KeepSnapshots0, DeleteSnapshots0};
                     UsedSeqno ->
                         {Used, Unused} = lists:splitwith(
-                                           fun ({Seqno, _, _}) ->
+                                           fun ({Seqno, _, _, _}) ->
                                                    Seqno >= UsedSeqno
                                            end, DeleteSnapshots0),
                         case Used of
@@ -1189,7 +1192,7 @@ compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
                 end,
 
             lists:foreach(
-              fun ({SnapshotSeqno, _, _}) ->
+              fun ({SnapshotSeqno, _, _, _}) ->
                       delete_snapshot(SnapshotSeqno, Storage)
               end, DeleteSnapshots),
 

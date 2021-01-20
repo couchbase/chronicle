@@ -67,6 +67,7 @@
 
 -record(snapshot_state, { tref,
                           seqno,
+                          history_id,
                           term,
                           config,
 
@@ -133,7 +134,7 @@ save_rsm_snapshot(Name, Seqno, Snapshot) ->
 
 get_rsm_snapshot(Name) ->
     with_latest_snapshot(
-      fun (Seqno, _Term, Config, Storage) ->
+      fun (Seqno, _HistoryId,_Term, Config, Storage) ->
               get_rsm_snapshot(Name, Seqno, Config, Storage)
       end).
 
@@ -148,12 +149,9 @@ get_rsm_snapshot(Name, Seqno, Config, Storage) ->
     end.
 
 get_full_snapshot() ->
-    with_latest_snapshot(
-      fun (Seqno, Term, Config, Storage) ->
-              get_full_snapshot(Seqno, Term, Config, Storage)
-      end).
+    with_latest_snapshot(fun get_full_snapshot/5).
 
-get_full_snapshot(Seqno, Term, Config, Storage) ->
+get_full_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
     RSMs = get_rsms(Config),
     RSMSnapshots =
         maps:map(
@@ -161,13 +159,13 @@ get_full_snapshot(Seqno, Term, Config, Storage) ->
                   Snapshot = read_rsm_snapshot(Name, Seqno, Storage),
                   term_to_binary(Snapshot, [compressed])
           end, RSMs),
-    {ok, Seqno, Term, Config, RSMSnapshots}.
+    {ok, Seqno, HistoryId, Term, Config, RSMSnapshots}.
 
 with_latest_snapshot(Fun) ->
     case call(?SERVER, {get_latest_snapshot, self()}, 10000) of
-        {ok, Ref, Seqno, Term, Config, Storage} ->
+        {ok, Ref, Seqno, HistoryId, Term, Config, Storage} ->
             try
-                Fun(Seqno, Term, Config, Storage)
+                Fun(Seqno, HistoryId, Term, Config, Storage)
             after
                 gen_statem:cast(?SERVER, {release_snapshot, Ref})
             end;
@@ -388,16 +386,19 @@ append(Peer, Opaque, HistoryId, Term,
                        chronicle:history_id(),
                        chronicle:leader_term(),
                        chronicle:seqno(),
+                       chronicle:history_id(),
                        chronicle:leader_term(),
                        ConfigEntry::#log_entry{},
                        #{RSM::atom() => RSMSnapshot::binary()}) ->
           install_snapshot_result().
 install_snapshot(Peer, HistoryId, Term,
-                 SnapshotSeqno, SnapshotTerm, SnapshotConfig, RSMSnapshots) ->
+                 SnapshotSeqno, SnapshotHistoryId,
+                 SnapshotTerm, SnapshotConfig, RSMSnapshots) ->
     call(?SERVER(Peer),
          {install_snapshot,
           HistoryId, Term,
-          SnapshotSeqno, SnapshotTerm, SnapshotConfig, RSMSnapshots},
+          SnapshotSeqno, SnapshotHistoryId,
+          SnapshotTerm, SnapshotConfig, RSMSnapshots},
          install_snapshot,
          ?INSTALL_SNAPSHOT_TIMEOUT).
 
@@ -556,10 +557,12 @@ handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
                                 CommittedSeqno, From, State, Data);
 handle_call({install_snapshot,
              HistoryId, Term,
-             SnapshotSeqno, SnapshotTerm, SnapshotConfig, RSMSnapshots},
+             SnapshotSeqno, SnapshotHistoryId,
+             SnapshotTerm, SnapshotConfig, RSMSnapshots},
             From, State, Data) ->
     handle_install_snapshot(HistoryId, Term,
-                            SnapshotSeqno, SnapshotTerm, SnapshotConfig,
+                            SnapshotSeqno, SnapshotHistoryId,
+                            SnapshotTerm, SnapshotConfig,
                             RSMSnapshots, From, State, Data);
 handle_call({store_branch, Branch}, From, State, Data) ->
     handle_store_branch(Branch, From, State, Data);
@@ -756,11 +759,11 @@ handle_get_latest_snapshot(Pid, From, State,
     case check_provisioned_or_removed(State) of
         ok ->
             case get_and_hold_latest_snapshot(Data) of
-                {{Seqno, Term, Config}, NewData0} ->
+                {{Seqno, HistoryId, Term, Config}, NewData0} ->
                     MRef = erlang:monitor(process, Pid),
                     NewReaders = Readers#{MRef => Seqno},
                     NewData = NewData0#data{snapshot_readers = NewReaders},
-                    Reply = {ok, MRef, Seqno, Term, Config, Storage},
+                    Reply = {ok, MRef, Seqno, HistoryId, Term, Config, Storage},
 
                     {keep_state,
                      NewData,
@@ -817,6 +820,7 @@ handle_snapshot_ok(RSM, Pid, _State,
                    #data{snapshot_state = SnapshotState} = Data) ->
     #snapshot_state{tref = TRef,
                     seqno = Seqno,
+                    history_id = HistoryId,
                     term = Term,
                     config = Config,
                     savers = Savers} = SnapshotState,
@@ -833,7 +837,8 @@ handle_snapshot_ok(RSM, Pid, _State,
 
             cancel_snapshot_timer(TRef),
             NewData = Data#data{snapshot_state = undefined},
-            {keep_state, record_snapshot(Seqno, Term, Config, NewData)};
+            {keep_state,
+             record_snapshot(Seqno, HistoryId, Term, Config, NewData)};
         false ->
             NewSnapshotState = SnapshotState#snapshot_state{savers = NewSavers},
             {keep_state, Data#data{snapshot_state = NewSnapshotState}}
@@ -1654,7 +1659,8 @@ check_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data) ->
            end).
 
 handle_install_snapshot(HistoryId, Term,
-                        SnapshotSeqno, SnapshotTerm, SnapshotConfig,
+                        SnapshotSeqno, SnapshotHistoryId,
+                        SnapshotTerm, SnapshotConfig,
                         RSMSnapshots, From, State, Data) ->
     case check_install_snapshot(HistoryId, Term,
                                 SnapshotConfig,
@@ -1674,8 +1680,9 @@ handle_install_snapshot(HistoryId, Term,
                     NewData0 =
                         case Action of
                             install ->
-                                install_snapshot(SnapshotSeqno, SnapshotTerm,
-                                                 SnapshotConfig,
+                                install_snapshot(SnapshotSeqno,
+                                                 SnapshotHistoryId,
+                                                 SnapshotTerm, SnapshotConfig,
                                                  RSMSnapshots, Metadata, Data);
                             commit_seqno ->
                                 store_meta(Metadata, Data)
@@ -2180,12 +2187,13 @@ append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
     chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 
-record_snapshot(Seqno, Term, ConfigEntry, #data{storage = Storage} = Data) ->
-    NewStorage = chronicle_storage:record_snapshot(Seqno, Term,
+record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
+                #data{storage = Storage} = Data) ->
+    NewStorage = chronicle_storage:record_snapshot(Seqno, HistoryId, Term,
                                                    ConfigEntry, Storage),
     Data#data{storage = NewStorage}.
 
-install_snapshot(SnapshotSeqno, SnapshotTerm, SnapshotConfig,
+install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                  RSMSnapshots, Metadata, #data{storage = Storage} = Data) ->
     lists:foreach(
       fun ({RSM, RSMSnapshotBinary}) ->
@@ -2195,7 +2203,8 @@ install_snapshot(SnapshotSeqno, SnapshotTerm, SnapshotConfig,
       end, maps:to_list(RSMSnapshots)),
 
     NewStorage =
-        chronicle_storage:install_snapshot(SnapshotSeqno, SnapshotTerm,
+        chronicle_storage:install_snapshot(SnapshotSeqno,
+                                           SnapshotHistoryId, SnapshotTerm,
                                            SnapshotConfig, Metadata, Storage),
     chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
@@ -2283,7 +2292,9 @@ initiate_snapshot(Data) ->
     CommittedRSMs = get_rsms(CommittedConfig),
     CurrentRSMs = get_rsms(CurrentConfig),
 
-    {ok, #log_entry{term = Term}} = get_log_entry(CommittedSeqno, Data),
+    {ok,
+     #log_entry{term = Term,
+                history_id = HistoryId}} = get_log_entry(CommittedSeqno, Data),
 
     %% TODO: depending on specifics of how RSM deletions are handled,
     %% it may not be safe when there's an uncommitted config deleting
@@ -2296,6 +2307,7 @@ initiate_snapshot(Data) ->
 
     RSMs = sets:from_list(maps:keys(CommittedRSMs)),
     SnapshotState = #snapshot_state{tref = TRef,
+                                    history_id = HistoryId,
                                     term = Term,
                                     seqno = CommittedSeqno,
                                     config = CommittedConfig,
