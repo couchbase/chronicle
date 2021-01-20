@@ -1390,7 +1390,8 @@ check_append_history_id(HistoryId, Entries, Data) ->
                                     sanitize_entries(Entries)]),
                             {error, {protocol_error,
                                      {missing_config_starting_history,
-                                      OldHistoryId, HistoryId, Entries}}}
+                                      OldHistoryId, HistoryId,
+                                      sanitize_entries(Entries)}}}
                     end
             end;
         {error, _} = Error ->
@@ -1475,7 +1476,10 @@ preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
                     sanitize_entry(Entry),
                     sanitize_entries(Entries)]),
             {error, {protocol_error,
-                     {malformed_append, Entry, AtSeqno, Entries}}};
+                     {malformed_append,
+                      sanitize_entry(Entry),
+                      AtSeqno,
+                      sanitize_entries(Entries)}}};
         {error, _} = Error ->
             Error
     end.
@@ -1532,7 +1536,8 @@ preprocess_entries_loop(PrevSeqno,
                                      {protocol_error,
                                       {mismatched_entry,
                                        EntrySeqno, CommittedSeqno,
-                                       OurEntry, Entry}}}
+                                       sanitize_entry(OurEntry),
+                                       sanitize_entry(Entry)}}}
                             end;
                         {error, not_found} ->
                             %% The entry must have been compacted.
