@@ -1377,6 +1377,9 @@ check_append_history_id(HistoryId, Entries, Data) ->
                     %% The first entry in any history must be a config entry
                     %% committing that history.
                     case NewHistoryEntries of
+                        [] ->
+                            %% Partial append.
+                            ok;
                         [#log_entry{history_id = HistoryId,
                                     value = #config{}} | _] ->
                             ok;
@@ -1387,11 +1390,11 @@ check_append_history_id(HistoryId, Entries, Data) ->
                                    "New history id: ~p~n"
                                    "Entries:~n~p",
                                    [OldHistoryId, HistoryId,
-                                    sanitize_entries(Entries)]),
+                                    sanitize_entries(NewHistoryEntries)]),
                             {error, {protocol_error,
                                      {missing_config_starting_history,
                                       OldHistoryId, HistoryId,
-                                      sanitize_entries(Entries)}}}
+                                      sanitize_entries(NewHistoryEntries)}}}
                     end
             end;
         {error, _} = Error ->
