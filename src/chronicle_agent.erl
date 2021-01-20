@@ -1671,11 +1671,19 @@ handle_install_snapshot(HistoryId, Term,
                     {keep_state_and_data,
                      {reply, From, {ok, build_metadata(Data)}}};
                 Action ->
-                    %% TODO: This may commit HistoryId prematurely
-                    Metadata = #{?META_HISTORY_ID => HistoryId,
-                                 ?META_TERM => Term,
-                                 ?META_PENDING_BRANCH => undefined,
-                                 ?META_COMMITTED_SEQNO => SnapshotSeqno},
+                    Metadata0 = #{?META_TERM => Term,
+                                  ?META_COMMITTED_SEQNO => SnapshotSeqno},
+                    Metadata =
+                        case HistoryId =:= SnapshotHistoryId of
+                            true ->
+                                Metadata0#{?META_HISTORY_ID => HistoryId,
+                                           ?META_PENDING_BRANCH => undefined};
+                            false ->
+                                %% Make sure that the branch record gets
+                                %% cleaned up only once we get a record
+                                %% committed with the new history id.
+                                Metadata0
+                        end,
 
                     NewData0 =
                         case Action of
