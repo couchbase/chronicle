@@ -2261,7 +2261,8 @@ maybe_initiate_snapshot(Data) ->
     LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
     CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
 
-    case CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL of
+    case CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL
+        andalso not is_wipe_requested(Data) of
         true ->
             initiate_snapshot(Data);
         false ->
