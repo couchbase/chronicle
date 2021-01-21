@@ -1305,13 +1305,19 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
       start_seqno := StartSeqno,
       end_seqno := EndSeqno,
       committed_seqno := NewCommittedSeqno,
-      truncate := Truncate} = Info,
+      truncate := Truncate,
+      commit_branch := CommitBranch} = Info,
 
+    Metadata0 = #{?META_TERM => Term,
+                  ?META_COMMITTED_SEQNO => NewCommittedSeqno},
     Metadata =
-        #{?META_HISTORY_ID => HistoryId,
-          ?META_TERM => Term,
-          ?META_PENDING_BRANCH => undefined,
-          ?META_COMMITTED_SEQNO => NewCommittedSeqno},
+        case CommitBranch of
+            true ->
+                Metadata0#{?META_HISTORY_ID => HistoryId,
+                           ?META_PENDING_BRANCH => undefined};
+            false ->
+                Metadata0
+        end,
 
     NewData0 =
         case Entries =/= [] orelse Truncate of
@@ -1357,7 +1363,7 @@ check_append(HistoryId, Term, CommittedSeqno,
     ?CHECK(check_prepared(State),
            check_append_history_id(HistoryId, Entries, Data),
            check_not_earlier_term(Term, Data),
-           check_append_obsessive(Term, CommittedSeqno,
+           check_append_obsessive(HistoryId, Term, CommittedSeqno,
                                   AtTerm, AtSeqno, Entries, Data)).
 
 check_append_history_id(HistoryId, Entries, Data) ->
@@ -1401,7 +1407,8 @@ check_append_history_id(HistoryId, Entries, Data) ->
             Error
     end.
 
-check_append_obsessive(Term, CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
+check_append_obsessive(HistoryId, Term,
+                       CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
     OurHighSeqno = get_high_seqno(Data),
     case AtSeqno > OurHighSeqno of
         true ->
@@ -1410,10 +1417,12 @@ check_append_obsessive(Term, CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
             OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
             case check_at_seqno(AtTerm, AtSeqno, OurCommittedSeqno, Data) of
                 ok ->
-                    case preprocess_entries(AtSeqno, Entries,
+                    case preprocess_entries(HistoryId, AtSeqno, Entries,
                                             OurCommittedSeqno, OurHighSeqno,
                                             Data) of
-                        {ok, StartSeqno, EndSeqno, Truncate, FinalEntries} ->
+                        {ok,
+                         StartSeqno, EndSeqno,
+                         CommitBranch, Truncate, FinalEntries} ->
                             case check_committed_seqno(Term, CommittedSeqno,
                                                        EndSeqno, Data) of
                                 {ok, FinalCommittedSeqno} ->
@@ -1422,7 +1431,8 @@ check_append_obsessive(Term, CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
                                        start_seqno => StartSeqno,
                                        end_seqno => EndSeqno,
                                        committed_seqno => FinalCommittedSeqno,
-                                       truncate => Truncate}};
+                                       truncate => Truncate,
+                                       commit_branch => CommitBranch}};
                                 {error, _} = Error ->
                                     Error
                             end;
@@ -1465,11 +1475,13 @@ check_at_seqno(AtTerm, AtSeqno, CommittedSeqno,
             ok
     end.
 
-preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
+preprocess_entries(HistoryId, AtSeqno, Entries,
+                   CommittedSeqno, HighSeqno, Data) ->
     case preprocess_entries_loop(AtSeqno, Entries,
                                  CommittedSeqno, HighSeqno, Data) of
-        {ok, _, _, _, _} = Ok ->
-            Ok;
+        {ok, StartSeqno, EndSeqno, LastHistoryId, Truncate, FinalEntries} ->
+            CommitBranch = (LastHistoryId =:= HistoryId),
+            {ok, StartSeqno, EndSeqno, CommitBranch, Truncate, FinalEntries};
         {error, {malformed, Entry}} ->
             ?ERROR("Received an ill-formed append request.~n"
                    "At seqno: ~p"
@@ -1488,7 +1500,7 @@ preprocess_entries(AtSeqno, Entries, CommittedSeqno, HighSeqno, Data) ->
     end.
 
 preprocess_entries_loop(PrevSeqno, [], _CommittedSeqno, _HighSeqno, _Data) ->
-    {ok, PrevSeqno + 1, PrevSeqno, false, []};
+    {ok, PrevSeqno + 1, PrevSeqno, ?NO_HISTORY, false, []};
 preprocess_entries_loop(PrevSeqno,
                         [Entry | RestEntries] = Entries,
                         CommittedSeqno, HighSeqno, Data) ->
@@ -1498,8 +1510,10 @@ preprocess_entries_loop(PrevSeqno,
             case EntrySeqno > HighSeqno of
                 true ->
                     case get_entries_seqnos(PrevSeqno, Entries) of
-                        {ok, StartSeqno, EndSeqno} ->
-                            {ok, StartSeqno, EndSeqno, false, Entries};
+                        {ok, StartSeqno, EndSeqno, HistoryId} ->
+                            {ok,
+                             StartSeqno, EndSeqno,
+                             HistoryId, false, Entries};
                         {error, _} = Error ->
                             Error
                     end;
@@ -1518,9 +1532,9 @@ preprocess_entries_loop(PrevSeqno,
                                 true ->
                                     case get_entries_seqnos(PrevSeqno,
                                                             Entries) of
-                                        {ok, StartSeqno, EndSeqno} ->
+                                        {ok, StartSeqno, EndSeqno, HistoryId} ->
                                             {ok,
-                                             StartSeqno, EndSeqno,
+                                             StartSeqno, EndSeqno, HistoryId,
                                              true, Entries};
                                         {error, _} = Error ->
                                             Error
@@ -1557,16 +1571,17 @@ preprocess_entries_loop(PrevSeqno,
     end.
 
 get_entries_seqnos(AtSeqno, Entries) ->
-    get_entries_seqnos_loop(Entries, AtSeqno + 1, AtSeqno).
+    get_entries_seqnos_loop(Entries, AtSeqno + 1, AtSeqno, ?NO_HISTORY).
 
-get_entries_seqnos_loop([], StartSeqno, EndSeqno) ->
-    {ok, StartSeqno, EndSeqno};
-get_entries_seqnos_loop([Entry|Rest], StartSeqno, EndSeqno) ->
+get_entries_seqnos_loop([], StartSeqno, EndSeqno, HistoryId) ->
+    {ok, StartSeqno, EndSeqno, HistoryId};
+get_entries_seqnos_loop([Entry|Rest], StartSeqno, EndSeqno, _HistoryId) ->
     Seqno = Entry#log_entry.seqno,
+    HistoryId = Entry#log_entry.history_id,
 
     case Seqno =:= EndSeqno + 1 of
         true ->
-            get_entries_seqnos_loop(Rest, StartSeqno, Seqno);
+            get_entries_seqnos_loop(Rest, StartSeqno, Seqno, HistoryId);
         false ->
             {error, {malformed, Entry}}
     end.
