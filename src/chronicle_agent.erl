@@ -1932,6 +1932,7 @@ handle_mark_removed(Peer, PeerId, From, State, Data) ->
 
 check_mark_removed(Peer, PeerId, State, Data) ->
     ?CHECK(check_provisioned(State),
+           check_not_wipe_requested(Data),
            check_peer_and_id(Peer, PeerId, Data)).
 
 check_peer_and_id(Peer, PeerId, Data) ->
@@ -2392,7 +2393,14 @@ check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
         true ->
             {State, Data};
         false ->
-            mark_removed(Data)
+            case is_wipe_requested(Data) of
+                true ->
+                    ?DEBUG("Got removed when wipe is requested. "
+                           "Not changing the state."),
+                    {State, Data};
+                false ->
+                    mark_removed(Data)
+            end
     end.
 
 mark_removed(Data) ->
