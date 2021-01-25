@@ -30,14 +30,17 @@ start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
 failover(RemainingPeers) ->
-    gen_server:call(?SERVER, {failover, RemainingPeers}).
+    failover(RemainingPeers, undefined).
+
+failover(RemainingPeers, Opaque) ->
+    gen_server:call(?SERVER, {failover, RemainingPeers, Opaque}).
 
 %% gen_server callbacks
 init([]) ->
     {ok, #state{}}.
 
-handle_call({failover, RemainingPeers}, _From, State) ->
-    handle_failover(RemainingPeers, State);
+handle_call({failover, RemainingPeers, Opaque}, _From, State) ->
+    handle_failover(RemainingPeers, Opaque, State);
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -47,17 +50,19 @@ handle_cast(Cast, State) ->
     {noreply, State}.
 
 %% internal
-handle_failover(RemainingPeers, State) ->
+handle_failover(RemainingPeers, Opaque, State) ->
     #metadata{history_id = HistoryId} = chronicle_agent:get_metadata(),
     NewHistoryId = chronicle_utils:random_uuid(),
-    {reply, prepare_branch(HistoryId, NewHistoryId, RemainingPeers), State}.
+    Reply = prepare_branch(HistoryId, NewHistoryId, RemainingPeers, Opaque),
+    {reply, Reply, State}.
 
-prepare_branch(OldHistoryId, NewHistoryId, Peers) ->
+prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
     Branch = #branch{history_id = NewHistoryId,
                      old_history_id = OldHistoryId,
                      coordinator = self,
                      peers = Peers,
-                     status = unknown},
+                     status = unknown,
+                     opaque = Opaque},
 
     %% Store a branch record locally first, so we can recover even if we crash
     %% somewhere in the middle.
