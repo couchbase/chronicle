@@ -624,7 +624,8 @@ simple_test__(Nodes) ->
                           {ok, Voters} = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
 
-                          ok = chronicle_failover:failover([a, b])
+                          ok = chronicle_failover:failover([a, b],
+                                                           pending_failover)
                   end),
 
     ok = vnet:disconnect(a, c),
@@ -634,6 +635,11 @@ simple_test__(Nodes) ->
 
     ok = rpc_node(b,
                   fun () ->
+                          {ok, {pending_failover, _}} =
+                              chronicle_kv:get(kv, '$failover_opaque',
+                                               #{read_consistency => quorum}),
+                          {ok, _} = chronicle_kv:delete(kv, pending_failover),
+
                           {ok, Rev} = chronicle_kv:add(kv, a, b),
                           {error, {conflict, _}} = chronicle_kv:add(kv, a, c),
                           {ok, {b, _}} = chronicle_kv:get(kv, a),

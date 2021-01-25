@@ -43,6 +43,7 @@
          init/2, post_init/3,
          apply_snapshot/5, apply_command/5,
          handle_command/4, handle_query/4, handle_info/4,
+         handle_config/5,
          terminate/4]).
 
 %% TODO: make configurable
@@ -544,6 +545,16 @@ apply_command({transaction, Conditions, Updates}, Revision,
               StateRevision, State, Data) ->
     apply_transaction(Conditions, Updates,
                       Revision, StateRevision, State, Data).
+
+handle_config(Config, Revision, _StateRevision, State, Data) ->
+    case chronicle_config:get_branch_opaque(Config) of
+        {ok, Opaque} ->
+            NewState = handle_update('$failover_opaque',
+                                     Opaque, Revision, State, Data),
+            {ok, NewState, Data};
+        no_branch ->
+            {ok, State, Data}
+    end.
 
 handle_info(Msg, _StateRevision, _State, Data) ->
     ?WARNING("Unexpected message: ~p", [Msg]),

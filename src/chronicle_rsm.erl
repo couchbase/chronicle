@@ -477,17 +477,18 @@ apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
     NewData = sync_revision_requests_reply(NewData1),
     pending_commands_reply(Replies, State, NewData).
 
-apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies} = Acc,
+apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies},
             #data{mod = Mod} = Data) ->
     #log_entry{value = Value,
                history_id = EntryHistoryId,
                seqno = EntrySeqno} = Entry,
+    AppliedRevision = {HistoryId, Seqno},
+    Revision = {HistoryId, EntrySeqno},
+
     case Value of
         #rsm_command{rsm_name = Name, command = Command} ->
             true = (Name =:= Data#data.name),
             true = (HistoryId =:= EntryHistoryId),
-            AppliedRevision = {HistoryId, Seqno},
-            Revision = {HistoryId, EntrySeqno},
 
             {reply, Reply, NewModState, NewModData} =
                 Mod:apply_command(Command,
@@ -496,17 +497,12 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies} = Acc,
             EntryTerm = Entry#log_entry.term,
             NewReplies = [{EntryTerm, EntrySeqno, Reply} | Replies],
             {HistoryId, EntrySeqno, NewModState, NewModData, NewReplies};
-        #config{} ->
-            %% TODO: have an explicit indication in the log that an entry
-            %% starts a new history
-            %%
-            %% The current workaround: only configs may start a new history.
-            case EntryHistoryId =:= HistoryId of
-                true ->
-                    Acc;
-                false ->
-                    {EntryHistoryId, EntrySeqno, ModState, ModData, Replies}
-            end
+        #config{} = Config ->
+            {ok, NewModState, NewModData} =
+                Mod:handle_config(Config,
+                                  Revision, AppliedRevision,
+                                  ModState, ModData),
+            {EntryHistoryId, EntrySeqno, NewModState, NewModData, Replies}
     end.
 
 pending_commands_reply(Replies,

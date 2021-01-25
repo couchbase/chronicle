@@ -29,6 +29,7 @@
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
 -export([get_peer_id/2, is_peer/3]).
+-export([get_branch_opaque/1]).
 
 -export_type([peers/0]).
 
@@ -252,4 +253,12 @@ is_peer(Peer, PeerId, Config) ->
             FoundPeerId =:= PeerId;
         not_peer ->
             false
+    end.
+
+get_branch_opaque(#config{branch = Branch}) ->
+    case Branch of
+        false ->
+            no_branch;
+        #branch{opaque = Opaque}->
+            {ok, Opaque}
     end.
