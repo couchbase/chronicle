@@ -74,12 +74,12 @@ reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
     {ok, PeerId} = get_peer_id(OldPeer, Config),
     Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}.
 
-branch(Peers, Config) ->
+branch(#branch{peers = Peers} = Branch, Config) ->
     %% TODO: figure out what to do with replicas
-    PeerInfos = [{Peer, peer_info(Peer, Config, voter)} ||
-                    Peer <- Peers],
+    PeerInfos = [{Peer, peer_info(Peer, Config, voter)} || Peer <- Peers],
     Config#config{peers = maps:from_list(PeerInfos),
-                  old_peers = undefined}.
+                  old_peers = undefined,
+                  branch = Branch}.
 
 set_lock(Lock, #config{} = Config) ->
     Config#config{lock = Lock}.

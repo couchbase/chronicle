@@ -41,14 +41,30 @@
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
 
--record(config, { lock :: undefined | binary(),
-                  peers :: chronicle_config:peers(),
-                  old_peers :: undefined | chronicle_config:peers(),
-                  state_machines :: #{atom() => #rsm_config{} }}).
-
 -record(rsm_command,
         { rsm_name :: atom(),
           command :: term() }).
+
+-record(branch, {history_id,
+                 old_history_id,
+                 coordinator,
+                 peers,
+
+                 %% The following fields are only set on the branch
+                 %% coordinator node.
+                 status :: ok
+                         | unknown
+                         | {concurrent_branch, #branch{}}
+                         | {history_mismatch, chronicle:history_id()},
+
+                 opaque :: any()}).
+
+-record(config, { lock :: undefined | binary(),
+                  peers :: chronicle_config:peers(),
+                  old_peers :: undefined | chronicle_config:peers(),
+                  state_machines :: #{atom() => #rsm_config{}},
+
+                  branch = false :: #branch{} | false}).
 
 -record(log_entry,
         { history_id :: chronicle:history_id(),
@@ -65,19 +81,6 @@
                     committed_seqno,
                     config,
                     pending_branch }).
-
--record(branch, {history_id,
-                 old_history_id,
-                 coordinator,
-                 peers,
-
-                 %% The following fields are only set on the branch
-                 %% coordinator node.
-                 status :: ok
-                         | unknown
-                         | {concurrent_branch, #branch{}}
-                         | {history_mismatch, chronicle:history_id()},
-                 opaque}).
 
 -define(DEBUG(Fmt, Args), ?LOG(debug, Fmt, Args)).
 -define(INFO(Fmt, Args), ?LOG(info, Fmt, Args)).
