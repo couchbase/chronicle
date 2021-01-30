@@ -59,6 +59,14 @@ leader_query(Leader, Query, Timeout) ->
 cas_config(Leader, NewConfig, CasRevision, Timeout) ->
     call(?SERVER(Leader), {cas_config, NewConfig, CasRevision}, Timeout).
 
+check_quorum(Leader, Timeout) ->
+    try
+        call(?SERVER(Leader), check_quorum, Timeout)
+    catch
+        exit:{timeout, _} ->
+            {error, timeout}
+    end.
+
 sync_quorum(Tag, HistoryId, Term) ->
     gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
 
@@ -142,6 +150,8 @@ handle_event({call, From}, {cas_config, NewConfig, Revision}, State, Data) ->
     handle_cas_config(NewConfig, Revision, From, State, Data);
 handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
+handle_event({call, From}, check_quorum, State, Data) ->
+    handle_check_quorum(From, State, Data);
 handle_event(cast,
              {rsm_command, Pid, Tag, HistoryId, Term, RSMName, RSMCommand},
              State, Data) ->
@@ -417,6 +427,19 @@ handle_register_rsm(Name, Pid, From, State, #data{rsms = RSMs} = Data) ->
         end,
 
     {keep_state, NewData, {reply, From, Reply}}.
+
+handle_check_quorum(From, State, #data{proposer = Proposer}) ->
+    ReplyTo = {from, From},
+    handle_leader_request(
+      any, ReplyTo, State,
+      fun () ->
+              postpone_if_not_ready(
+                State,
+                fun () ->
+                        chronicle_proposer:sync_quorum(Proposer, ReplyTo),
+                        keep_state_and_data
+                end)
+      end).
 
 handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
     case maps:take(MRef, RSMs) of

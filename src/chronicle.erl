@@ -20,6 +20,7 @@
 -import(chronicle_utils, [with_leader/2]).
 
 -export([get_system_state/0]).
+-export([check_quorum/0, check_quorum/1]).
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
@@ -74,6 +75,25 @@ get_system_state() ->
                State =:= provisioned;
                State =:= removed ->
             State
+    end.
+
+check_quorum() ->
+    check_quorum(?DEFAULT_TIMEOUT).
+
+check_quorum(Timeout) ->
+    try with_leader(Timeout,
+                    fun (TRef, Leader, _) ->
+                            chronicle_server:check_quorum(Leader, TRef)
+                    end) of
+        ok ->
+            true;
+        {error, timeout} ->
+            {false, timeout};
+        Error ->
+            exit(Error)
+    catch
+        exit:no_leader ->
+            {false, no_leader}
     end.
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
