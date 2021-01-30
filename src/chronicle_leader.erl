@@ -13,7 +13,6 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%
-%% TODO: incorporate priorities?
 -module(chronicle_leader).
 
 -include("chronicle.hrl").
