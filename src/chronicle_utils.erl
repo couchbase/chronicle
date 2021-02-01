@@ -250,6 +250,85 @@ do_call(ServerRef, Call, LoggedCall, Timeout) ->
               sanitize_stacktrace(Stack))
     end.
 
+multi_call(Peers, Name, Request, Timeout) ->
+    multi_call(Peers, Name, Request,
+               fun (_) -> true end,
+               Timeout).
+
+multi_call(Peers, Name, Request, OkPred, Timeout) ->
+    Tag = make_ref(),
+    Parent = self(),
+    {_, MRef} =
+        spawn_monitor(
+          fun () ->
+                  ParentMRef = erlang:monitor(process, Parent),
+                  TRef = make_ref(),
+
+                  case Timeout of
+                      infinity ->
+                          ok;
+                      _ when is_integer(Timeout) ->
+                          erlang:send_after(Timeout, self(), TRef)
+                  end,
+
+                  Refs = multi_call_send(Peers, Name, Request),
+                  Result = multi_call_recv(Refs, ParentMRef,
+                                           TRef, OkPred, #{}, #{}),
+                  Parent ! {Tag, Result}
+          end),
+
+    receive
+        {Tag, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, _, _, Reason} ->
+            exit(Reason)
+    end.
+
+multi_call_send(Peers, Name, Request) ->
+    lists:foldl(
+      fun (Peer, Acc) ->
+              ServerRef = ?SERVER_NAME(Peer, Name),
+              MRef = erlang:monitor(process, ServerRef),
+              call_async(ServerRef, MRef, Request, [noconnect]),
+              Acc#{MRef => Peer}
+      end, #{}, Peers).
+
+multi_call_recv(Refs, _ParentMRef, _TRef, _OkPred, AccOk, AccBad)
+  when map_size(Refs) =:= 0 ->
+    {AccOk, AccBad};
+multi_call_recv(Refs, ParentMRef, TRef, OkPred, AccOk, AccBad) ->
+    receive
+        {Ref, PeerResult} when is_reference(Ref) ->
+            case maps:take(Ref, Refs) of
+                {Peer, NewRefs} ->
+                    {NewAccOk, NewAccBad} =
+                        case OkPred(PeerResult) of
+                            true ->
+                                {AccOk#{Peer => PeerResult}, AccBad};
+                            false ->
+                                {AccOk, AccBad#{Peer => PeerResult}}
+                        end,
+                    multi_call_recv(NewRefs, ParentMRef,
+                                    TRef, OkPred, NewAccOk, NewAccBad);
+                error ->
+                    multi_call_recv(Refs, ParentMRef,
+                                    TRef, OkPred, AccOk, AccBad)
+            end;
+        TRef ->
+            NewAccBad =
+                maps:fold(fun (_, Peer, Acc) ->
+                                  Acc#{Peer => timeout}
+                          end, AccBad, Refs),
+            {AccOk, NewAccBad};
+        {'DOWN', ParentMRef, _, _, _} ->
+            exit(normal);
+        {'DOWN', Ref, _, _, Reason} ->
+            {Peer, NewRefs} = maps:take(Ref, Refs),
+            NewAccBad = AccBad#{Peer => {down, sanitize_reason(Reason)}},
+            multi_call_recv(NewRefs, ParentMRef, TRef, OkPred, AccOk, NewAccBad)
+    end.
+
 start_timeout({timeout, _, _} = Timeout) ->
     Timeout;
 start_timeout(infinity) ->
