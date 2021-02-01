@@ -23,7 +23,7 @@
 -endif.
 
 -compile(export_all).
--export_type([batch/0, send_options/0, send_result/0]).
+-export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
 -ifdef(HAVE_SYNC_DIR).
 -on_load(init_sync_nif/0).
@@ -250,11 +250,29 @@ do_call(ServerRef, Call, LoggedCall, Timeout) ->
               sanitize_stacktrace(Stack))
     end.
 
+-type multi_call_error() :: {down, Reason::any()} | timeout.
+-type multi_call_result() :: multi_call_result(any(), any()).
+-type multi_call_result(Ok, Bad) ::
+        {#{chronicle:peer() => Ok},
+         #{chronicle:peer() => Bad | multi_call_error()}}.
+-type multi_call_pred() :: fun ((Result::any()) -> boolean()).
+
+-spec multi_call([chronicle:peer()],
+                 Name::atom(),
+                 Request::term(),
+                 timeout()) ->
+          multi_call_result().
 multi_call(Peers, Name, Request, Timeout) ->
     multi_call(Peers, Name, Request,
                fun (_) -> true end,
                Timeout).
 
+-spec multi_call([chronicle:peer()],
+                 Name::atom(),
+                 Request::term(),
+                 OkPred::multi_call_pred(),
+                 timeout()) ->
+          multi_call_result().
 multi_call(Peers, Name, Request, OkPred, Timeout) ->
     Tag = make_ref(),
     Parent = self(),
