@@ -20,8 +20,6 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [parallel_mapfold/4]).
-
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -record(state, {}).
@@ -66,7 +64,7 @@ prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
 
     %% Store a branch record locally first, so we can recover even if we crash
     %% somewhere in the middle.
-    case store_branch(Branch) of
+    case local_store_branch(Branch) of
         {ok, Metadata} ->
             FinalBranch = Metadata#metadata.pending_branch,
             prepare_branch_on_followers(FinalBranch);
@@ -79,39 +77,31 @@ prepare_branch_on_followers(#branch{coordinator = Self,
     unknown = Branch#branch.status,
 
     Followers = Peers -- [Self],
-    Result = prepare_branch_on_peers(Followers, Branch),
+    Result = store_branch(Followers, Branch),
     update_branch_status(Branch, Result),
     Result.
 
-store_branch(Branch) ->
-    store_branch(?SELF_PEER, Branch).
+local_store_branch(Branch) ->
+    ?DEBUG("Setting local brach:~n~p", [Branch]),
+    chronicle_agent:local_store_branch(Branch).
 
-store_branch(Peer, Branch) ->
-    ?DEBUG("Sending store_branch to ~p.~n"
+store_branch(Peers, Branch) ->
+    ?DEBUG("Setting branch.~n"
+           "Peers: ~w~n"
            "Branch:~n~p",
-           [Peer, Branch]),
-    chronicle_agent:store_branch(Peer, Branch).
+           [Peers, Branch]),
 
-prepare_branch_on_peers(Peers, Branch) ->
-    CallFun = fun (Peer) -> store_branch(Peer, Branch) end,
-    HandleFun =
-        fun (_Peer, Response, _Acc) ->
-                case Response of
-                    {ok, _Metadata} ->
-                        {continue, ok};
-                    {error, _} = Error ->
-                        {stop, Error}
-                end
-        end,
-
-    Result = parallel_mapfold(CallFun, HandleFun, ok, Peers),
-    case Result of
-        ok ->
+    {_Ok, Bad} = chronicle_agent:store_branch(Peers, Branch),
+    case maps:size(Bad) =:= 0 of
+        true ->
             ok;
-        {error, _} = Error ->
-            ?WARNING("Failed to prepare branch: ~p.~nBranch:~n~p",
-                     [Error, Branch]),
-            Error
+        false ->
+            Errors = maps:to_list(Bad),
+            ?WARNING("Failed to store branch on some peers.~n"
+                     "Branch:~n~p~n"
+                     "Errors:~n~p",
+                     [Branch, Errors]),
+            {error, Errors}
     end.
 
 update_branch_status(Branch, Result) ->
@@ -121,7 +111,7 @@ update_branch_status(Branch, Result) ->
             ok;
         NewStatus ->
             NewBranch = Branch#branch{status = NewStatus},
-            {ok, _} = store_branch(NewBranch),
+            {ok, _} = local_store_branch(NewBranch),
             ok
     end.
 
@@ -129,10 +119,6 @@ branch_status_from_result(Result) ->
     case Result of
         ok ->
             ok;
-        {error, {concurrent_branch, _} = Status} ->
-            Status;
-        {error, {history_mismatch, _} = Status} ->
-            Status;
         _ ->
-            unknown
+            failed
     end.

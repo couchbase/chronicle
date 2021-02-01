@@ -54,8 +54,7 @@
                  %% coordinator node.
                  status :: ok
                          | unknown
-                         | {concurrent_branch, #branch{}}
-                         | {history_mismatch, chronicle:history_id()},
+                         | failed,
 
                  opaque :: any()}).
 

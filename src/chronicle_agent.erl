@@ -35,13 +35,14 @@
                           sanitize_reason/1,
                           sanitize_stacktrace/1]).
 
--define(SERVER, ?SERVER_NAME(?MODULE)).
+-define(NAME, ?MODULE).
+-define(SERVER, ?SERVER_NAME(?NAME)).
 -define(SERVER(Peer),
         case Peer of
             ?SELF_PEER ->
                 ?SERVER;
             _ ->
-                ?SERVER_NAME(Peer, ?MODULE)
+                ?SERVER_NAME(Peer, ?NAME)
         end).
 
 -define(PROVISION_TIMEOUT, 10000).
@@ -420,16 +421,33 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
          ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
 -type store_branch_result() ::
-        {ok, #metadata{}} |
-        {error, store_branch_error()}.
+        store_branch_ok() | store_branch_error().
+-type store_branch_ok() :: {ok, #metadata{}}.
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
         {coordinator_not_in_peers, chronicle:peer(), [chronicle:peer()]} |
         {concurrent_branch, OurBranch::#branch{}}.
 
--spec store_branch(peer(), #branch{}) -> store_branch_result().
-store_branch(Peer, Branch) ->
-    call(?SERVER(Peer), {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
+-spec local_store_branch(#branch{}) -> store_branch_result().
+local_store_branch(Branch) ->
+    call(?SERVER, {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
+
+-spec store_branch([chronicle:peer()], #branch{}) ->
+          chronicle_utils:multi_call_result(
+            store_branch_ok(),
+            {error, store_branch_error()}).
+store_branch(Peers, Branch) ->
+    chronicle_utils:multi_call(Peers, ?NAME,
+                               {store_branch, Branch},
+                               fun (Result) ->
+                                       case Result of
+                                           {ok, _} ->
+                                               true;
+                                           _ ->
+                                               false
+                                       end
+                               end,
+                               ?STORE_BRANCH_TIMEOUT).
 
 -spec undo_branch(peer(), chronicle:history_id()) -> ok | {error, Error} when
       Error :: no_branch |
