@@ -286,7 +286,8 @@ multi_call(Peers, Name, Request, OkPred, Timeout) ->
                       infinity ->
                           ok;
                       _ when is_integer(Timeout) ->
-                          erlang:send_after(Timeout, self(), TRef)
+                          erlang:send_after(Timeout, self(), TRef),
+                          ok
                   end,
 
                   Refs = multi_call_send(Peers, Name, Request),
@@ -307,7 +308,7 @@ multi_call_send(Peers, Name, Request) ->
     lists:foldl(
       fun (Peer, Acc) ->
               ServerRef = ?SERVER_NAME(Peer, Name),
-              MRef = erlang:monitor(process, ServerRef),
+              MRef = monitor_process(ServerRef),
               call_async(ServerRef, MRef, Request, [noconnect]),
               Acc#{MRef => Peer}
       end, #{}, Peers).
