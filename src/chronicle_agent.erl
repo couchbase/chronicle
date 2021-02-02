@@ -425,6 +425,7 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
         {not_in_peers, chronicle:peer(), [chronicle:peer()]} |
+        {history_mismatch, OurHistory::chronicle:history_id()} |
         {concurrent_branch, OurBranch::#branch{}}.
 
 -type local_store_branch_result() ::
