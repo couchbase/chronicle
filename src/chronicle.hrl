@@ -50,11 +50,7 @@
                  coordinator,
                  peers,
 
-                 %% The following fields are only set on the branch
-                 %% coordinator node.
-                 status :: ok
-                         | unknown
-                         | failed,
+                 status :: ok | pending,
 
                  opaque :: any()}).
 

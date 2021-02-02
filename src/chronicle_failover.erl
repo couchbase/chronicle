@@ -59,7 +59,7 @@ prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
                      old_history_id = OldHistoryId,
                      coordinator = ?PEER(),
                      peers = Peers,
-                     status = unknown,
+                     status = pending,
                      opaque = Opaque},
 
     %% Store a branch record locally first, so we can recover even if we crash
@@ -73,12 +73,19 @@ prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
 
 prepare_branch_on_followers(#branch{coordinator = Self,
                                     peers = Peers} = Branch) ->
-    unknown = Branch#branch.status,
+    pending = Branch#branch.status,
 
     Followers = Peers -- [Self],
-    Result = store_branch(Followers, Branch),
-    update_branch_status(Branch, Result),
-    Result.
+    case store_branch(Followers, Branch) of
+        ok ->
+            NewBranch = Branch#branch{status = ok},
+            %% TODO: handle errors
+            {ok, _} = local_store_branch(NewBranch),
+            ok;
+        {error, _} = Error ->
+            undo_branch(Peers, Branch),
+            Error
+    end.
 
 local_store_branch(Branch) ->
     ?DEBUG("Setting local brach:~n~p", [Branch]),
@@ -103,21 +110,25 @@ store_branch(Peers, Branch) ->
             {error, Errors}
     end.
 
-update_branch_status(Branch, Result) ->
-    unknown = Branch#branch.status,
-    case branch_status_from_result(Result) of
-        unknown ->
-            ok;
-        NewStatus ->
-            NewBranch = Branch#branch{status = NewStatus},
-            {ok, _} = local_store_branch(NewBranch),
-            ok
-    end.
+undo_branch(Peers, Branch) ->
+    ?DEBUG("Undoing branch.~n"
+           "Peers: ~w~n"
+           "Branch:~n~p",
+           [Peers, Branch]),
 
-branch_status_from_result(Result) ->
-    case Result of
-        ok ->
-            ok;
-        _ ->
-            failed
+    BranchId = Branch#branch.history_id,
+    {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId),
+
+    case maps:size(Bad) =:= 0 of
+        true ->
+            ?DEBUG("Branch undone successfully.");
+        false ->
+            ?WARNING("Failed to undo branch on some nodes:~n~p", [Bad]),
+            case maps:find(?PEER(), Bad) of
+                {ok, Reason} ->
+                    ?ERROR("Failed to undo local branch:~n~p", [Reason]),
+                    exit({undo_branch_failed, Reason});
+                error ->
+                    ok
+            end
     end.

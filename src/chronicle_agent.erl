@@ -49,6 +49,7 @@
 -define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
 -define(STORE_BRANCH_TIMEOUT, 15000).
+-define(UNDO_BRANCH_TIMEOUT, 5000).
 -define(PREPARE_JOIN_TIMEOUT, 10000).
 -define(JOIN_CLUSTER_TIMEOUT, 120000).
 
@@ -449,11 +450,21 @@ store_branch(Peers, Branch) ->
                                end,
                                ?STORE_BRANCH_TIMEOUT).
 
--spec undo_branch(peer(), chronicle:history_id()) -> ok | {error, Error} when
-      Error :: no_branch |
-               {bad_branch, OurBranch::#branch{}}.
-undo_branch(Peer, BranchId) ->
-    call(?SERVER(Peer), {undo_branch, BranchId}).
+-type undo_branch_error() :: no_branch
+                           | {bad_branch, TheirBranch::#branch{}}.
+-type undo_branch_result() :: chronicle_utils:multi_call_result(
+                                ok,
+                                {error, undo_branch_error()}).
+
+-spec undo_branch([chronicle:peer()], chronicle:history_id()) ->
+          undo_branch_result().
+undo_branch(Peers, BranchId) ->
+    chronicle_utils:multi_call(Peers, ?NAME,
+                               {undo_branch, BranchId},
+                               fun (Result) ->
+                                       Result =:= ok
+                               end,
+                               ?UNDO_BRANCH_TIMEOUT).
 
 sync_system_state_change() ->
     ok = chronicle_secondary_sup:sync().
