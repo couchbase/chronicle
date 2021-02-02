@@ -425,7 +425,7 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
 -type store_branch_ok() :: {ok, #metadata{}}.
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
-        {coordinator_not_in_peers, chronicle:peer(), [chronicle:peer()]} |
+        {not_in_peers, chronicle:peer(), [chronicle:peer()]} |
         {concurrent_branch, OurBranch::#branch{}}.
 
 -spec local_store_branch(#branch{}) -> store_branch_result().
@@ -1812,7 +1812,7 @@ handle_store_branch(Branch, From, State, Data) ->
 
     case ?CHECK(check_provisioned(State),
                 check_branch_compatible(Branch, Data),
-                check_branch_coordinator(Branch, Data)) of
+                check_branch_peers(Branch, Data)) of
         ok ->
             NewData = store_meta(#{?META_PENDING_BRANCH => Branch}, Data),
 
@@ -1850,15 +1850,21 @@ check_branch_compatible(NewBranch, Data) ->
             end
     end.
 
-check_branch_coordinator(Branch, _Data) ->
+check_branch_peers(Branch, Data) ->
+    Peer = get_meta(?META_PEER, Data),
     Coordinator = Branch#branch.coordinator,
     Peers = Branch#branch.peers,
 
     case lists:member(Coordinator, Peers) of
         true ->
-            ok;
+            case lists:member(Peer, Peers) of
+                true ->
+                    ok;
+                false ->
+                    {error, {not_in_peers, Peer, Peers}}
+            end;
         false ->
-            {error, {coordinator_not_in_peers, Coordinator, Peers}}
+            {error, {not_in_peers, Coordinator, Peers}}
     end.
 
 handle_undo_branch(BranchId, From, _State, Data) ->
