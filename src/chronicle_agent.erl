@@ -1813,9 +1813,8 @@ handle_store_branch(Branch, From, State, Data) ->
     case ?CHECK(check_provisioned(State),
                 check_branch_compatible(Branch, Data),
                 check_branch_coordinator(Branch, Data)) of
-        {ok, FinalBranch} ->
-            NewData =
-                store_meta(#{?META_PENDING_BRANCH => FinalBranch}, Data),
+        ok ->
+            NewData = store_meta(#{?META_PENDING_BRANCH => Branch}, Data),
 
             case get_meta(?META_PENDING_BRANCH, Data) of
                 undefined ->
@@ -1825,7 +1824,7 @@ handle_store_branch(Branch, From, State, Data) ->
                     ok
             end,
 
-            ?DEBUG("Stored a branch record:~n~p", [FinalBranch]),
+            ?DEBUG("Stored a branch record:~n~p", [Branch]),
             {keep_state,
              NewData,
              {reply, From, {ok, build_metadata(NewData)}}};
@@ -1851,22 +1850,13 @@ check_branch_compatible(NewBranch, Data) ->
             end
     end.
 
-check_branch_coordinator(Branch, Data) ->
-    Peer = get_meta(?META_PEER, Data),
-    Coordinator =
-        case Branch#branch.coordinator of
-            self ->
-                Peer;
-            Other ->
-                Other
-        end,
-
-    FinalBranch = Branch#branch{coordinator = Coordinator},
+check_branch_coordinator(Branch, _Data) ->
+    Coordinator = Branch#branch.coordinator,
     Peers = Branch#branch.peers,
 
     case lists:member(Coordinator, Peers) of
         true ->
-            {ok, FinalBranch};
+            ok;
         false ->
             {error, {coordinator_not_in_peers, Coordinator, Peers}}
     end.

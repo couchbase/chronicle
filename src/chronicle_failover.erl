@@ -57,7 +57,7 @@ handle_failover(RemainingPeers, Opaque, State) ->
 prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
     Branch = #branch{history_id = NewHistoryId,
                      old_history_id = OldHistoryId,
-                     coordinator = self,
+                     coordinator = ?PEER(),
                      peers = Peers,
                      status = unknown,
                      opaque = Opaque},
@@ -65,9 +65,8 @@ prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
     %% Store a branch record locally first, so we can recover even if we crash
     %% somewhere in the middle.
     case local_store_branch(Branch) of
-        {ok, Metadata} ->
-            FinalBranch = Metadata#metadata.pending_branch,
-            prepare_branch_on_followers(FinalBranch);
+        {ok, _Metadata} ->
+            prepare_branch_on_followers(Branch);
         {error, _} = Error ->
             Error
     end.
