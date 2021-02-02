@@ -421,15 +421,16 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
          {local_mark_committed, HistoryId, Term, CommittedSeqno},
          ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
--type store_branch_result() ::
-        store_branch_ok() | store_branch_error().
 -type store_branch_ok() :: {ok, #metadata{}}.
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
         {not_in_peers, chronicle:peer(), [chronicle:peer()]} |
         {concurrent_branch, OurBranch::#branch{}}.
 
--spec local_store_branch(#branch{}) -> store_branch_result().
+-type local_store_branch_result() ::
+        store_branch_ok() | {error, store_branch_error()}.
+
+-spec local_store_branch(#branch{}) -> local_store_branch_result().
 local_store_branch(Branch) ->
     call(?SERVER, {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
 
