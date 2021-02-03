@@ -50,8 +50,6 @@
                  coordinator,
                  peers,
 
-                 status :: ok | pending,
-
                  opaque :: any()}).
 
 -record(config, { lock :: undefined | binary(),

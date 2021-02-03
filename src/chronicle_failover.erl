@@ -61,7 +61,6 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
                      old_history_id = OldHistoryId,
                      coordinator = Self,
                      peers = KeepPeers,
-                     status = pending,
                      opaque = Opaque},
     Followers = KeepPeers -- [Self],
 
