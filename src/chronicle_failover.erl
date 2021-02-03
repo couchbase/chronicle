@@ -27,9 +27,16 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
+-type failover_result() :: ok | {error, failover_error()}.
+-type failover_error() :: {not_in_peers, chronicle:peer(), [chronicle:peer()]}
+                        | {aborted, #{incompatible_peers => [chronicle:peer()],
+                                      failed_peers => [chronicle:peer()]}}.
+
+-spec failover([chronicle:peer()]) -> failover_result().
 failover(KeepPeers) ->
     failover(KeepPeers, undefined).
 
+-spec failover([chronicle:peer()], Opaque::any()) -> failover_result().
 failover(KeepPeers, Opaque) ->
     gen_server:call(?SERVER, {failover, KeepPeers, Opaque}, infinity).
 
@@ -80,7 +87,7 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
                             %% make an attempt to undo the branch on the
                             %% followers.
                             undo_branch(Followers, Branch),
-                            {error, #{failed_peers => [Self]}}
+                            {error, {aborted, #{failed_peers => [Self]}}}
                     end;
                 {error, _} = Error ->
                     %% Attempt to undo the branch.
@@ -110,7 +117,7 @@ store_branch(Peers, Branch) ->
                      "Branch:~n~p~n"
                      "Errors:~n~p",
                      [Branch, Errors]),
-            {error, massage_errors(Errors)}
+            {error, {aborted, massage_errors(Errors)}}
     end.
 
 massage_errors(Errors) ->
