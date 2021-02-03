@@ -425,8 +425,7 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
         {not_in_peers, chronicle:peer(), [chronicle:peer()]} |
-        {history_mismatch, OurHistory::chronicle:history_id()} |
-        {concurrent_branch, OurBranch::#branch{}}.
+        {history_mismatch, OurHistory::chronicle:history_id()}.
 
 -type local_store_branch_result() ::
         store_branch_ok() | {error, store_branch_error()}.
@@ -1829,15 +1828,20 @@ handle_store_branch(Branch, From, State, Data) ->
         ok ->
             NewData = store_meta(#{?META_PENDING_BRANCH => Branch}, Data),
 
-            case get_meta(?META_PENDING_BRANCH, Data) of
+            PendingBranch = get_meta(?META_PENDING_BRANCH, Data),
+            case PendingBranch of
                 undefined ->
-                    %% New branch, announce history change.
-                    announce_new_history(NewData);
-                _ ->
-                    ok
+                    ?DEBUG("Stored a branch record:~n~p", [Branch]);
+                #branch{} ->
+                    ?WARNING("Pending branch overriden by a new branch.~n"
+                             "Pending branch:~n~p~n"
+                             "New branch:~n~p",
+                             [PendingBranch, Branch])
             end,
 
-            ?DEBUG("Stored a branch record:~n~p", [Branch]),
+            %% New branch, announce history change.
+            announce_new_history(NewData),
+
             {keep_state,
              NewData,
              {reply, From, {ok, build_metadata(NewData)}}};
@@ -1846,22 +1850,8 @@ handle_store_branch(Branch, From, State, Data) ->
     end.
 
 check_branch_compatible(NewBranch, Data) ->
-    PendingBranch = get_meta(?META_PENDING_BRANCH, Data),
-    case PendingBranch =:= undefined of
-        true ->
-            HistoryId = NewBranch#branch.old_history_id,
-            check_committed_history_id(HistoryId, Data);
-        false ->
-            PendingId = PendingBranch#branch.history_id,
-            NewId = NewBranch#branch.history_id,
-
-            case PendingId =:= NewId of
-                true ->
-                    ok;
-                false ->
-                    {error, {concurrent_branch, PendingBranch}}
-            end
-    end.
+    HistoryId = NewBranch#branch.old_history_id,
+    check_committed_history_id(HistoryId, Data).
 
 check_branch_peers(Branch, Data) ->
     Peer = get_meta(?META_PEER, Data),
