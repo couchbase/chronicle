@@ -29,15 +29,15 @@
 -on_load(init_sync_nif/0).
 -endif.
 
-groupby(Fun, List) ->
+groupby_map(Fun, List) ->
     lists:foldl(
       fun (Elem, Acc) ->
-              Key = Fun(Elem),
+              {Key, Value} = Fun(Elem),
               maps:update_with(
                 Key,
-                fun (Elems) ->
-                        [Elem | Elems]
-                end, [Elem], Acc)
+                fun (Values) ->
+                        [Value | Values]
+                end, [Value], Acc)
       end, #{}, List).
 
 terminate(Pid, normal) ->

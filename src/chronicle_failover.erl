@@ -69,11 +69,16 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
             case local_store_branch(Branch) of
                 ok ->
                     ok;
-                {error, _} = Error ->
+                {error, Error} ->
+                    ?WARNING("Failed to store branch locallly.~n"
+                             "Branch:~n~p~n"
+                             "Error: ~p",
+                             [Branch, Error]),
+
                     %% All errors are clean errors currently. So we make an
                     %% attempt to undo the branch on the followers.
                     undo_branch(Followers, Branch),
-                    Error
+                    {error, #{failed_peers => [Self]}}
             end;
         {error, _} = Error ->
             %% Attempt to undo the branch.
@@ -91,18 +96,28 @@ store_branch(Peers, Branch) ->
            "Branch:~n~p",
            [Peers, Branch]),
 
-    {_Ok, Bad} = chronicle_agent:store_branch(Peers, Branch),
-    case maps:size(Bad) =:= 0 of
+    {_Ok, Errors} = chronicle_agent:store_branch(Peers, Branch),
+    case maps:size(Errors) =:= 0 of
         true ->
             ok;
         false ->
-            Errors = maps:to_list(Bad),
             ?WARNING("Failed to store branch on some peers.~n"
                      "Branch:~n~p~n"
                      "Errors:~n~p",
                      [Branch, Errors]),
-            {error, Errors}
+            {error, massage_errors(Errors)}
     end.
+
+massage_errors(Errors) ->
+    chronicle_utils:groupby_map(
+      fun ({Peer, Error}) ->
+              case Error of
+                  {error, {history_mismatch, _}} ->
+                      {incompatible_peers, Peer};
+                  _ ->
+                      {failed_peers, Peer}
+              end
+      end, maps:to_list(Errors)).
 
 undo_branch(Peers, Branch) ->
     ?DEBUG("Undoing branch.~n"
