@@ -23,7 +23,8 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -define(STORE_BRANCH_TIMEOUT, 15000).
--define(UNDO_BRANCH_TIMEOUT, 5000).
+-define(CANCEL_BRANCH_TIMEOUT, 15000).
+-define(CLEANUP_BRANCH_TIMEOUT, 5000).
 
 -record(state, {}).
 
@@ -72,7 +73,7 @@ handle_failover(KeepPeers, Opaque, State) ->
     {reply, Reply, State}.
 
 handle_try_cancel(Branch, State) ->
-    {reply, undo_branch(Branch), State}.
+    {reply, cancel_branch(Branch), State}.
 
 prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
     #metadata{peer = Self, history_id = OldHistoryId} = Metadata,
@@ -99,12 +100,12 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
                             %% All errors are clean errors currently. So we
                             %% make an attempt to undo the branch on the
                             %% followers.
-                            _ = undo_branch(Followers, Branch),
+                            cleanup_branch(Followers, Branch),
                             {error, {aborted, #{failed_peers => [Self]}}}
                     end;
                 {error, _} = Error ->
                     %% Attempt to undo the branch.
-                    _ = undo_branch(Followers, Branch),
+                    cleanup_branch(Followers, Branch),
                     Error
             end;
         false ->
@@ -145,18 +146,21 @@ massage_errors(Errors) ->
               end
       end, maps:to_list(Errors)).
 
-undo_branch(Branch) ->
-    undo_branch(Branch#branch.peers, Branch).
+cancel_branch(Branch) ->
+    undo_branch(Branch#branch.peers, Branch, ?CANCEL_BRANCH_TIMEOUT).
 
-undo_branch(Peers, Branch) ->
+cleanup_branch(Peers, Branch) ->
+    _ = undo_branch(Peers, Branch, ?CLEANUP_BRANCH_TIMEOUT),
+    ok.
+
+undo_branch(Peers, Branch, Timeout) ->
     ?DEBUG("Undoing branch.~n"
            "Peers: ~w~n"
            "Branch:~n~p",
            [Peers, Branch]),
 
     BranchId = Branch#branch.history_id,
-    {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId,
-                                             ?UNDO_BRANCH_TIMEOUT),
+    {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId, Timeout),
     Errors = maps:filter(
                fun (_, Error) ->
                        case Error of
