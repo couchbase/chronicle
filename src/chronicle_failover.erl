@@ -56,34 +56,39 @@ handle_failover(KeepPeers, Opaque, State) ->
 
 prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
     #metadata{peer = Self, history_id = OldHistoryId} = Metadata,
+    case lists:member(Self, KeepPeers) of
+        true ->
+            Branch = #branch{history_id = NewHistoryId,
+                             old_history_id = OldHistoryId,
+                             coordinator = Self,
+                             peers = KeepPeers,
+                             opaque = Opaque},
+            Followers = KeepPeers -- [Self],
 
-    Branch = #branch{history_id = NewHistoryId,
-                     old_history_id = OldHistoryId,
-                     coordinator = Self,
-                     peers = KeepPeers,
-                     opaque = Opaque},
-    Followers = KeepPeers -- [Self],
-
-    case store_branch(Followers, Branch) of
-        ok ->
-            case local_store_branch(Branch) of
+            case store_branch(Followers, Branch) of
                 ok ->
-                    ok;
-                {error, Error} ->
-                    ?WARNING("Failed to store branch locallly.~n"
-                             "Branch:~n~p~n"
-                             "Error: ~p",
-                             [Branch, Error]),
+                    case local_store_branch(Branch) of
+                        ok ->
+                            ok;
+                        {error, Error} ->
+                            ?WARNING("Failed to store branch locallly.~n"
+                                     "Branch:~n~p~n"
+                                     "Error: ~p",
+                                     [Branch, Error]),
 
-                    %% All errors are clean errors currently. So we make an
-                    %% attempt to undo the branch on the followers.
+                            %% All errors are clean errors currently. So we
+                            %% make an attempt to undo the branch on the
+                            %% followers.
+                            undo_branch(Followers, Branch),
+                            {error, #{failed_peers => [Self]}}
+                    end;
+                {error, _} = Error ->
+                    %% Attempt to undo the branch.
                     undo_branch(Followers, Branch),
-                    {error, #{failed_peers => [Self]}}
+                    Error
             end;
-        {error, _} = Error ->
-            %% Attempt to undo the branch.
-            undo_branch(Followers, Branch),
-            Error
+        false ->
+            {error, {not_in_peers, Self, KeepPeers}}
     end.
 
 local_store_branch(Branch) ->
