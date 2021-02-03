@@ -22,6 +22,9 @@
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
+-define(STORE_BRANCH_TIMEOUT, 15000).
+-define(UNDO_BRANCH_TIMEOUT, 5000).
+
 -record(state, {}).
 
 start_link() ->
@@ -110,7 +113,7 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
 
 local_store_branch(Branch) ->
     ?DEBUG("Setting local brach:~n~p", [Branch]),
-    chronicle_agent:local_store_branch(Branch).
+    chronicle_agent:local_store_branch(Branch, ?STORE_BRANCH_TIMEOUT).
 
 store_branch(Peers, Branch) ->
     ?DEBUG("Setting branch.~n"
@@ -118,7 +121,8 @@ store_branch(Peers, Branch) ->
            "Branch:~n~p",
            [Peers, Branch]),
 
-    {_Ok, Errors} = chronicle_agent:store_branch(Peers, Branch),
+    {_Ok, Errors} =
+        chronicle_agent:store_branch(Peers, Branch, ?STORE_BRANCH_TIMEOUT),
     case maps:size(Errors) =:= 0 of
         true ->
             ok;
@@ -151,7 +155,8 @@ undo_branch(Peers, Branch) ->
            [Peers, Branch]),
 
     BranchId = Branch#branch.history_id,
-    {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId),
+    {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId,
+                                             ?UNDO_BRANCH_TIMEOUT),
     Errors = maps:filter(
                fun (_, Error) ->
                        case Error of

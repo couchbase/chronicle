@@ -48,8 +48,6 @@
 -define(PROVISION_TIMEOUT, 10000).
 -define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
 -define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
--define(STORE_BRANCH_TIMEOUT, 15000).
--define(UNDO_BRANCH_TIMEOUT, 5000).
 -define(PREPARE_JOIN_TIMEOUT, 10000).
 -define(JOIN_CLUSTER_TIMEOUT, 120000).
 
@@ -428,13 +426,13 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
 
 -type local_store_branch_result() :: ok | {error, store_branch_error()}.
 
--spec local_store_branch(#branch{}) -> local_store_branch_result().
-local_store_branch(Branch) ->
-    call(?SERVER, {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
+-spec local_store_branch(#branch{}, timeout()) -> local_store_branch_result().
+local_store_branch(Branch, Timeout) ->
+    call(?SERVER, {store_branch, Branch}, Timeout).
 
--spec store_branch([chronicle:peer()], #branch{}) ->
+-spec store_branch([chronicle:peer()], #branch{}, timeout()) ->
           chronicle_utils:multi_call_result(ok, {error, store_branch_error()}).
-store_branch(Peers, Branch) ->
+store_branch(Peers, Branch, Timeout) ->
     chronicle_utils:multi_call(Peers, ?NAME,
                                {store_branch, Branch},
                                fun (Result) ->
@@ -445,7 +443,7 @@ store_branch(Peers, Branch) ->
                                                false
                                        end
                                end,
-                               ?STORE_BRANCH_TIMEOUT).
+                               Timeout).
 
 -type undo_branch_error() :: no_branch
                            | {bad_branch, TheirBranch::#branch{}}.
@@ -453,15 +451,15 @@ store_branch(Peers, Branch) ->
                                 ok,
                                 {error, undo_branch_error()}).
 
--spec undo_branch([chronicle:peer()], chronicle:history_id()) ->
+-spec undo_branch([chronicle:peer()], chronicle:history_id(), timeout()) ->
           undo_branch_result().
-undo_branch(Peers, BranchId) ->
+undo_branch(Peers, BranchId, Timeout) ->
     chronicle_utils:multi_call(Peers, ?NAME,
                                {undo_branch, BranchId},
                                fun (Result) ->
                                        Result =:= ok
                                end,
-                               ?UNDO_BRANCH_TIMEOUT).
+                               Timeout).
 
 sync_system_state_change() ->
     ok = chronicle_secondary_sup:sync().
