@@ -67,7 +67,7 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
     case store_branch(Followers, Branch) of
         ok ->
             case local_store_branch(Branch) of
-                {ok, _} ->
+                ok ->
                     ok;
                 {error, _} = Error ->
                     %% All errors are clean errors currently. So we make an

@@ -421,29 +421,25 @@ local_mark_committed(HistoryId, Term, CommittedSeqno) ->
          {local_mark_committed, HistoryId, Term, CommittedSeqno},
          ?LOCAL_MARK_COMMITTED_TIMEOUT).
 
--type store_branch_ok() :: {ok, #metadata{}}.
 -type store_branch_error() ::
         {bad_state, not_provisioned | joining_cluster | removed} |
         {not_in_peers, chronicle:peer(), [chronicle:peer()]} |
         {history_mismatch, OurHistory::chronicle:history_id()}.
 
--type local_store_branch_result() ::
-        store_branch_ok() | {error, store_branch_error()}.
+-type local_store_branch_result() :: ok | {error, store_branch_error()}.
 
 -spec local_store_branch(#branch{}) -> local_store_branch_result().
 local_store_branch(Branch) ->
     call(?SERVER, {store_branch, Branch}, ?STORE_BRANCH_TIMEOUT).
 
 -spec store_branch([chronicle:peer()], #branch{}) ->
-          chronicle_utils:multi_call_result(
-            store_branch_ok(),
-            {error, store_branch_error()}).
+          chronicle_utils:multi_call_result(ok, {error, store_branch_error()}).
 store_branch(Peers, Branch) ->
     chronicle_utils:multi_call(Peers, ?NAME,
                                {store_branch, Branch},
                                fun (Result) ->
                                        case Result of
-                                           {ok, _} ->
+                                           ok ->
                                                true;
                                            _ ->
                                                false
@@ -1842,9 +1838,7 @@ handle_store_branch(Branch, From, State, Data) ->
             %% New branch, announce history change.
             announce_new_history(NewData),
 
-            {keep_state,
-             NewData,
-             {reply, From, {ok, build_metadata(NewData)}}};
+            {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
