@@ -27,18 +27,18 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
-failover(RemainingPeers) ->
-    failover(RemainingPeers, undefined).
+failover(KeepPeers) ->
+    failover(KeepPeers, undefined).
 
-failover(RemainingPeers, Opaque) ->
-    gen_server:call(?SERVER, {failover, RemainingPeers, Opaque}).
+failover(KeepPeers, Opaque) ->
+    gen_server:call(?SERVER, {failover, KeepPeers, Opaque}, infinity).
 
 %% gen_server callbacks
 init([]) ->
     {ok, #state{}}.
 
-handle_call({failover, RemainingPeers, Opaque}, _From, State) ->
-    handle_failover(RemainingPeers, Opaque, State);
+handle_call({failover, KeepPeers, Opaque}, _From, State) ->
+    handle_failover(KeepPeers, Opaque, State);
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -48,42 +48,37 @@ handle_cast(Cast, State) ->
     {noreply, State}.
 
 %% internal
-handle_failover(RemainingPeers, Opaque, State) ->
-    #metadata{history_id = HistoryId} = chronicle_agent:get_metadata(),
+handle_failover(KeepPeers, Opaque, State) ->
+    Metadata = chronicle_agent:get_metadata(),
     NewHistoryId = chronicle_utils:random_uuid(),
-    Reply = prepare_branch(HistoryId, NewHistoryId, RemainingPeers, Opaque),
+    Reply = prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata),
     {reply, Reply, State}.
 
-prepare_branch(OldHistoryId, NewHistoryId, Peers, Opaque) ->
+prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
+    #metadata{peer = Self, history_id = OldHistoryId} = Metadata,
+
     Branch = #branch{history_id = NewHistoryId,
                      old_history_id = OldHistoryId,
-                     coordinator = ?PEER(),
-                     peers = Peers,
+                     coordinator = Self,
+                     peers = KeepPeers,
                      status = pending,
                      opaque = Opaque},
+    Followers = KeepPeers -- [Self],
 
-    %% Store a branch record locally first, so we can recover even if we crash
-    %% somewhere in the middle.
-    case local_store_branch(Branch) of
-        {ok, _Metadata} ->
-            prepare_branch_on_followers(Branch);
-        {error, _} = Error ->
-            Error
-    end.
-
-prepare_branch_on_followers(#branch{coordinator = Self,
-                                    peers = Peers} = Branch) ->
-    pending = Branch#branch.status,
-
-    Followers = Peers -- [Self],
     case store_branch(Followers, Branch) of
         ok ->
-            NewBranch = Branch#branch{status = ok},
-            %% TODO: handle errors
-            {ok, _} = local_store_branch(NewBranch),
-            ok;
+            case local_store_branch(Branch) of
+                {ok, _} ->
+                    ok;
+                {error, _} = Error ->
+                    %% All errors are clean errors currently. So we make an
+                    %% attempt to undo the branch on the followers.
+                    undo_branch(Followers, Branch),
+                    Error
+            end;
         {error, _} = Error ->
-            undo_branch(Peers, Branch),
+            %% Attempt to undo the branch.
+            undo_branch(Followers, Branch),
             Error
     end.
 
