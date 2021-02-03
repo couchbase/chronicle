@@ -23,6 +23,7 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 -define(STORE_BRANCH_TIMEOUT, 15000).
+-define(WAIT_LEADER_TIMEOUT, 10000).
 -define(CANCEL_BRANCH_TIMEOUT, 15000).
 -define(CLEANUP_BRANCH_TIMEOUT, 5000).
 
@@ -34,7 +35,8 @@ start_link() ->
 -type failover_result() :: ok | {error, failover_error()}.
 -type failover_error() :: {not_in_peers, chronicle:peer(), [chronicle:peer()]}
                         | {aborted, #{incompatible_peers => [chronicle:peer()],
-                                      failed_peers => [chronicle:peer()]}}.
+                                      failed_peers => [chronicle:peer()]}}
+                        | no_leader.
 
 -spec failover([chronicle:peer()]) -> failover_result().
 failover(KeepPeers) ->
@@ -42,7 +44,26 @@ failover(KeepPeers) ->
 
 -spec failover([chronicle:peer()], Opaque::any()) -> failover_result().
 failover(KeepPeers, Opaque) ->
-    gen_server:call(?SERVER, {failover, KeepPeers, Opaque}, infinity).
+    case gen_server:call(?SERVER, {failover, KeepPeers, Opaque}, infinity) of
+        {ok, HistoryId} ->
+            %% Make sure chronicle_leader is aware of the branch stored locally.
+            ok = chronicle_leader:sync(),
+
+            %% Wait for leader to get elected. This doesn't guarantee that
+            %% everything went smoothly. But it's a close approximation.
+            try chronicle_leader:wait_for_leader(?WAIT_LEADER_TIMEOUT) of
+                {_Leader, {LeaderHistoryId, _}}
+                  when LeaderHistoryId =:= HistoryId ->
+                    ok;
+                _ ->
+                    {error, no_leader}
+            catch
+                exit:no_leader ->
+                    {error, no_leader}
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 -spec try_cancel(#branch{}) ->
           ok | {error, {failed_peers, [chronicle:peer()]}}.
@@ -90,7 +111,7 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
                 ok ->
                     case local_store_branch(Branch) of
                         ok ->
-                            ok;
+                            {ok, NewHistoryId};
                         {error, Error} ->
                             ?WARNING("Failed to store branch locallly.~n"
                                      "Branch:~n~p~n"
