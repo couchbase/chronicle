@@ -40,12 +40,19 @@ failover(KeepPeers) ->
 failover(KeepPeers, Opaque) ->
     gen_server:call(?SERVER, {failover, KeepPeers, Opaque}, infinity).
 
+-spec try_cancel(#branch{}) ->
+          ok | {error, {failed_peers, [chronicle:peer()]}}.
+try_cancel(Branch) ->
+    gen_server:call(?SERVER, {try_cancel, Branch}, infinity).
+
 %% gen_server callbacks
 init([]) ->
     {ok, #state{}}.
 
 handle_call({failover, KeepPeers, Opaque}, _From, State) ->
     handle_failover(KeepPeers, Opaque, State);
+handle_call({try_cancel, Branch}, _From, State) ->
+    handle_try_cancel(Branch, State);
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -60,6 +67,9 @@ handle_failover(KeepPeers, Opaque, State) ->
     NewHistoryId = chronicle_utils:random_uuid(),
     Reply = prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata),
     {reply, Reply, State}.
+
+handle_try_cancel(Branch, State) ->
+    {reply, undo_branch(Branch), State}.
 
 prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
     #metadata{peer = Self, history_id = OldHistoryId} = Metadata,
@@ -86,12 +96,12 @@ prepare_branch(KeepPeers, Opaque, NewHistoryId, Metadata) ->
                             %% All errors are clean errors currently. So we
                             %% make an attempt to undo the branch on the
                             %% followers.
-                            undo_branch(Followers, Branch),
+                            _ = undo_branch(Followers, Branch),
                             {error, {aborted, #{failed_peers => [Self]}}}
                     end;
                 {error, _} = Error ->
                     %% Attempt to undo the branch.
-                    undo_branch(Followers, Branch),
+                    _ = undo_branch(Followers, Branch),
                     Error
             end;
         false ->
@@ -131,6 +141,9 @@ massage_errors(Errors) ->
               end
       end, maps:to_list(Errors)).
 
+undo_branch(Branch) ->
+    undo_branch(Branch#branch.peers, Branch).
+
 undo_branch(Peers, Branch) ->
     ?DEBUG("Undoing branch.~n"
            "Peers: ~w~n"
@@ -139,10 +152,25 @@ undo_branch(Peers, Branch) ->
 
     BranchId = Branch#branch.history_id,
     {_Ok, Bad} = chronicle_agent:undo_branch(Peers, BranchId),
+    Errors = maps:filter(
+               fun (_, Error) ->
+                       case Error of
+                           {error, no_branch} ->
+                               %% No branch found.
+                               false;
+                           {error, {bad_branch, _}} ->
+                               %% Branch superseded by another one.
+                               false;
+                           _ ->
+                               true
+                       end
+               end, Bad),
 
-    case maps:size(Bad) =:= 0 of
+    case maps:size(Errors) =:= 0 of
         true ->
-            ?DEBUG("Branch undone successfully.");
+            ?DEBUG("Branch undone successfully."),
+            ok;
         false ->
-            ?WARNING("Failed to undo branch on some nodes:~n~p", [Bad])
+            ?WARNING("Failed to undo branch on some nodes:~n~p", [Errors]),
+            {error, {failed_peers, [maps:keys(Errors)]}}
     end.
