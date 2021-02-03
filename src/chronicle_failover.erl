@@ -144,12 +144,5 @@ undo_branch(Peers, Branch) ->
         true ->
             ?DEBUG("Branch undone successfully.");
         false ->
-            ?WARNING("Failed to undo branch on some nodes:~n~p", [Bad]),
-            case maps:find(?PEER(), Bad) of
-                {ok, Reason} ->
-                    ?ERROR("Failed to undo local branch:~n~p", [Reason]),
-                    exit({undo_branch_failed, Reason});
-                error ->
-                    ok
-            end
+            ?WARNING("Failed to undo branch on some nodes:~n~p", [Bad])
     end.
