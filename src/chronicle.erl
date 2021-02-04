@@ -77,9 +77,14 @@ get_system_state() ->
             State
     end.
 
+-type check_quorum_result() :: true
+                             | {false, timeout | no_leader}.
+
+-spec check_quorum() -> check_quorum_result().
 check_quorum() ->
     check_quorum(?DEFAULT_TIMEOUT).
 
+-spec check_quorum(timeout()) -> check_quorum_result().
 check_quorum(Timeout) ->
     try with_leader(Timeout,
                     fun (TRef, Leader, _) ->
