@@ -16,7 +16,8 @@
 -module(chronicle_peers).
 
 -export([start_link/0]).
--export([get_live_peers/0, get_live_peers/1, monitor/0]).
+-export([get_live_peers/0, get_live_peers/1, get_live_peers_other/0]).
+-export([monitor/0]).
 
 -ifndef(TEST).
 
@@ -25,6 +26,9 @@ start_link() ->
 
 get_live_peers() ->
     lists:sort(nodes([this, visible])).
+
+get_live_peers_other() ->
+    lists:sort(nodes()).
 
 monitor() ->
     ok = net_kernel:monitor_nodes(true, [nodedown_reason]).
@@ -36,6 +40,9 @@ start_link() ->
 
 get_live_peers() ->
     chronicle_peers_vnet:get_live_peers().
+
+get_live_peers_other() ->
+    get_live_peers() -- [vnet:vnode()].
 
 monitor() ->
     chronicle_peers_vnet:monitor().
