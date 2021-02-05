@@ -148,7 +148,7 @@ handle_status(Peer, Status, #state{last_heard = LastHeard,
                                    statuses = Statuses} = State) ->
     Now = get_timestamp(),
     NewLastHeard = maps:put(Peer, Now, LastHeard),
-    NewStatuses = maps:put(Peer, {Now, Status}, Statuses),
+    NewStatuses = maps:put(Peer, Status, Statuses),
     {noreply, State#state{last_heard = NewLastHeard, statuses = NewStatuses}}.
 
 handle_nodeup(Peer, State) ->
@@ -229,7 +229,7 @@ live_peers() ->
 
 global_status(#state{local_status = LocalStatus,
                      statuses = PeerStatuses}) ->
-    AllStatuses = maps:put(?PEER(), {unused, LocalStatus}, PeerStatuses),
+    AllStatuses = maps:put(?PEER(), LocalStatus, PeerStatuses),
 
     Failovers = aggregate_failovers(AllStatuses),
     Histories = aggregate_histories(AllStatuses),
@@ -238,7 +238,7 @@ global_status(#state{local_status = LocalStatus,
 
 aggregate_failovers(Statuses) ->
     maps:fold(
-      fun (_Peer, {_, PeerStatus}, Acc) ->
+      fun (_Peer, PeerStatus, Acc) ->
               case maps:find(branch, PeerStatus) of
                   {ok, #{old_history_id := OldHistoryId,
                          new_history_id := NewHistoryId,
@@ -269,8 +269,8 @@ failover_status(Peers, OldHistoryId, NewHistoryId, PeerStatuses) ->
 
 failover_peer_status(Peer, OldHistoryId, NewHistoryId, PeerStatuses) ->
     case maps:find(Peer, PeerStatuses) of
-        {ok, {_, #{history_id := PeerHistoryId,
-                   branch := PeerBranch}}} ->
+        {ok, #{history_id := PeerHistoryId,
+               branch := PeerBranch}} ->
             case PeerBranch of
                 no_branch ->
                     if
@@ -300,7 +300,7 @@ failover_peer_status(Peer, OldHistoryId, NewHistoryId, PeerStatuses) ->
 
 aggregate_histories(Statuses) ->
     Histories = maps:fold(
-                  fun (Peer, {_TS, PeerStatus}, Acc) ->
+                  fun (Peer, PeerStatus, Acc) ->
                           update_histories(Peer, PeerStatus, Acc)
                   end, #{}, Statuses),
     maps:map(
