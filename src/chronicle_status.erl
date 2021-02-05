@@ -28,11 +28,14 @@
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
 -define(PING_INTERVAL, 3000).
+-define(WAIT_MORE_STATUS_TIMEOUT, 100).
 
 -record(state, { local_status,
 
                  last_heard,
-                 statuses }).
+                 statuses,
+
+                 wait_more_status_tref }).
 
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
@@ -58,7 +61,8 @@ init([]) ->
 
     State = #state{local_status = local_status(),
                    last_heard = #{},
-                   statuses = #{}},
+                   statuses = #{},
+                   wait_more_status_tref = undefined},
 
     send_status_all(State),
     schedule_ping(),
@@ -77,6 +81,8 @@ handle_cast(Cast, State) ->
 handle_info(refresh_status = Msg, State) ->
     ?FLUSH(Msg),
     handle_refresh_status(State);
+handle_info(send_status, State) ->
+    handle_send_status(State);
 handle_info({request_status, Peer} = Msg, State) ->
     ?FLUSH(Msg),
     handle_request_status(Peer, State);
@@ -114,9 +120,12 @@ handle_refresh_status(#state{local_status = OldStatus} = State) ->
             {noreply, State};
         false ->
             NewState = State#state{local_status = NewStatus},
-            send_status_all(NewState),
-            {noreply, NewState}
+            {noreply, maybe_schedule_send_status(NewState)}
     end.
+
+handle_send_status(State) ->
+    send_status_all(State),
+    {noreply, State#state{wait_more_status_tref = undefined}}.
 
 handle_request_status(Peer, State) ->
     send_status(Peer, State),
@@ -186,6 +195,16 @@ request_status(Peers) ->
 
 send_ping() ->
     send_all({ping, ?PEER()}).
+
+maybe_schedule_send_status(#state{wait_more_status_tref = TRef} = State) ->
+    case TRef of
+        undefined ->
+            NewTRef = erlang:send_after(?WAIT_MORE_STATUS_TIMEOUT,
+                                        self(), send_status),
+            State#state{wait_more_status_tref = NewTRef};
+        _ ->
+            State
+    end.
 
 send_status_all(State) ->
     send_status(live_peers(), State).
