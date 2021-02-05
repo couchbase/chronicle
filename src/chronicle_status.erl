@@ -41,9 +41,28 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
+-type cluster_status() :: #{histories => cluster_status_histories(),
+                            failovers => cluster_status_failovers()}.
+-type cluster_status_histories() ::
+        #{chronicle:history_id() => [chronicle:peer()]}.
+-type cluster_status_failovers() ::
+        #{FailoverId::chronicle:history_id() => cluster_status_failover()}.
+-type cluster_status_failover() ::
+        #{old_history_id := chronicle:history_id(),
+          new_history_id := chronicle:history_id(),
+          peers := [chronicle:peer()],
+          status :=
+              #{chronicle:peer() =>
+                    pending | started | done | diverged | conflict | unknown}}.
+
+-spec get_cluster_status() -> cluster_status().
 get_cluster_status() ->
     gen_server:call(?SERVER, get_cluster_status).
 
+-type peer_status() :: #{since_heard => Millis::non_neg_integer()}.
+-type peer_statuses() :: #{chronicle:peer() => peer_status()}.
+
+-spec get_peers() -> peer_statuses().
 get_peers() ->
     gen_server:call(?SERVER, get_peers).
 
