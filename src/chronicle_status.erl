@@ -31,6 +31,7 @@
 -define(WAIT_MORE_STATUS_TIMEOUT, 100).
 
 -record(state, { local_status,
+                 global_status,
 
                  last_heard,
                  statuses,
@@ -59,18 +60,19 @@ init([]) ->
               end
       end),
 
-    State = #state{local_status = local_status(),
-                   last_heard = #{},
-                   statuses = #{},
-                   wait_more_status_tref = undefined},
+    State0 = #state{local_status = local_status(),
+                    last_heard = #{},
+                    statuses = #{},
+                    wait_more_status_tref = undefined},
+    State = recompute_global_status(State0),
 
     send_status_all(State),
     schedule_ping(),
 
     {ok, State}.
 
-handle_call(get_global_status, _From, State) ->
-    {reply, global_status(State), State};
+handle_call(get_global_status, _From, #state{global_status = Status} = State) ->
+    {reply, Status, State};
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -119,7 +121,8 @@ handle_refresh_status(#state{local_status = OldStatus} = State) ->
         true ->
             {noreply, State};
         false ->
-            NewState = State#state{local_status = NewStatus},
+            NewState = recompute_global_status(
+                         State#state{local_status = NewStatus}),
             {noreply, maybe_schedule_send_status(NewState)}
     end.
 
@@ -148,8 +151,18 @@ handle_status(Peer, Status, #state{last_heard = LastHeard,
                                    statuses = Statuses} = State) ->
     Now = get_timestamp(),
     NewLastHeard = maps:put(Peer, Now, LastHeard),
-    NewStatuses = maps:put(Peer, Status, Statuses),
-    {noreply, State#state{last_heard = NewLastHeard, statuses = NewStatuses}}.
+
+    NewState0 = State#state{last_heard = NewLastHeard},
+    NewState =
+        case maps:find(Peer, Statuses) of
+            {ok, OldStatus} when Status =:= OldStatus ->
+                NewState0;
+            _ ->
+                NewStatuses = maps:put(Peer, Status, Statuses),
+                recompute_global_status(NewState0#state{statuses = NewStatuses})
+        end,
+
+    {noreply, NewState}.
 
 handle_nodeup(Peer, State) ->
     %% Try not to request a status from ourselves. This is not 100%
@@ -167,7 +180,9 @@ handle_nodedown(Peer, #state{last_heard = LastHeard,
                              statuses = Statuses} = State) ->
     NewLastHeard = maps:remove(Peer, LastHeard),
     NewStatuses = maps:remove(Peer, Statuses),
-    {noreply, State#state{last_heard = NewLastHeard, statuses = NewStatuses}}.
+    NewState = State#state{last_heard = NewLastHeard, statuses = NewStatuses},
+
+    {noreply, recompute_global_status(NewState)}.
 
 get_timestamp() ->
     erlang:monotonic_time().
@@ -227,12 +242,14 @@ send_to(Peers, Msg) when is_list(Peers) ->
 live_peers() ->
     chronicle_peers:get_live_peers_other().
 
-global_status(#state{local_status = LocalStatus,
-                     statuses = PeerStatuses}) ->
+recompute_global_status(#state{local_status = LocalStatus,
+                               statuses = PeerStatuses} = State) ->
     AllStatuses = maps:put(?PEER(), LocalStatus, PeerStatuses),
+    State#state{global_status = global_status(AllStatuses)}.
 
-    Failovers = aggregate_failovers(AllStatuses),
-    Histories = aggregate_histories(AllStatuses),
+global_status(Statuses) ->
+    Failovers = aggregate_failovers(Statuses),
+    Histories = aggregate_histories(Statuses),
 
     #{failovers => Failovers, histories => Histories}.
 
