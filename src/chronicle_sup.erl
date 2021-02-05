@@ -49,6 +49,13 @@ child_specs() ->
                shutdown => 1000,
                type => worker},
 
+    ExtEvents = #{id => chronicle_external_events,
+                  start => {gen_event, start_link,
+                            [?START_NAME(?EXTERNAL_EVENTS)]},
+                  restart => permanent,
+                  shutdown => brutal_kill,
+                  type => worker},
+
     Ets = #{id => chronicle_ets,
             start => {chronicle_ets, start_link, []},
             restart => permanent,
@@ -61,16 +68,9 @@ child_specs() ->
               shutdown => 5000,
               type => worker},
 
-    ExtEvents = #{id => chronicle_external_events,
-                  start => {gen_event, start_link,
-                            [?START_NAME(?EXTERNAL_EVENTS)]},
-                  restart => permanent,
-                  shutdown => brutal_kill,
-                  type => worker},
-
     SecondarySup = #{id => chronicle_secondary_sup,
                      start => {chronicle_secondary_sup, start_link, []},
                      restart => permanent,
                      type => supervisor},
 
-    [Peers, Events, Ets, Agent, ExtEvents, SecondarySup].
+    [Peers, Events, ExtEvents, Ets, Agent, SecondarySup].

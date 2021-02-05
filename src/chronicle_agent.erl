@@ -513,6 +513,10 @@ init([]) ->
     %% disk.
     {FinalState, FinalData} = check_state_transitions(State, Data),
 
+    %% Make sure clients are woken up to check the latest state. Important if
+    %% chronicle_agent restarts and forgets to send out some notifications.
+    announce_system_state_changed(),
+
     {ok, FinalState, FinalData}.
 
 handle_event({call, From}, Call, State, Data) ->
