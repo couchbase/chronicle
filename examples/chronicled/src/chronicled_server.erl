@@ -63,6 +63,8 @@ get_options() ->
                   {"/node/wipe", ?MODULE, #state{domain=node, op=wipe}},
                   {"/node/status", ?MODULE, #state{domain=node, op=status}},
                   {"/cluster/peers", ?MODULE, #state{domain=cluster, op=peers}},
+                  {"/cluster/status", ?MODULE,
+                   #state{domain=cluster, op=status}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
                  ]}
           ]),
@@ -185,7 +187,9 @@ node_api(Req, #state{domain=node, op=status}) ->
     reply_json(200, Status, Req).
 
 cluster_api(Req, #state{domain=cluster, op=peers}) ->
-    reply_json(200, chronicle:get_peer_statuses(), Req).
+    reply_json(200, chronicle:get_peer_statuses(), Req);
+cluster_api(Req, #state{domain=cluster, op=status}) ->
+    reply_json(200, chronicle:get_cluster_status(), Req).
 
 %% internal module functions
 reply_json(Status, Response, Req) ->
