@@ -89,6 +89,7 @@ init([]) ->
                     statuses = #{},
                     wait_more_status_tref = undefined},
     State = recompute_cluster_status(State0),
+    announce_cluster_status_changed(),
 
     send_status_all(State),
     schedule_ping(),
@@ -279,9 +280,21 @@ live_peers() ->
     chronicle_peers:get_live_peers_other().
 
 recompute_cluster_status(#state{local_status = LocalStatus,
+                                cluster_status = OldClusterStatus,
                                 statuses = PeerStatuses} = State) ->
     AllStatuses = maps:put(?PEER(), LocalStatus, PeerStatuses),
-    State#state{cluster_status = cluster_status(AllStatuses)}.
+    NewClusterStatus = cluster_status(AllStatuses),
+
+    case OldClusterStatus =:= NewClusterStatus of
+        true ->
+            State;
+        false ->
+            announce_cluster_status_changed(),
+            State#state{cluster_status = NewClusterStatus}
+    end.
+
+announce_cluster_status_changed() ->
+    gen_event:notify(?EXTERNAL_EVENTS_SERVER, cluster_status_changed).
 
 cluster_status(Statuses) ->
     Failovers = aggregate_failovers(Statuses),
