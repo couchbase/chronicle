@@ -62,6 +62,7 @@ get_options() ->
                                                        op=failover}},
                   {"/node/wipe", ?MODULE, #state{domain=node, op=wipe}},
                   {"/node/status", ?MODULE, #state{domain=node, op=status}},
+                  {"/cluster/peers", ?MODULE, #state{domain=cluster, op=peers}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
                  ]}
           ]),
@@ -76,7 +77,9 @@ init(Req, State) ->
         #state{domain=config} ->
             {ok, config_api(Req, State), State};
         #state{domain=node} ->
-            {ok, node_api(Req, State), State}
+            {ok, node_api(Req, State), State};
+        #state{domain=cluster} ->
+            {ok, cluster_api(Req, State), State}
     end.
 
 allowed_methods(Req, State) ->
@@ -180,6 +183,9 @@ node_api(Req, #state{domain=node, op=wipe}) ->
 node_api(Req, #state{domain=node, op=status}) ->
     Status = #{leader => get_leader_info()},
     reply_json(200, Status, Req).
+
+cluster_api(Req, #state{domain=cluster, op=peers}) ->
+    reply_json(200, chronicle:get_peer_statuses(), Req).
 
 %% internal module functions
 reply_json(Status, Response, Req) ->
