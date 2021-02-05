@@ -22,7 +22,7 @@
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--export([get_global_status/0]).
+-export([get_global_status/0, get_peers/0]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
@@ -43,6 +43,9 @@ start_link() ->
 
 get_global_status() ->
     gen_server:call(?SERVER, get_global_status).
+
+get_peers() ->
+    gen_server:call(?SERVER, get_peers).
 
 %% callbacks
 init([]) ->
@@ -73,6 +76,16 @@ init([]) ->
 
 handle_call(get_global_status, _From, #state{global_status = Status} = State) ->
     {reply, Status, State};
+handle_call(get_peers, _From, #state{last_heard = LastHeard} = State) ->
+    Now = get_timestamp(),
+    Reply = maps:map(
+              fun (_Peer, HeardTS) ->
+                      SinceHeard =
+                          erlang:convert_time_unit(Now - HeardTS,
+                                                   native, millisecond),
+                      #{since_heard => SinceHeard}
+              end, LastHeard#{?PEER() => Now}),
+    {reply, Reply, State};
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
