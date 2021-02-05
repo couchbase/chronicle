@@ -40,9 +40,25 @@ init([]) ->
     chronicle_peers:monitor(),
     request_status_all(),
     self() ! send_ping,
-    {ok, #state{local_status = local_status(),
-                last_heard = #{},
-                statuses = #{}}}.
+
+    Self = self(),
+    chronicle_events:subscribe(
+      fun (Event) ->
+              case is_interesting_event(Event) of
+                  true ->
+                      Self ! refresh_status;
+                  false ->
+                      ok
+              end
+      end),
+
+    State = #state{local_status = local_status(),
+                   last_heard = #{},
+                   statuses = #{}},
+
+    send_status_all(State),
+
+    {ok, State}.
 
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
@@ -51,6 +67,9 @@ handle_cast(Cast, State) ->
     ?WARNING("Unexpected cast:~n~p", [Cast]),
     {noreply, State}.
 
+handle_info(refresh_status = Msg, State) ->
+    ?FLUSH(Msg),
+    handle_refresh_status(State);
 handle_info({request_status, Peer} = Msg, State) ->
     ?FLUSH(Msg),
     handle_request_status(Peer, State);
@@ -71,6 +90,27 @@ handle_info(Msg, State) ->
     {noreply, State}.
 
 %% internal
+is_interesting_event(Event) ->
+    case Event of
+        {new_history, _, _} ->
+            true;
+        {new_config, _, _} ->
+            true;
+        _ ->
+            false
+    end.
+
+handle_refresh_status(#state{local_status = OldStatus} = State) ->
+    NewStatus = local_status(),
+    case NewStatus =:= OldStatus of
+        true ->
+            {noreply, State};
+        false ->
+            NewState = State#state{local_status = NewStatus},
+            send_status_all(NewState),
+            {noreply, NewState}
+    end.
+
 handle_request_status(Peer, State) ->
     send_status(Peer, State),
     {noreply, State}.
@@ -114,7 +154,19 @@ get_timestamp() ->
     erlang:monotonic_time().
 
 local_status() ->
-    #{status => blah}.
+    Metadata = chronicle_agent:get_metadata(),
+    #metadata{pending_branch = Branch, history_id = HistoryId} = Metadata,
+
+    #{history_id => HistoryId, branch => branch_status(Branch)}.
+
+branch_status(undefined) ->
+    no_branch;
+branch_status(#branch{history_id = NewHistoryId,
+                      old_history_id = OldHistoryId,
+                      peers = Peers}) ->
+    #{old_history_id => OldHistoryId,
+      new_history_id => NewHistoryId,
+      peers => Peers}.
 
 request_status_all() ->
     request_status(live_peers()).
@@ -124,6 +176,9 @@ request_status(Peers) ->
 
 send_ping() ->
     send_all({ping, ?PEER()}).
+
+send_status_all(State) ->
+    send_status(live_peers(), State).
 
 send_status(Peers, #state{local_status = Status}) ->
     send_to(Peers, {status, ?PEER(), Status}).
