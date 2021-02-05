@@ -21,6 +21,7 @@
 
 -export([get_system_state/0]).
 -export([check_quorum/0, check_quorum/1]).
+-export([get_peer_statuses/0, get_cluster_status/0]).
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
@@ -100,6 +101,14 @@ check_quorum(Timeout) ->
         exit:no_leader ->
             {false, no_leader}
     end.
+
+-spec get_peer_statuses() -> chronicle_status:peer_statuses().
+get_peer_statuses() ->
+    chronicle_status:get_peers().
+
+-spec get_cluster_status() -> chronicle_status:cluster_status().
+get_cluster_status() ->
+    chronicle_status:get_cluster_status().
 
 -spec provision([Machine]) -> chronicle_agent:provision_result() when
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.

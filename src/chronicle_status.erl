@@ -24,6 +24,8 @@
 
 -export([get_cluster_status/0, get_peers/0]).
 
+-export_type([cluster_status/0, peer_statuses/0]).
+
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
