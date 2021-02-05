@@ -44,7 +44,6 @@ get_global_status() ->
 init([]) ->
     chronicle_peers:monitor(),
     request_status_all(),
-    self() ! send_ping,
 
     Self = self(),
     chronicle_events:subscribe(
@@ -62,6 +61,7 @@ init([]) ->
                    statuses = #{}},
 
     send_status_all(State),
+    schedule_ping(),
 
     {ok, State}.
 
@@ -123,9 +123,12 @@ handle_request_status(Peer, State) ->
     {noreply, State}.
 
 handle_send_ping(State) ->
-    erlang:send_after(?PING_INTERVAL, self(), send_ping),
+    schedule_ping(),
     send_ping(),
     {noreply, State}.
+
+schedule_ping() ->
+    erlang:send_after(?PING_INTERVAL, self(), send_ping).
 
 handle_ping(Peer, #state{last_heard = LastHeard} = State) ->
     Now = get_timestamp(),
