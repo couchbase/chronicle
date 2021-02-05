@@ -22,6 +22,8 @@
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
+-export([get_global_status/0]).
+
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
@@ -34,6 +36,9 @@
 
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
+
+get_global_status() ->
+    gen_server:call(?SERVER, get_global_status).
 
 %% callbacks
 init([]) ->
@@ -60,6 +65,8 @@ init([]) ->
 
     {ok, State}.
 
+handle_call(get_global_status, _From, State) ->
+    {reply, global_status(State), State};
 handle_call(_Call, _From, State) ->
     {reply, nack, State}.
 
@@ -197,3 +204,96 @@ send_to(Peers, Msg) when is_list(Peers) ->
 
 live_peers() ->
     chronicle_peers:get_live_peers_other().
+
+global_status(#state{local_status = LocalStatus,
+                     statuses = PeerStatuses}) ->
+    AllStatuses = maps:put(?PEER(), {unused, LocalStatus}, PeerStatuses),
+
+    Failovers = aggregate_failovers(AllStatuses),
+    Histories = aggregate_histories(AllStatuses),
+
+    #{failovers => Failovers, histories => Histories}.
+
+aggregate_failovers(Statuses) ->
+    maps:fold(
+      fun (_Peer, {_, PeerStatus}, Acc) ->
+              case maps:find(branch, PeerStatus) of
+                  {ok, #{old_history_id := OldHistoryId,
+                         new_history_id := NewHistoryId,
+                         peers := Peers} = Branch} ->
+
+                      case maps:is_key(NewHistoryId, Acc) of
+                          true ->
+                              Acc;
+                          false ->
+                              FailoverStatus =
+                                  failover_status(Peers, OldHistoryId,
+                                                  NewHistoryId, Statuses),
+                              Acc#{NewHistoryId =>
+                                       Branch#{status => FailoverStatus}}
+                      end;
+                  _ ->
+                      Acc
+              end
+      end, #{}, Statuses).
+
+failover_status(Peers, OldHistoryId, NewHistoryId, PeerStatuses) ->
+    lists:foldl(
+      fun (Peer, Acc) ->
+              Status = failover_peer_status(Peer, OldHistoryId,
+                                            NewHistoryId, PeerStatuses),
+              Acc#{Peer => Status}
+      end, #{}, lists:sort(Peers)).
+
+failover_peer_status(Peer, OldHistoryId, NewHistoryId, PeerStatuses) ->
+    case maps:find(Peer, PeerStatuses) of
+        {ok, {_, #{history_id := PeerHistoryId,
+                   branch := PeerBranch}}} ->
+            case PeerBranch of
+                no_branch ->
+                    if
+                        PeerHistoryId =:= NewHistoryId ->
+                            done;
+                        PeerHistoryId =:= OldHistoryId ->
+                            pending;
+                        true ->
+                            diverged
+                    end;
+                _ ->
+                    case PeerBranch of
+                        #{new_history_id := BranchHistoryId} ->
+                            case BranchHistoryId =:= NewHistoryId of
+                                true ->
+                                    started;
+                                false ->
+                                    conflict
+                            end;
+                        _ ->
+                            unknown
+                    end
+            end;
+        _ ->
+            unknown
+    end.
+
+aggregate_histories(Statuses) ->
+    Histories = maps:fold(
+                  fun (Peer, {_TS, PeerStatus}, Acc) ->
+                          update_histories(Peer, PeerStatus, Acc)
+                  end, #{}, Statuses),
+    maps:map(
+      fun (_HistoryId, Peers) ->
+              lists:sort(Peers)
+      end, Histories).
+
+update_histories(Peer, PeerStatus, Acc) ->
+    case maps:find(history_id, PeerStatus) of
+        {ok, HistoryId} ->
+            maps:update_with(
+              HistoryId,
+              fun (Peers) ->
+                      [Peer | Peers]
+              end, [Peer], Acc);
+        error ->
+            Acc
+    end.
