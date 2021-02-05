@@ -940,3 +940,6 @@ sanitize_reason(Reason) ->
 
 shuffle(List) when is_list(List) ->
     [N || {_R, N} <- lists:keysort(1, [{rand:uniform(), X} || X <- List])].
+
+announce_important_change(Type) ->
+    gen_event:notify(?EXTERNAL_EVENTS_SERVER, {important_change, Type}).

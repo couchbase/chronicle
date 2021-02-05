@@ -2158,7 +2158,10 @@ announce_system_state(SystemState) ->
 
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}),
-    gen_event:notify(?EXTERNAL_EVENTS_SERVER, {system_state, SystemState}).
+    announce_system_state_changed().
+
+announce_system_state_changed() ->
+    chronicle_utils:announce_important_change(system_state).
 
 announce_joining_cluster(HistoryId) ->
     announce_system_state(joining_cluster, HistoryId).

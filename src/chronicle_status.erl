@@ -294,7 +294,7 @@ recompute_cluster_status(#state{local_status = LocalStatus,
     end.
 
 announce_cluster_status_changed() ->
-    gen_event:notify(?EXTERNAL_EVENTS_SERVER, cluster_status_changed).
+    chronicle_utils:announce_important_change(cluster_status).
 
 cluster_status(Statuses) ->
     Failovers = aggregate_failovers(Statuses),
