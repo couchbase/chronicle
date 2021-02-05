@@ -22,7 +22,7 @@
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--export([get_global_status/0, get_peers/0]).
+-export([get_cluster_status/0, get_peers/0]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
@@ -31,7 +31,7 @@
 -define(WAIT_MORE_STATUS_TIMEOUT, 100).
 
 -record(state, { local_status,
-                 global_status,
+                 cluster_status,
 
                  last_heard,
                  statuses,
@@ -41,8 +41,8 @@
 start_link() ->
     gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
-get_global_status() ->
-    gen_server:call(?SERVER, get_global_status).
+get_cluster_status() ->
+    gen_server:call(?SERVER, get_cluster_status).
 
 get_peers() ->
     gen_server:call(?SERVER, get_peers).
@@ -67,14 +67,15 @@ init([]) ->
                     last_heard = #{},
                     statuses = #{},
                     wait_more_status_tref = undefined},
-    State = recompute_global_status(State0),
+    State = recompute_cluster_status(State0),
 
     send_status_all(State),
     schedule_ping(),
 
     {ok, State}.
 
-handle_call(get_global_status, _From, #state{global_status = Status} = State) ->
+handle_call(get_cluster_status, _From,
+            #state{cluster_status = Status} = State) ->
     {reply, Status, State};
 handle_call(get_peers, _From, #state{last_heard = LastHeard} = State) ->
     Now = get_timestamp(),
@@ -134,7 +135,7 @@ handle_refresh_status(#state{local_status = OldStatus} = State) ->
         true ->
             {noreply, State};
         false ->
-            NewState = recompute_global_status(
+            NewState = recompute_cluster_status(
                          State#state{local_status = NewStatus}),
             {noreply, maybe_schedule_send_status(NewState)}
     end.
@@ -172,7 +173,8 @@ handle_status(Peer, Status, #state{last_heard = LastHeard,
                 NewState0;
             _ ->
                 NewStatuses = maps:put(Peer, Status, Statuses),
-                recompute_global_status(NewState0#state{statuses = NewStatuses})
+                recompute_cluster_status(
+                  NewState0#state{statuses = NewStatuses})
         end,
 
     {noreply, NewState}.
@@ -195,7 +197,7 @@ handle_nodedown(Peer, #state{last_heard = LastHeard,
     NewStatuses = maps:remove(Peer, Statuses),
     NewState = State#state{last_heard = NewLastHeard, statuses = NewStatuses},
 
-    {noreply, recompute_global_status(NewState)}.
+    {noreply, recompute_cluster_status(NewState)}.
 
 get_timestamp() ->
     erlang:monotonic_time().
@@ -255,12 +257,12 @@ send_to(Peers, Msg) when is_list(Peers) ->
 live_peers() ->
     chronicle_peers:get_live_peers_other().
 
-recompute_global_status(#state{local_status = LocalStatus,
-                               statuses = PeerStatuses} = State) ->
+recompute_cluster_status(#state{local_status = LocalStatus,
+                                statuses = PeerStatuses} = State) ->
     AllStatuses = maps:put(?PEER(), LocalStatus, PeerStatuses),
-    State#state{global_status = global_status(AllStatuses)}.
+    State#state{cluster_status = cluster_status(AllStatuses)}.
 
-global_status(Statuses) ->
+cluster_status(Statuses) ->
     Failovers = aggregate_failovers(Statuses),
     Histories = aggregate_histories(Statuses),
 
