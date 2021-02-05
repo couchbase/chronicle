@@ -15,10 +15,16 @@
 %%
 -module(chronicle_failover).
 
--compile(export_all).
+-include("chronicle.hrl").
+
 -behavior(gen_server).
 
--include("chronicle.hrl").
+-export([start_link/0]).
+-export([failover/1, failover/2, try_cancel/2]).
+
+-export([init/1, handle_call/3, handle_cast/2]).
+
+-export_type([failover_result/0, try_cancel_result/0]).
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
@@ -64,6 +70,9 @@ failover(KeepPeers, Opaque) ->
         {error, _} = Error ->
             Error
     end.
+
+-type try_cancel_result() :: ok
+                           | {error, {failed_peers, [chronicle:peer()]}}.
 
 -spec try_cancel(chronicle:history_id(), [chronicle:peer()]) ->
           ok | {error, {failed_peers, [chronicle:peer()]}}.
