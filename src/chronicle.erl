@@ -25,6 +25,7 @@
 -export([provision/1, reprovision/0, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
+-export([failover/1, failover/2, try_cancel_failover/2]).
 -export([acquire_lock/0, acquire_lock/1]).
 -export([get_peers/0, get_peers/1,
          get_voters/0, get_voters/1, get_replicas/0, get_replicas/1]).
@@ -349,6 +350,19 @@ prepare_join(ClusterInfo) ->
 -spec join_cluster(cluster_info()) -> chronicle_agent:join_cluster_result().
 join_cluster(ClusterInfo) ->
     chronicle_agent:join_cluster(ClusterInfo).
+
+-spec failover(peers()) -> chronicle_failover:failover_result().
+failover(KeepPeers) ->
+    chronicle_failover:failover(KeepPeers).
+
+-spec failover(peers(), Opaque::any()) -> chronicle_failover:failover_result().
+failover(KeepPeers, Opaque) ->
+    chronicle_failover:failover(KeepPeers, Opaque).
+
+-spec try_cancel_failover(history_id(), peers()) ->
+          chronicle_failover:try_cancel_result().
+try_cancel_failover(Id, Peers) ->
+    chronicle_failover:try_cancel(Id, Peers).
 
 %% internal
 get_config(Timeout, Fun) ->
