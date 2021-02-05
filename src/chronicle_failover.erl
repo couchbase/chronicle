@@ -40,7 +40,7 @@ start_link() ->
 
 -type failover_result() :: ok | {error, failover_error()}.
 -type failover_error() :: {not_in_peers, chronicle:peer(), [chronicle:peer()]}
-                        | {aborted, #{incompatible_peers => [chronicle:peer()],
+                        | {aborted, #{diverged_peers => [chronicle:peer()],
                                       failed_peers => [chronicle:peer()]}}
                         | no_leader.
 
@@ -170,7 +170,7 @@ massage_errors(Errors) ->
       fun ({Peer, Error}) ->
               case Error of
                   {error, {history_mismatch, _}} ->
-                      {incompatible_peers, Peer};
+                      {diverged_peers, Peer};
                   _ ->
                       {failed_peers, Peer}
               end
