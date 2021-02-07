@@ -37,6 +37,13 @@
 -export([set_peer_role/2, set_peer_role/3, set_peer_role/4,
          set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
 
+%% For internal use only currently. Changing these may render chronicle
+%% unusable.
+-export([set_setting/2, set_setting/3,
+         unset_setting/1, unset_setting/2,
+         replace_settings/1, replace_settings/2,
+         update_settings/1, update_settings/2]).
+
 -export_type([uuid/0, peer/0, peer_id/0, history_id/0,
               leader_term/0, seqno/0, peer_position/0,
               revision/0, cluster_info/0]).
@@ -363,6 +370,51 @@ failover(KeepPeers, Opaque) ->
           chronicle_failover:try_cancel_result().
 try_cancel_failover(Id, Peers) ->
     chronicle_failover:try_cancel(Id, Peers).
+
+-spec set_setting(term(), term()) -> ok.
+set_setting(Name, Value) ->
+    set_setting(Name, Value, ?DEFAULT_TIMEOUT).
+
+-spec set_setting(term(), term(), timeout()) -> ok.
+set_setting(Name, Value, Timeout) ->
+    update_settings(
+      fun (Settings) ->
+              maps:put(Name, Value, Settings)
+      end, Timeout).
+
+-spec unset_setting(term()) -> ok.
+unset_setting(Name) ->
+    unset_setting(Name, ?DEFAULT_TIMEOUT).
+
+-spec unset_setting(term(), timeout()) -> ok.
+unset_setting(Name, Timeout) ->
+    update_settings(
+      fun (Settings) ->
+              maps:remove(Name, Settings)
+      end, Timeout).
+
+replace_settings(Settings) ->
+    replace_settings(Settings, ?DEFAULT_TIMEOUT).
+
+replace_settings(Settings, Timeout) ->
+    update_settings(
+      fun (_) ->
+              Settings
+      end, Timeout).
+
+-type update_settings_fun() :: fun ((map()) -> map()).
+
+-spec update_settings(update_settings_fun()) -> ok.
+update_settings(Fun) ->
+    update_settings(Fun, ?DEFAULT_TIMEOUT).
+
+-spec update_settings(update_settings_fun(), timeout()) -> ok.
+update_settings(Fun, Timeout) ->
+    update_config(
+      fun (Config) ->
+              NewSettings = Fun(chronicle_config:get_settings(Config)),
+              {ok, chronicle_config:set_settings(NewSettings, Config)}
+      end, Timeout).
 
 %% internal
 get_config(Timeout, Fun) ->

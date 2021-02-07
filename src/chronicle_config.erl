@@ -30,6 +30,7 @@
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
 -export([get_peer_id/2, is_peer/3]).
 -export([get_branch_opaque/1]).
+-export([get_settings/1, set_settings/2]).
 
 -export_type([peers/0]).
 
@@ -262,3 +263,9 @@ get_branch_opaque(#config{branch = Branch}) ->
         #branch{opaque = Opaque}->
             {ok, Opaque}
     end.
+
+get_settings(#config{settings = Settings}) ->
+    Settings.
+
+set_settings(NewSettings, Config) ->
+    Config#config{settings = NewSettings}.

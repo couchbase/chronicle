@@ -57,6 +57,7 @@
                   old_peers :: undefined | chronicle_config:peers(),
                   state_machines :: #{atom() => #rsm_config{}},
 
+                  settings = #{} :: map(),
                   branch = false :: #branch{} | false}).
 
 -record(log_entry,
