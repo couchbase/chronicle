@@ -22,7 +22,8 @@
 
 -import(chronicle_utils, [sanitize_stacktrace/1]).
 
--define(MAX_PARALLEL_CATCHUPS, 4).
+-define(MAX_PARALLEL_CATCHUPS,
+        chronicle_settings:get({catchup, max_parallel_catchups}, 4)).
 
 -record(state, { parent,
                  history_id,

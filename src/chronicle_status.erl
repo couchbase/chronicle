@@ -29,8 +29,10 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
--define(PING_INTERVAL, 3000).
--define(WAIT_MORE_STATUS_TIMEOUT, 100).
+-define(PING_INTERVAL,
+        chronicle_settings:get({status, ping_interval}, 3000)).
+-define(WAIT_MORE_STATUS_TIMEOUT,
+        chronicle_settings:get({status, wait_more_status_timeout}, 100)).
 
 -record(state, { local_status,
                  cluster_status,

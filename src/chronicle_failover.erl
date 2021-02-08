@@ -28,10 +28,14 @@
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
--define(STORE_BRANCH_TIMEOUT, 15000).
--define(WAIT_LEADER_TIMEOUT, 10000).
--define(CANCEL_BRANCH_TIMEOUT, 15000).
--define(CLEANUP_BRANCH_TIMEOUT, 5000).
+-define(STORE_BRANCH_TIMEOUT,
+        chronicle_settings:get({failover, store_branch_timeout}, 15000)).
+-define(WAIT_LEADER_TIMEOUT,
+        chronicle_settings:get({failover, wait_leader_timeout}, 10000)).
+-define(CANCEL_BRANCH_TIMEOUT,
+        chronicle_settings:get({failover, cancel_branch_timeout}, 15000)).
+-define(CLEANUP_BRANCH_TIMEOUT,
+        chronicle_settings:get({failover, cleanup_branch_timeout}, 5000)).
 
 -record(state, {}).
 

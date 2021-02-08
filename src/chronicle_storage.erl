@@ -29,9 +29,12 @@
 
 -define(RANGE_KEY, '$range').
 
--define(LOG_MAX_SIZE, 1024 * 1024).
--define(MAX_LOG_SEGMENTS, 20).
--define(MAX_SNAPSHOTS, 1).
+-define(LOG_MAX_SIZE,
+        chronicle_settings:get({storage, log_max_size}, 1024 * 1024)).
+-define(MAX_LOG_SEGMENTS,
+        chronicle_settings:get({storage, max_log_segments}, 20)).
+-define(MAX_SNAPSHOTS,
+        chronicle_settings:get({storage, max_snapshots}, 1)).
 
 -type meta_state() :: ?META_STATE_PROVISIONED
                     | ?META_STATE_NOT_PROVISIONED

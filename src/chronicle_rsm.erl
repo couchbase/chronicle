@@ -20,7 +20,7 @@
 
 %% If it takes longer than this time to initialize, then we probably hit some
 %% bug.
--define(INIT_TIMEOUT, 60000).
+-define(INIT_TIMEOUT, chronicle_settings:get({rsm, init_timeout}, 60000)).
 
 -include("chronicle.hrl").
 

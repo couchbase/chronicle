@@ -35,11 +35,16 @@
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
 %% TODO: move these to the config
--define(STOP_TIMEOUT, 10000).
--define(ESTABLISH_TERM_TIMEOUT, 10000).
--define(NO_QUORUM_TIMEOUT, 15000).
--define(CHECK_PEERS_INTERVAL, 1000).
--define(MAX_INFLIGHT, 500).
+-define(STOP_TIMEOUT,
+        chronicle_settings:get({proposer, stop_timeout}, 10000)).
+-define(ESTABLISH_TERM_TIMEOUT,
+        chronicle_settings:get({proposer, establish_term_timeout}, 10000)).
+-define(NO_QUORUM_TIMEOUT,
+        chronicle_settings:get({proposer, no_quorum_timeout}, 15000)).
+-define(CHECK_PEERS_INTERVAL,
+        chronicle_settings:get({proposer, check_peers_interval}, 1000)).
+-define(MAX_INFLIGHT,
+        chronicle_settings:get({proposer, max_inflight}, 500)).
 
 -record(data, { parent,
 

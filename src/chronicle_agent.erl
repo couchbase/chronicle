@@ -45,18 +45,28 @@
                 ?SERVER_NAME(Peer, ?NAME)
         end).
 
--define(PROVISION_TIMEOUT, 10000).
--define(ESTABLISH_LOCAL_TERM_TIMEOUT, 10000).
--define(LOCAL_MARK_COMMITTED_TIMEOUT, 5000).
--define(PREPARE_JOIN_TIMEOUT, 10000).
--define(JOIN_CLUSTER_TIMEOUT, 120000).
+-define(PROVISION_TIMEOUT,
+        chronicle_settings:get({agent, provision_timeout}, 10000)).
+-define(ESTABLISH_LOCAL_TERM_TIMEOUT,
+        chronicle_settings:get({agent, establish_local_term_timeout}, 10000)).
+-define(LOCAL_MARK_COMMITTED_TIMEOUT,
+        chronicle_settings:get({agent, local_mark_committed_timeout}, 5000)).
+-define(PREPARE_JOIN_TIMEOUT,
+        chronicle_settings:get({agent, prepare_join_timeout}, 10000)).
+-define(JOIN_CLUSTER_TIMEOUT,
+        chronicle_settings:get({agent, join_cluster_timeout}, 120000)).
 
--define(INSTALL_SNAPSHOT_TIMEOUT, 120000).
+-define(INSTALL_SNAPSHOT_TIMEOUT,
+        chronicle_settings:get({agent, install_snapshot_timeout}, 120000)).
 
--define(SNAPSHOT_TIMEOUT, 60000).
--define(SNAPSHOT_RETRIES, 5).
--define(SNAPSHOT_RETRY_AFTER, 10000).
--define(SNAPSHOT_INTERVAL, 100).
+-define(SNAPSHOT_TIMEOUT,
+        chronicle_settings:get({agent, snapshot_timeout}, 60000)).
+-define(SNAPSHOT_RETRIES,
+        chronicle_settings:get({agent, snapshot_retries}, 5)).
+-define(SNAPSHOT_RETRY_AFTER,
+        chronicle_settings:get({agent, snapshot_retry_after}, 10000)).
+-define(SNAPSHOT_INTERVAL,
+        chronicle_settings:get({agent, snapshot_interval}, 100)).
 
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is

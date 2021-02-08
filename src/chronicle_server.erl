@@ -28,8 +28,10 @@
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
--define(COMMANDS_BATCH_AGE, 20).
--define(SYNCS_BATCH_AGE, 5).
+-define(COMMANDS_BATCH_AGE,
+        chronicle_settings:get({proposer, commands_batch_age}, 20)).
+-define(SYNCS_BATCH_AGE,
+        chronicle_settings:get({proposer, syncs_batch_age}, 5)).
 
 -record(follower, {}).
 -record(leader, { history_id, term, status, seqno }).

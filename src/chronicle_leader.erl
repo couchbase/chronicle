@@ -34,10 +34,15 @@
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
 
 -define(TABLE, ?ETS_TABLE(?MODULE)).
--define(MAX_BACKOFF, 16).
+-define(MAX_BACKOFF,
+        chronicle_settings:get({leader, max_backoff}, 16)).
 
--define(EXTRA_WAIT_TIME, 10).
--define(CHECK_MEMBER_TIMEOUT, 10000).
+-define(EXTRA_WAIT_TIME,
+        chronicle_settings:get({leader, extra_wait_time}, 10)).
+-define(CHECK_MEMBER_AFTER,
+        chronicle_settings:get({leader, check_member_after}, 10000)).
+-define(CHECK_MEMBER_TIMEOUT,
+        chronicle_settings:get({leader, check_member_timeout}, 10000)).
 
 -record(leader, { peer, history_id, term, status }).
 -record(follower, { leader, history_id, term, status }).
@@ -323,7 +328,7 @@ maybe_start_check_member_timer(#data{check_member_tref = TRef} = Data) ->
     end.
 
 start_check_member_timer(Data) ->
-    TRef = erlang:send_after(?CHECK_MEMBER_TIMEOUT, self(),
+    TRef = erlang:send_after(?CHECK_MEMBER_AFTER, self(),
                              check_member_timeout),
     Data#data{check_member_tref = TRef}.
 
@@ -354,36 +359,46 @@ get_state_timeout(State, Data) ->
 
     case State of
         #observer{} ->
-            %% This is the timeout that needs to expire before an observer
-            %% will decide to attempt to elect itself a leader. The timeout is
-            %% randomized to avoid clashes with other nodes.
-            BackoffFactor = Data#data.backoff_factor,
-            HeartbeatInterval +
-                rand:uniform(5 * BackoffFactor * HeartbeatInterval);
+            get_observer_timeout(HeartbeatInterval, Data);
         #candidate{} ->
-            %% This is used by the candidate when it starts election. This
-            %% value is larger than 'long' timeout, which means that
-            %% eventually other nodes will start trying to elect
-            %% themselves. But this is probably ok.
-            50 * HeartbeatInterval;
+            get_candidate_timeout(HeartbeatInterval);
         #check_member{} ->
-            10000;
+            ?CHECK_MEMBER_TIMEOUT;
         _ ->
-            %% This is the amount of time that it will take followers or nodes
-            %% that granted their vote to decide that the leader is missing
-            %% and move to the observer state.
-            20 * HeartbeatInterval
+            get_follower_timeout(HeartbeatInterval)
     end.
+
+get_heartbeat_interval() ->
+    chronicle_settings:get({leader, heartbeat_interval}, 100).
+
+get_observer_timeout(HeartbeatInterval, Data) ->
+    %% This is the timeout that needs to expire before an observer will decide
+    %% to attempt to elect itself a leader. The timeout is randomized to avoid
+    %% clashes with other nodes.
+
+    BackoffFactor = Data#data.backoff_factor,
+    Mult = chronicle_settings:get({leader, observer_multiplier}, 5),
+    HeartbeatInterval + rand:uniform(Mult * BackoffFactor * HeartbeatInterval).
+
+get_candidate_timeout(HeartbeatInterval) ->
+    %% This is used by the candidate when it starts election. This value is
+    %% larger than 'long' timeout, which means that eventually other nodes
+    %% will start trying to elect themselves. But this is probably ok.
+    Mult = chronicle_settings:get({leader, candidate_multiplier}, 50),
+    Mult * HeartbeatInterval.
+
+get_follower_timeout(HeartbeatInterval) ->
+    %% This is the amount of time that it will take followers or nodes that
+    %% granted their vote to decide that the leader is missing and move to the
+    %% observer state.
+    Mult = chronicle_settings:get({leader, follower_multiplier}, 20),
+    Mult * HeartbeatInterval.
 
 schedule_send_heartbeat(Data) ->
     schedule_send_heartbeat(get_heartbeat_interval(), Data).
 
 schedule_send_heartbeat(Timeout, Data) ->
     start_state_timer(send_heartbeat, Timeout, Data).
-
-get_heartbeat_interval() ->
-    %% TODO
-    100.
 
 is_interesting_event({system_state, provisioned, _}) ->
     true;
