@@ -516,6 +516,7 @@ init([]) ->
     %% Make sure clients are woken up to check the latest state. Important if
     %% chronicle_agent restarts and forgets to send out some notifications.
     announce_system_state_changed(),
+    publish_settings(FinalData),
 
     {ok, FinalState, FinalData}.
 
@@ -932,7 +933,7 @@ handle_reprovision(From, State, Data) ->
                                    Data),
 
             announce_system_reprovisioned(NewData),
-            announce_new_config(NewData),
+            handle_new_config(NewData),
             announce_committed_seqno(Seqno, NewData),
 
             {keep_state, NewData, {reply, From, ok}};
@@ -993,6 +994,7 @@ handle_provision(Machines, From, State, Data) ->
                                    Data),
 
             announce_system_provisioned(NewData),
+            handle_new_config(NewData),
 
             {next_state, provisioned, NewData, {reply, From, ok}};
         {error, _} = Error ->
@@ -1088,6 +1090,7 @@ handle_prepare_wipe_done(State, Data) ->
     gen_statem:reply(From, ok),
 
     NewData = init_data(),
+    publish_settings(NewData),
     {next_state, not_provisioned, NewData}.
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
@@ -1369,7 +1372,7 @@ post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
         case State of
             provisioned ->
                 maybe_announce_term_established(Term, OldData),
-                maybe_announce_new_config(OldData, NewData),
+                check_new_config(OldData, NewData),
 
                 OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
                 case OldCommittedSeqno =:= NewCommittedSeqno of
@@ -2137,13 +2140,35 @@ announce_term_established(State, Term) ->
 announce_term_established(Term) ->
     chronicle_events:sync_notify({term_established, Term}).
 
-maybe_announce_new_config(OldData, NewData) ->
-    case get_config(OldData) =:= get_config(NewData) of
+check_new_config(OldData, NewData) ->
+    case get_config_revision(OldData) =:= get_config_revision(NewData) of
         true ->
             ok;
         false ->
-            announce_new_config(NewData)
+            handle_new_config(NewData)
     end.
+
+get_config_revision(Data) ->
+    Config = get_config(Data),
+    #log_entry{history_id = HistoryId,
+               term = Term,
+               seqno = Seqno} = Config,
+    {HistoryId, Term, Seqno}.
+
+handle_new_config(Data) ->
+    publish_settings(Data),
+    announce_new_config(Data).
+
+publish_settings(Data) ->
+    Settings =
+        case get_config(Data) of
+            undefined ->
+                #{};
+            #log_entry{value = Config} ->
+                chronicle_config:get_settings(Config)
+        end,
+
+    chronicle_settings:set_settings(Settings).
 
 announce_new_config(Data) ->
     Metadata = build_metadata(Data),

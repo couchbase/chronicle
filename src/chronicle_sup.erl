@@ -62,6 +62,12 @@ child_specs() ->
             shutdown => brutal_kill,
             type => worker},
 
+    Settings = #{id => chronicle_settings,
+                 start => {chronicle_settings, start_link, []},
+                 restart => permanent,
+                 shutdown => brutal_kill,
+                 type => worker},
+
     Agent = #{id => chronicle_agent,
               start => {chronicle_agent, start_link, []},
               restart => permanent,
@@ -73,4 +79,4 @@ child_specs() ->
                      restart => permanent,
                      type => supervisor},
 
-    [Peers, Events, ExtEvents, Ets, Agent, SecondarySup].
+    [Peers, Events, ExtEvents, Ets, Settings, Agent, SecondarySup].
