@@ -60,7 +60,18 @@ init([]) ->
     _ = ets:new(?TABLE, [protected, named_table,
                          {read_concurrency, true},
                          {write_concurrency, true}]),
-    {ok, #state{}}.
+
+    LocalSettings =
+        case application:get_env(chronicle, settings) of
+            {ok, Settings} ->
+                Settings;
+            undefined ->
+                #{}
+        end,
+
+    State = handle_new_settings(#{}, LocalSettings, #state{}),
+
+    {ok, State}.
 
 handle_call(get_settings, _From, #state{effective_settings =
                                             EffectiveSettings} = State) ->
