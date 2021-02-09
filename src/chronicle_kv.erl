@@ -274,7 +274,7 @@ txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
                     chronicle_rsm:sync_revision(Name, Revision, TRef),
 
                     %% Don't trigger extra synchronization when retrying.
-                    NewOpts = Opts#{read_concurrency => local},
+                    NewOpts = Opts#{read_consistency => local},
 
                     txn_loop(Name, Fun, NewOpts,
                              TRef, Retries - 1);
