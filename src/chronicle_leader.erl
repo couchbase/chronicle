@@ -589,10 +589,7 @@ handle_heartbeat(LeaderInfo, State, Data) ->
             {next_state, NewState,
              %% We've received a heartbeat, so start the election timer anew.
              start_state_timer(NewState, Data)};
-        Error ->
-            %% TODO: this may be too much to log
-            ?DEBUG("Rejecting heartbeat ~p: ~p",
-                   [{Peer, HistoryId, Term}, Error]),
+        _Error ->
             keep_state_and_data
     end.
 
