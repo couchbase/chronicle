@@ -126,6 +126,13 @@ get_metadata() ->
             exit(not_provisioned)
     end.
 
+-type check_grant_error() :: {bad_state, not_provisioned | removed}
+                           | {history_mismatch, chronicle:history_id()}
+                           | {behind, chronicle:peer_position()}.
+
+-spec check_grant_vote(chronicle:history_id(), chronicle:peer_positoin()) ->
+          {ok, chronicle:leader_term()} |
+          {error, check_grant_error()}.
 check_grant_vote(HistoryId, Position) ->
     call(?SERVER, {check_grant_vote, HistoryId, Position}).
 
