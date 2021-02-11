@@ -712,11 +712,20 @@ simple_test__(Nodes) ->
                                         end
                                 end),
 
-                          {ok, {Snap, _}} =
+                          {ok, {Snap, SnapRev}} =
                               chronicle_kv:get_snapshot(kv, [a, b, c]),
                           {85, _} = maps:get(a, Snap),
                           {d, _} = maps:get(b, Snap),
                           {42, _} = maps:get(c, Snap),
+
+                          %% Snap and SnapRev are bound above
+                          {ok, {Snap, SnapRev}} =
+                              chronicle_kv:ro_txn(
+                                kv,
+                                fun (Txn) ->
+                                        chronicle_kv:txn_get_many(
+                                          [a, b, c], Txn)
+                                end),
 
                           {ok, {42, _}} = chronicle_kv:get(kv, c),
 

@@ -35,7 +35,7 @@
 -export([get_revision/1]).
 -export([sync/2, sync/3]).
 
--export([txn/2, txn/3]).
+-export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
 -export([txn_get/2, txn_get_many/2]).
 
 %% callbacks
@@ -241,7 +241,7 @@ txn(Name, Fun, Opts) ->
 
 txn_loop(Name, Fun, Opts, TRef, Retries) ->
     case prepare_txn(Name, Fun, TRef, Opts) of
-        {ok, {TxnResult, Conditions}} ->
+        {ok, {TxnResult, Conditions, _Revision}} ->
             case TxnResult of
                 {commit, Updates} ->
                     txn_loop_commit(Name, Fun, Opts, TRef, Retries,
@@ -294,10 +294,11 @@ prepare_txn(Name, Fun, TRef, Opts) ->
 prepare_txn_fast(Name, Fun) ->
     case get_kv_table(Name) of
         {ok, Table} ->
-            {_, TableSeqno} = get_revision(Name),
+            {_, TableSeqno} = Revision = get_revision(Name),
 
             try
                 Result = txn_with_conditions(
+                           Revision,
                            fun () ->
                                    Fun({txn_fast, Table, TableSeqno})
                            end),
@@ -315,6 +316,23 @@ submit_transaction(Name, Conditions, Updates, Opts) ->
 
 submit_transaction(Name, Conditions, Updates, Timeout, Opts) ->
     submit_command(Name, {transaction, Conditions, Updates}, Timeout, Opts).
+
+-type ro_txn_fun() :: fun ((txn_opaque()) -> TxnResult::any()).
+-type ro_txn_result() :: {ok, {TxnResult::any(), revision()}}.
+
+-spec ro_txn(name(), ro_txn_fun()) -> ro_txn_result().
+ro_txn(Name, Fun) ->
+    ro_txn(Name, Fun, #{}).
+
+-spec ro_txn(name(), ro_txn_fun(), options()) -> ro_txn_result().
+ro_txn(Name, Fun, Opts) ->
+    TRef = start_timeout(get_timeout(Opts)),
+    case prepare_txn(Name, Fun, TRef, Opts) of
+        {ok, {TxnResult, _Conditions, Revision}} ->
+            {ok, {TxnResult, Revision}};
+        {error, {raised, T, E, Stack}} ->
+            erlang:raise(T, E, Stack)
+    end.
 
 -type get_result() :: {ok, {value(), revision()}} | {error, not_found}.
 
@@ -529,8 +547,8 @@ handle_query(get_full_snapshot, StateRevision, State, Data) ->
     handle_get_full_snapshot(StateRevision, State, Data);
 handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
     handle_get_snapshot(Keys, StateRevision, State, Data);
-handle_query({prepare_txn, Fun}, _StateRevision, State, Data) ->
-    handle_prepare_txn(Fun, State, Data).
+handle_query({prepare_txn, Fun}, StateRevision, State, Data) ->
+    handle_prepare_txn(Fun, StateRevision, State, Data).
 
 apply_command({add, Key, Value}, Revision, StateRevision, State, Data) ->
     apply_add(Key, Value, Revision, StateRevision, State, Data);
@@ -660,9 +678,10 @@ handle_get_snapshot(Keys, StateRevision, State, Data) ->
     Snapshot = maps:with(Keys, State),
     {reply, {ok, {Snapshot, StateRevision}}, Data}.
 
-handle_prepare_txn(Fun, State, Data) ->
+handle_prepare_txn(Fun, StateRevision, State, Data) ->
     Result =
-        try txn_with_conditions(fun () -> Fun({txn_slow, State}) end)
+        try txn_with_conditions(StateRevision,
+                                fun () -> Fun({txn_slow, State}) end)
         of R -> {ok, R}
         catch
             T:E:Stack ->
@@ -925,11 +944,11 @@ txn_init_conditions() ->
 txn_take_conditions() ->
     erlang:erase(?TXN_CONDITIONS).
 
-txn_with_conditions(Body) ->
+txn_with_conditions(Revision, Body) ->
     txn_init_conditions(),
     try Body() of
         Result ->
-            {Result, txn_take_conditions()}
+            {Result, txn_take_conditions(), Revision}
     after
         _ = txn_take_conditions()
     end.
