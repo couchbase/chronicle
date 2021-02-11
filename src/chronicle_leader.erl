@@ -608,10 +608,6 @@ handle_stepping_down(LeaderInfo, State, Data) ->
                   [Peer, LeaderInfo]),
             {next_state, make_observer(Data), Data};
         _ ->
-            ?INFO("Ignoring stepping_down message.~n"
-                  "State: ~p~n"
-                  "Leader info: ~p",
-                  [State, LeaderInfo]),
             keep_state_and_data
     end.
 
