@@ -114,7 +114,12 @@ monitor(Peer) ->
           {provisioned, #metadata{}} |
           {removed, #metadata{}}.
 get_system_state() ->
-    call(?SERVER, get_system_state).
+    case chronicle_ets:get(agent_state) of
+        {ok, SystemState} ->
+            SystemState;
+        not_found ->
+            exit(no_agent)
+    end.
 
 -spec get_metadata() -> #metadata{}.
 get_metadata() ->
@@ -526,6 +531,9 @@ init([]) ->
                 removed
         end,
 
+    ok = chronicle_ets:register_writer([agent_state]),
+    publish_state(State, Data),
+
     %% It's possible the agent crashed right before logging the new state to
     %% disk.
     {FinalState, FinalData} = check_state_transitions(State, Data),
@@ -555,8 +563,6 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
-handle_call(get_system_state, From, State, Data) ->
-    handle_get_system_state(From, State, Data);
 handle_call({check_grant_vote, PeerHistoryId, PeerPosition},
             From, State, Data) ->
     handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data);
@@ -629,9 +635,9 @@ terminate(_Reason, Data) ->
     maybe_cancel_snapshot(Data).
 
 %% internal
-handle_get_system_state(From, State, Data) ->
+publish_state(State, Data) ->
     ExtState = get_external_state(State),
-    Reply =
+    FullState =
         case ExtState of
             joining_cluster ->
                 HistoryId = get_meta(?META_HISTORY_ID, Data),
@@ -644,7 +650,8 @@ handle_get_system_state(From, State, Data) ->
             _ ->
                 ExtState
         end,
-    {keep_state_and_data, {reply, From, Reply}}.
+
+    chronicle_ets:put(agent_state, FullState).
 
 get_external_state(State) ->
     case State of
@@ -759,8 +766,9 @@ handle_register_rsm(Name, Pid, From, State,
                                     rsms_by_mref = NewMRefs},
 
             {keep_state, NewData, {reply, From, Reply}};
-        {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
+        {error, Error} ->
+            ?DEBUG("Ingored register_rsm for ~w<~w>: ~w", [Name, Pid, Error]),
+            keep_state_and_data
     end.
 
 check_provisioned_or_removed(State) ->
@@ -949,6 +957,7 @@ handle_reprovision(From, State, Data) ->
                                      ?META_COMMITTED_SEQNO => Seqno},
                                    Data),
 
+            publish_state(State, NewData),
             announce_system_reprovisioned(NewData),
             handle_new_config(NewData),
             announce_committed_seqno(Seqno, NewData),
@@ -1001,6 +1010,7 @@ handle_provision(Machines, From, State, Data) ->
             ?DEBUG("Provisioning with history ~p. Config:~n~p",
                    [HistoryId, Config]),
 
+            NewState = provisioned,
             NewData = append_entry(ConfigEntry,
                                    #{?META_STATE => ?META_STATE_PROVISIONED,
                                      ?META_PEER => Peer,
@@ -1010,10 +1020,12 @@ handle_provision(Machines, From, State, Data) ->
                                      ?META_COMMITTED_SEQNO => Seqno},
                                    Data),
 
+            publish_state(NewState, NewData),
+
             announce_system_provisioned(NewData),
             handle_new_config(NewData),
 
-            {next_state, provisioned, NewData, {reply, From, ok}};
+            {next_state, NewState, NewData, {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data,
              {reply, From, Error}}
@@ -1106,9 +1118,12 @@ handle_prepare_wipe_done(State, Data) ->
 
     gen_statem:reply(From, ok),
 
+    NewState = not_provisioned,
     NewData = init_data(),
     publish_settings(NewData),
-    {next_state, not_provisioned, NewData}.
+    publish_state(NewState, NewData),
+
+    {next_state, NewState, NewData}.
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
     case ?CHECK(check_not_provisioned(State),
@@ -1121,11 +1136,13 @@ handle_prepare_join(ClusterInfo, From, State, Data) ->
                      ?META_PEER => Peer,
                      ?META_STATE => {?META_STATE_PREPARE_JOIN,
                                      #{config => Config}}},
+
+            NewState = #prepare_join{config = Config},
             NewData = store_meta(Meta, Data),
+            publish_state(NewState, NewData),
             announce_joining_cluster(HistoryId),
-            {next_state,
-             #prepare_join{config = Config}, NewData,
-             {reply, From, ok}};
+
+            {next_state, NewState, NewData, {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
@@ -1157,6 +1174,7 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
             NewState = #join_cluster{from = From,
                                      seqno = Seqno,
                                      config = Config},
+            publish_state(NewState, NewData),
 
             %% We might already have all entries we need.
             {FinalState, FinalData} =
@@ -1225,8 +1243,10 @@ check_join_cluster_done(State, Data) ->
             CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
             case CommittedSeqno >= WaitedSeqno andalso NotWipeRequested of
                 true ->
+                    NewState = provisioned,
                     NewData = store_meta(#{?META_STATE =>
                                                ?META_STATE_PROVISIONED}, Data),
+                    publish_state(NewState, NewData),
                     announce_system_state(provisioned, build_metadata(NewData)),
 
                     case From =/= undefined of
@@ -1236,7 +1256,7 @@ check_join_cluster_done(State, Data) ->
                             ok
                     end,
 
-                    {provisioned, NewData};
+                    {NewState, NewData};
                 false ->
                     {State, Data}
             end;
@@ -1251,6 +1271,8 @@ handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
     case check_establish_term(HistoryId, Term, Position, State, Data) of
         ok ->
             NewData = store_meta(#{?META_TERM => Term}, Data),
+            publish_state(State, NewData),
+
             announce_term_established(State, Term),
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
 
@@ -1385,6 +1407,8 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     {next_state, NewState, NewData, {reply, From, ok}}.
 
 post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
+    publish_state(State, NewData),
+
     {FinalState, FinalData} =
         case State of
             provisioned ->
@@ -1701,6 +1725,7 @@ handle_local_mark_committed(HistoryId, Term,
                         NewData0 =
                             store_meta(#{?META_COMMITTED_SEQNO =>
                                              CommittedSeqno}, Data),
+                        publish_state(State, NewData0),
 
                         announce_committed_seqno(CommittedSeqno, NewData0),
 
@@ -1857,6 +1882,8 @@ handle_store_branch(Branch, From, State, Data) ->
                              [PendingBranch, Branch])
             end,
 
+            publish_state(State, NewData),
+
             %% New branch, announce history change.
             announce_new_history(NewData),
 
@@ -1886,11 +1913,12 @@ check_branch_peers(Branch, Data) ->
             {error, {not_in_peers, Coordinator, Peers}}
     end.
 
-handle_undo_branch(BranchId, From, _State, Data) ->
+handle_undo_branch(BranchId, From, State, Data) ->
     assert_valid_history_id(BranchId),
     case check_branch_id(BranchId, Data) of
         ok ->
             NewData = store_meta(#{?META_PENDING_BRANCH => undefined}, Data),
+            publish_state(State, NewData),
             announce_new_history(NewData),
 
             ?DEBUG("Undid branch ~p", [BranchId]),
@@ -2507,9 +2535,11 @@ check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
     end.
 
 mark_removed(Data) ->
+    NewState = removed,
     NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
+    publish_state(NewState, NewData),
     announce_system_state(removed, build_metadata(NewData)),
-    {removed, NewData}.
+    {NewState, NewData}.
 
 get_committed_config(Data) ->
     CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
