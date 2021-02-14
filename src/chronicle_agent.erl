@@ -517,6 +517,18 @@ is_wipe_requested() ->
 mark_removed(Peer, PeerId) ->
     call(?SERVER, {mark_removed, Peer, PeerId}).
 
+-type check_member_error() ::
+        {bad_state, joining_cluster | removed | not_provisioned} |
+        {history_mismatch, OurHistory::chronicle:history_id()} |
+        {peer_ahead,
+         PeerSeqno::chronicle:seqno(),
+         CommittedSeqno::chronicle:seqno()}.
+
+-spec check_member(chronicle:history_id(),
+                   chronicle:peer(), chronicle:peer_id(),
+                   chronicle:seqno()) ->
+          {ok, boolean()} |
+          {error, check_member_error()}.
 check_member(HistoryId, Peer, PeerId, PeerSeqno) ->
     call(?SERVER, {check_member, HistoryId, Peer, PeerId, PeerSeqno}).
 
