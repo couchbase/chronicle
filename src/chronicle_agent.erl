@@ -141,9 +141,9 @@ get_metadata() ->
 check_grant_vote(HistoryId, Position) ->
     case get_system_state() of
         not_provisioned ->
-            {bad_state, not_provisioned};
+            {error, {bad_state, not_provisioned}};
         {removed, _} ->
-            {bad_state, removed};
+            {error, {bad_state, removed}};
         {_, Metadata} ->
             OurHistoryId = get_history_id(Metadata),
             OurPosition = chronicle_utils:get_position(Metadata),
