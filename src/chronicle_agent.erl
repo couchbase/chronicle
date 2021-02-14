@@ -2508,7 +2508,7 @@ check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
 
 mark_removed(Data) ->
     NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
-    announce_system_state(removed, build_metadata(Data)),
+    announce_system_state(removed, build_metadata(NewData)),
     {removed, NewData}.
 
 get_committed_config(Data) ->
