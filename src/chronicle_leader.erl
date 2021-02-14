@@ -177,7 +177,7 @@ init([]) ->
                 metadata2data(Metadata);
             {removed, Metadata} ->
                 metadata2data(true, Metadata, #data{});
-            {joining_cluster, HistoryId} ->
+            {joining_cluster, #metadata{history_id = HistoryId}} ->
                 #data{history_id = HistoryId};
             Other ->
                 exit({unexpected_state, Other})

@@ -110,7 +110,7 @@ monitor(Peer) ->
 
 -spec get_system_state() ->
           not_provisioned |
-          {joining_cluster, chronicle:history_id()} |
+          {joining_cluster, #metadata{}} |
           {provisioned, #metadata{}} |
           {removed, #metadata{}}.
 get_system_state() ->
@@ -139,7 +139,29 @@ get_metadata() ->
           {ok, chronicle:leader_term()} |
           {error, check_grant_error()}.
 check_grant_vote(HistoryId, Position) ->
-    call(?SERVER, {check_grant_vote, HistoryId, Position}).
+    case get_system_state() of
+        not_provisioned ->
+            {bad_state, not_provisioned};
+        {removed, _} ->
+            {bad_state, removed};
+        {_, Metadata} ->
+            OurHistoryId = get_history_id(Metadata),
+            OurPosition = chronicle_utils:get_position(Metadata),
+
+            %% Note that this is a weaker check than what establish_term does
+            %% when the state is joining_cluster (we don't take into account
+            %% the cluster config passed to us as part of
+            %% prepare_join/join_cluster). But that's ok, because the
+            %% prospective leader will still have to go through the agent to
+            %% when it gets enough votes from chronicle_leader.
+            case ?CHECK(do_check_history_id(HistoryId, OurHistoryId),
+                        check_peer_current(Position, OurPosition)) of
+                ok ->
+                    {ok, Metadata#metadata.term};
+                {error, _} = Error ->
+                    Error
+            end
+    end.
 
 register_rsm(Name, Pid) ->
     call(?SERVER, {register_rsm, Name, Pid}, 10000).
@@ -563,9 +585,6 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
-handle_call({check_grant_vote, PeerHistoryId, PeerPosition},
-            From, State, Data) ->
-    handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data);
 handle_call(get_log, From, _State, _Data) ->
     %% TODO: get rid of this
     {keep_state_and_data,
@@ -639,12 +658,8 @@ publish_state(State, Data) ->
     ExtState = get_external_state(State),
     FullState =
         case ExtState of
-            joining_cluster ->
-                HistoryId = get_meta(?META_HISTORY_ID, Data),
-                true = (HistoryId =/= ?NO_HISTORY),
-
-                {ExtState, HistoryId};
             _ when ExtState =:= provisioned;
+                   ExtState =:= joining_cluster;
                    ExtState =:= removed ->
                 {ExtState, build_metadata(Data)};
             _ ->
@@ -685,18 +700,6 @@ build_metadata(Data) ->
               config = get_config(Data),
               pending_branch = PendingBranch}.
 
-handle_check_grant_vote(PeerHistoryId, PeerPosition, From, State, Data) ->
-    Reply =
-        case ?CHECK(check_prepared(State),
-                    check_history_id(PeerHistoryId, Data),
-                    check_peer_current(PeerPosition, State, Data)) of
-            ok ->
-                {ok, get_meta(?META_TERM, Data)};
-            {error, _} = Error ->
-                Error
-        end,
-
-    {keep_state_and_data, {reply, From, Reply}}.
 
 check_prepared(State) ->
     case State of
@@ -1299,9 +1302,12 @@ check_later_term(Term, Data) ->
 
 check_peer_current(Position, State, Data) ->
     RequiredPosition = get_required_peer_position(State, Data),
-    case compare_positions(Position, RequiredPosition) of
+    check_peer_current(Position, RequiredPosition).
+
+check_peer_current(Position, OurPosition) ->
+    case compare_positions(Position, OurPosition) of
         lt ->
-            {error, {behind, RequiredPosition}};
+            {error, {behind, OurPosition}};
         _ ->
             ok
     end.
