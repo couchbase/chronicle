@@ -74,6 +74,7 @@
                     high_seqno,
                     committed_seqno,
                     config,
+                    committed_config,
                     pending_branch }).
 
 -define(DEBUG(Fmt, Args), ?LOG(debug, Fmt, Args)).

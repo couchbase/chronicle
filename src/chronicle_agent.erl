@@ -530,7 +530,30 @@ mark_removed(Peer, PeerId) ->
           {ok, boolean()} |
           {error, check_member_error()}.
 check_member(HistoryId, Peer, PeerId, PeerSeqno) ->
-    call(?SERVER, {check_member, HistoryId, Peer, PeerId, PeerSeqno}).
+    case get_system_state() of
+        {provisioned, Metadata} ->
+            OurHistoryId = get_history_id(Metadata),
+            case do_check_history_id(HistoryId, OurHistoryId) of
+                ok ->
+                    #metadata{committed_seqno = CommittedSeqno,
+                              committed_config = ConfigEntry} = Metadata,
+                    case CommittedSeqno >= PeerSeqno of
+                        true ->
+                            Config = ConfigEntry#log_entry.value,
+                            IsPeer =
+                                chronicle_config:is_peer(Peer, PeerId, Config),
+                            {ok, IsPeer};
+                        false ->
+                            {error, {peer_ahead, PeerSeqno, CommittedSeqno}}
+                    end;
+                {error, _} = Error ->
+                    Error
+            end;
+        {State, _} ->
+            {error, {bad_state, State}};
+        State ->
+            {error, {bad_state, State}}
+    end.
 
 %% gen_statem callbacks
 callback_mode() ->
@@ -655,9 +678,6 @@ handle_call({get_rsm_snapshot_saver, RSM, RSMPid, Seqno}, From, State, Data) ->
     handle_get_rsm_snapshot_saver(RSM, RSMPid, Seqno, From, State, Data);
 handle_call({mark_removed, Peer, PeerId}, From, State, Data) ->
     handle_mark_removed(Peer, PeerId, From, State, Data);
-handle_call({check_member, HistoryId, Peer, PeerId, PeerSeqno},
-            From, State, Data) ->
-    handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data);
 handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
@@ -710,8 +730,8 @@ build_metadata(Data) ->
               high_seqno = get_high_seqno(Data),
               committed_seqno = CommittedSeqno,
               config = get_config(Data),
+              committed_config = get_committed_config(Data),
               pending_branch = PendingBranch}.
-
 
 check_prepared(State) ->
     case State of
@@ -2061,27 +2081,6 @@ check_peer_and_id(Peer, PeerId, Data) ->
         false ->
             {error, {peer_mismatch, Ours, Theirs}}
     end.
-
-handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data) ->
-    Reply =
-        case ?CHECK(check_provisioned(State),
-                    check_history_id(HistoryId, Data)) of
-            ok ->
-                CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-                case CommittedSeqno >= PeerSeqno of
-                    true ->
-                        ConfigEntry = get_committed_config(Data),
-                        Config = ConfigEntry#log_entry.value,
-                        IsPeer = chronicle_config:is_peer(Peer, PeerId, Config),
-                        {ok, IsPeer};
-                    false ->
-                        {error, {peer_ahead, PeerSeqno, CommittedSeqno}}
-                end;
-            {error, _} = Error ->
-                Error
-        end,
-
-    {keep_state_and_data, {reply, From, Reply}}.
 
 check_branch_id(BranchId, Data) ->
     OurBranch = get_meta(?META_PENDING_BRANCH, Data),
