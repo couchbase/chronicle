@@ -25,7 +25,6 @@
 
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
--define(CONFIG_INDEX, ?ETS_TABLE(chronicle_config_index)).
 
 -define(RANGE_KEY, '$range').
 
@@ -60,7 +59,11 @@
                    low_seqno,
                    high_seqno,
                    meta,
+
                    config,
+                   committed_config,
+                   pending_configs,
+
                    snapshots,
                    snapshots_in_use,
 
@@ -68,7 +71,6 @@
 
                    log_info_tab,
                    log_tab,
-                   config_index_tab,
 
                    log_segments
                   }).
@@ -79,12 +81,8 @@ open() ->
     _ = ets:new(?MEM_LOG_TAB,
                 [protected, set, named_table,
                  {keypos, #log_entry.seqno}, {read_concurrency, true}]),
-    _ = ets:new(?CONFIG_INDEX,
-                [protected, ordered_set, named_table,
-                 {keypos, #log_entry.seqno}]),
     Storage0 = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
                         log_tab = ets:whereis(?MEM_LOG_TAB),
-                        config_index_tab = ets:whereis(?CONFIG_INDEX),
                         low_seqno = ?NO_SEQNO + 1,
                         high_seqno = ?NO_SEQNO,
                         meta = #{},
@@ -112,6 +110,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
 
     NewStorage0 = Storage#storage{meta = #{},
                                   config = undefined,
+                                  committed_config = undefined,
+                                  pending_configs = [],
                                   low_seqno = ?NO_SEQNO + 1,
                                   high_seqno = ?NO_SEQNO,
                                   snapshots = [],
@@ -334,17 +334,15 @@ handle_user_data(UserData, Storage) ->
     NewStorage = Storage#storage{current_log_start_seqno = HighSeqno + 1},
     case StorageConfig of
         undefined ->
+            NewStorage1 = NewStorage#storage{meta = Meta,
+                                             high_seqno = HighSeqno,
+                                             low_seqno = HighSeqno + 1},
             case Config of
                 undefined ->
-                    ok;
+                    NewStorage1;
                 #log_entry{} ->
-                    ets:insert(Storage#storage.config_index_tab, Config)
-            end,
-
-            NewStorage#storage{config = Config,
-                               meta = Meta,
-                               high_seqno = HighSeqno,
-                               low_seqno = HighSeqno + 1};
+                    append_configs([Config], NewStorage1)
+            end;
         _ ->
             case Config =:= StorageConfig
                 andalso Meta =:= StorageMeta
@@ -368,18 +366,18 @@ handle_log_entry(Entry, Storage) ->
             handle_log_append(StartSeqno, EndSeqno,
                               Meta, Truncate, Entries, Storage);
         {meta, Meta} ->
-            add_meta(Meta, Storage);
+            compact_configs(add_meta(Meta, Storage));
         {snapshot, Seqno, HistoryId, Term, Config} ->
             add_snapshot(Seqno, HistoryId, Term, Config, Storage);
         {install_snapshot, Seqno, HistoryId, Term, Config, Meta} ->
             ets:delete_all_objects(Storage#storage.log_tab),
-            ets:delete_all_objects(Storage#storage.config_index_tab),
-            ets:insert(Storage#storage.config_index_tab, Config),
 
             #storage{meta = CurrentMeta} = Storage,
             NewStorage = Storage#storage{low_seqno = Seqno + 1,
                                          high_seqno = Seqno,
                                          config = Config,
+                                         committed_config = Config,
+                                         pending_configs = [],
                                          meta = maps:merge(CurrentMeta, Meta)},
             add_snapshot(Seqno, HistoryId, Term, Config, NewStorage)
     end.
@@ -468,37 +466,16 @@ get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
 get_config(Storage) ->
     Storage#storage.config.
 
-get_config_for_seqno(Seqno, Storage) ->
-    case get_config_for_seqno_range(?NO_SEQNO, Seqno, Storage) of
-        {ok, Config} ->
-            Config;
-        false ->
-            exit({no_config_for_seqno, Seqno})
-    end.
-
-get_config_for_seqno_range(FromSeqno, ToSeqno,
-                           #storage{config_index_tab = Tab}) ->
-    true = (FromSeqno =< ToSeqno),
-
-    case ets:prev(Tab, ToSeqno + 1) of
-        '$end_of_table' ->
-            false;
-        ConfigSeqno ->
-            case ConfigSeqno >= FromSeqno of
-                true ->
-                    [Config] = ets:lookup(Tab, ConfigSeqno),
-                    {ok, Config};
-                false ->
-                    false
-            end
-    end.
+get_committed_config(Storage) ->
+    Storage#storage.committed_config.
 
 -spec store_meta(meta(), #storage{}) -> #storage{}.
 store_meta(Updates, Storage) ->
     Meta = dedup_meta(Updates, Storage),
     case maps:size(Meta) > 0 of
         true ->
-            NewStorage = add_meta(Meta, Storage),
+            NewStorage0 = add_meta(Meta, Storage),
+            NewStorage = compact_configs(NewStorage0),
             maybe_rollover(log_append([{meta, Meta}], NewStorage));
         false ->
             Storage
@@ -528,14 +505,14 @@ do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
         case Truncate of
             true ->
-                config_index_truncate(StartSeqno - 1, Storage);
+                truncate_configs(StartSeqno, Storage);
             false ->
                 Storage
         end,
 
     NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
-    NewStorage2 = config_index_append(Entries, NewStorage1),
-    add_meta(Meta, NewStorage2).
+    NewStorage2 = add_meta(Meta, NewStorage1),
+    append_configs(Entries, NewStorage2).
 
 append_handle_meta(Opts, Storage) ->
     case maps:find(meta, Opts) of
@@ -573,11 +550,9 @@ sync(#storage{current_log = Log}) ->
 
 close(#storage{current_log = Log,
                log_tab = LogTab,
-               log_info_tab = LogInfoTab,
-               config_index_tab = ConfigIndexTab}) ->
+               log_info_tab = LogInfoTab}) ->
     ets:delete(LogTab),
     ets:delete(LogInfoTab),
-    ets:delete(ConfigIndexTab),
 
     case Log of
         undefined ->
@@ -715,57 +690,53 @@ log_append(Records, #storage{current_log = Log,
             exit({append_failed, Error})
     end.
 
-config_index_replace(Config, #storage{config_index_tab = Tab}) ->
-    ets:delete_all_objects(Tab),
-    ets:insert(Tab, Config).
-
-config_index_truncate(Seqno, #storage{config_index_tab = Table} = Storage) ->
-    LastSeqno = ets:last(Table),
-    NewConfig =
-        case LastSeqno of
-            '$end_of_table' ->
-                undefined;
-            _ ->
-                delete_ordered_table_range(Table, Seqno, LastSeqno),
-                NewLastSeqno = ets:last(Table),
-                case NewLastSeqno of
-                    '$end_of_table' ->
-                        undefined;
-                    _ ->
-                        [Entry] = ets:lookup(Table, NewLastSeqno),
-                        Entry
-                end
-        end,
-
-    Storage#storage{config = NewConfig}.
-
-config_index_compact(#storage{low_seqno = LowSeqno,
-                              config_index_tab = Table}) ->
-    LastSeqno = ets:last(Table),
-    case LastSeqno of
-        '$end_of_table' ->
-            ok;
-        _ when LastSeqno < LowSeqno ->
-            %% Need to preserve the last entry, because otherwise there'll be
-            %% nothing left in the table.
-            delete_ordered_table_range(Table, ?NO_SEQNO, LastSeqno - 1);
-        _ ->
-            delete_ordered_table_range(Table, ?NO_SEQNO, LowSeqno - 1)
+truncate_configs(StartSeqno,
+                 #storage{pending_configs = PendingConfigs,
+                          committed_config = CommittedConfig} = Storage) ->
+    case lists:dropwhile(fun (#log_entry{seqno = Seqno}) ->
+                                 Seqno >= StartSeqno
+                         end, PendingConfigs) of
+        [] ->
+            Storage#storage{pending_configs = [],
+                            config = CommittedConfig};
+        [NewConfig|_] = NewPendingConfigs ->
+            Storage#storage{pending_configs = NewPendingConfigs,
+                            config = NewConfig}
     end.
 
-config_index_append(Entries, #storage{config_index_tab = ConfigIndex,
-                                      config = Config} = Storage) ->
+append_configs(Entries, Storage) ->
     ConfigEntries = lists:filter(fun is_config_entry/1, Entries),
-    NewConfig =
-        case ConfigEntries of
-            [] ->
-                Config;
-            _ ->
-                ets:insert(ConfigIndex, ConfigEntries),
-                lists:last(ConfigEntries)
-        end,
+    case ConfigEntries of
+        [] ->
+            Storage;
+        _ ->
+            PendingConfigs = Storage#storage.pending_configs,
+            NewPendingConfigs = lists:reverse(ConfigEntries) ++ PendingConfigs,
+            NewStorage = Storage#storage{pending_configs = NewPendingConfigs},
+            compact_configs(NewStorage)
+    end.
 
-    Storage#storage{config = NewConfig}.
+compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
+    case PendingConfigs of
+        [] ->
+            Storage;
+        _ ->
+            CommittedSeqno = get_committed_seqno(Storage#storage.meta),
+            case lists:splitwith(fun (#log_entry{seqno = Seqno}) ->
+                                         Seqno > CommittedSeqno
+                                 end, PendingConfigs) of
+                {[_|_], []} ->
+                    Storage;
+                {[], [NewCommittedConfig|_]}->
+                    Storage#storage{pending_configs = [],
+                                    config = NewCommittedConfig,
+                                    committed_config = NewCommittedConfig};
+                {[NewConfig|_] = NewPendingConfigs, [NewCommittedConfig|_]} ->
+                    Storage#storage{pending_configs = NewPendingConfigs,
+                                    config = NewConfig,
+                                    committed_config = NewCommittedConfig}
+            end
+    end.
 
 delete_ordered_table_range(Table, FromKey, ToKey) ->
     StartKey =
@@ -947,11 +918,14 @@ install_snapshot(Seqno, HistoryId, Term, Config, Meta,
                                   Seqno, HistoryId, Term, Config, Meta},
                                  Storage),
 
-    config_index_replace(Config, NewStorage),
+    %% TODO: move managing of this metadata to chronicle_storage
+    Seqno = get_committed_seqno(Meta),
     NewStorage#storage{meta = maps:merge(OldMeta, Meta),
                        low_seqno = Seqno + 1,
                        high_seqno = Seqno,
-                       config = Config}.
+                       config = Config,
+                       committed_config = Config,
+                       pending_configs = []}.
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
@@ -1291,8 +1265,6 @@ do_compact_log(#storage{low_seqno = LowSeqno,
 
     NewStorage = Storage#storage{log_segments = Keep,
                                  low_seqno = NewLowSeqno},
-
-    config_index_compact(NewStorage),
 
     NewStorage.
 

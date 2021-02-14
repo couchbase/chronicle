@@ -1439,8 +1439,7 @@ post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
                         {State, NewData};
                     false ->
                         announce_committed_seqno(NewCommittedSeqno, NewData),
-                        check_got_removed(OldCommittedSeqno,
-                                          NewCommittedSeqno, State, NewData)
+                        check_got_removed(State, OldData, NewData)
                 end;
             _ ->
                 check_state_transitions(State, NewData)
@@ -2071,8 +2070,7 @@ handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, State, Data) ->
                 CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
                 case CommittedSeqno >= PeerSeqno of
                     true ->
-                        ConfigEntry = get_config_for_seqno(CommittedSeqno,
-                                                           Data),
+                        ConfigEntry = get_committed_config(Data),
                         Config = ConfigEntry#log_entry.value,
                         IsPeer = chronicle_config:is_peer(Peer, PeerId, Config),
                         {ok, IsPeer};
@@ -2367,11 +2365,8 @@ get_high_term(#data{storage = Storage}) ->
 get_config(#data{storage = Storage}) ->
     chronicle_storage:get_config(Storage).
 
-get_config_for_seqno(Seqno, #data{storage = Storage}) ->
-    chronicle_storage:get_config_for_seqno(Seqno, Storage).
-
-get_config_for_seqno_range(FromSeqno, ToSeqno, #data{storage = Storage}) ->
-    chronicle_storage:get_config_for_seqno_range(FromSeqno, ToSeqno, Storage).
+get_committed_config(#data{storage = Storage}) ->
+    chronicle_storage:get_committed_config(Storage).
 
 get_latest_snapshot_seqno(#data{storage = Storage}) ->
     chronicle_storage:get_latest_snapshot_seqno(Storage).
@@ -2420,7 +2415,7 @@ initiate_snapshot(Data) ->
     undefined = Data#data.snapshot_state,
 
     CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-    CommittedConfig = get_config_for_seqno(CommittedSeqno, Data),
+    CommittedConfig = get_committed_config(Data),
     CurrentConfig = get_config(Data),
 
     CommittedRSMs = get_rsms(CommittedConfig),
@@ -2518,13 +2513,18 @@ read_rsm_snapshot(Name, Seqno, Storage) ->
             exit({get_rsm_snapshot_failed, Name, Seqno, Error})
     end.
 
-check_got_removed(OldCommittedSeqno, NewCommittedSeqno, State, Data) ->
-    case get_config_for_seqno_range(OldCommittedSeqno + 1,
-                                    NewCommittedSeqno, Data) of
-        {ok, NewConfig} ->
-            check_got_removed_with_config(NewConfig, State, Data);
+check_got_removed(State, OldData, NewData) ->
+    OldConfig = get_committed_config(OldData),
+    NewConfig = get_committed_config(OldData),
+
+    OldRevision = chronicle_utils:log_entry_revision(OldConfig),
+    NewRevision = chronicle_utils:log_entry_revision(NewConfig),
+
+    case OldRevision =:= NewRevision of
+        true ->
+            {State, NewData};
         false ->
-            {State, Data}
+            check_got_removed_with_config(NewConfig, State, NewData)
     end.
 
 check_got_removed(State, Data) ->
@@ -2558,10 +2558,6 @@ mark_removed(Data) ->
     publish_state(NewState, NewData),
     announce_system_state(removed, build_metadata(NewData)),
     {NewState, NewData}.
-
-get_committed_config(Data) ->
-    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-    get_config_for_seqno(CommittedSeqno, Data).
 
 check_state_transitions(State, Data) ->
     {NewState, NewData} = check_join_cluster_done(State, Data),
