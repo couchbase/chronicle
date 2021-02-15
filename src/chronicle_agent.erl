@@ -686,6 +686,9 @@ terminate(_Reason, Data) ->
 
 %% internal
 publish_state(State, Data) ->
+    %% TODO: It's pretty wasteful to publish this on every change when most
+    %% information doesn't change most of the time. Consider optimizing it
+    %% later.
     ExtState = get_external_state(State),
     FullState =
         case ExtState of
