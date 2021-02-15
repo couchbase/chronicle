@@ -86,7 +86,7 @@ open() ->
                         low_seqno = ?NO_SEQNO + 1,
                         high_seqno = ?NO_SEQNO,
                         meta = #{},
-                        snapshots_in_use = gb_trees:empty()},
+                        snapshots_in_use = gb_sets:new()},
 
     try
         DataDir = chronicle_env:data_dir(),
@@ -1084,37 +1084,19 @@ get_and_hold_latest_snapshot(Storage) ->
     end.
 
 hold_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewUseCount =
-        case gb_trees:lookup(Seqno, Snapshots) of
-            none ->
-                1;
-            {value, Value} ->
-                Value + 1
-        end,
-
-    NewSnapshots = gb_trees:enter(Seqno, NewUseCount, Snapshots),
+    NewSnapshots = gb_sets:add_element(Seqno, Snapshots),
     Storage#storage{snapshots_in_use = NewSnapshots}.
 
 release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewUseCount = gb_trees:get(Seqno, Snapshots) - 1,
-
-    NewSnapshots =
-        case NewUseCount =:= 0 of
-            true ->
-                gb_trees:delete(Seqno, Snapshots);
-            false ->
-                gb_trees:update(Seqno, NewUseCount, Snapshots)
-        end,
-
+    NewSnapshots = gb_sets:del_element(Seqno, Snapshots),
     compact(Storage#storage{snapshots_in_use = NewSnapshots}).
 
 get_used_snapshot_seqno(#storage{snapshots_in_use = Snapshots}) ->
-    case gb_trees:is_empty(Snapshots) of
+    case gb_sets:is_empty(Snapshots) of
         true ->
             no_seqno;
         false ->
-            {Seqno, _} = gb_trees:smallest(Snapshots),
-            Seqno
+            gb_sets:smallest(Snapshots)
     end.
 
 get_latest_snapshot(#storage{snapshots = Snapshots}) ->
