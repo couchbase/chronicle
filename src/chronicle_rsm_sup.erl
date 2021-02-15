@@ -21,8 +21,6 @@
 
 -include("chronicle.hrl").
 
--define(SERVER, ?SERVER_NAME(?MODULE)).
-
 -export([start_link/0]).
 -export([init/1, handle_event/2, child_specs/1]).
 
