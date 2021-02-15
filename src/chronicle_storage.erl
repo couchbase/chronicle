@@ -1138,8 +1138,15 @@ compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
                                            fun ({Seqno, _, _, _}) ->
                                                    Seqno >= UsedSeqno
                                            end, DeleteSnapshots0),
+
                         case Used of
                             [] ->
+                                ok;
+                            [_] ->
+                                %% The agent will only release the previous
+                                %% snapshot once the new one is recorded. So
+                                %% it's normal that one extra snapshot may
+                                %% still be held.
                                 ok;
                             _ ->
                                 ?DEBUG("Won't delete some snapshots because "
