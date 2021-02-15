@@ -995,8 +995,8 @@ read_rsm_snapshot_data(SnapshotDir, RSM) ->
             Error
     end.
 
-read_rsm_snapshot(RSM, Seqno, #storage{data_dir = DataDir}) ->
-    SnapshotDir = snapshot_dir(DataDir, Seqno),
+read_rsm_snapshot(RSM, Seqno) ->
+    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
     case read_rsm_snapshot_data(SnapshotDir, RSM) of
         {ok, Data} ->
             {ok, binary_to_term(Data)};
@@ -1106,7 +1106,7 @@ release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
                 gb_trees:update(Seqno, NewUseCount, Snapshots)
         end,
 
-    Storage#storage{snapshots_in_use = NewSnapshots}.
+    compact(Storage#storage{snapshots_in_use = NewSnapshots}).
 
 get_used_snapshot_seqno(#storage{snapshots_in_use = Snapshots}) ->
     case gb_trees:is_empty(Snapshots) of

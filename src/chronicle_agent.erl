@@ -91,8 +91,6 @@
                 rsms_by_name,
                 rsms_by_mref,
 
-                snapshot_readers,
-
                 snapshot_attempts = 0,
                 snapshot_state :: undefined
                                 | {retry, reference()}
@@ -178,46 +176,49 @@ save_rsm_snapshot(Name, Seqno, Snapshot) ->
 
 get_rsm_snapshot(Name) ->
     with_latest_snapshot(
-      fun (Seqno, _HistoryId,_Term, Config, Storage) ->
-              get_rsm_snapshot(Name, Seqno, Config, Storage)
+      fun (Seqno, _HistoryId,_Term, Config) ->
+              get_rsm_snapshot(Name, Seqno, Config)
       end).
 
-get_rsm_snapshot(Name, Seqno, Config, Storage) ->
+get_rsm_snapshot(Name, Seqno, Config) ->
     RSMs = get_rsms(Config),
     case maps:is_key(Name, RSMs) of
         true ->
-            Snapshot = read_rsm_snapshot(Name, Seqno, Storage),
+            Snapshot = read_rsm_snapshot(Name, Seqno),
             {ok, Seqno, Snapshot};
         false ->
             {no_snapshot, Seqno}
     end.
 
 get_full_snapshot() ->
-    with_latest_snapshot(fun get_full_snapshot/5).
+    with_latest_snapshot(fun get_full_snapshot/4).
 
-get_full_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
+get_full_snapshot(Seqno, HistoryId, Term, Config) ->
     RSMs = get_rsms(Config),
     RSMSnapshots =
         maps:map(
           fun (Name, _) ->
-                  Snapshot = read_rsm_snapshot(Name, Seqno, Storage),
+                  Snapshot = read_rsm_snapshot(Name, Seqno),
                   term_to_binary(Snapshot, [compressed])
           end, RSMs),
     {ok, Seqno, HistoryId, Term, Config, RSMSnapshots}.
 
 with_latest_snapshot(Fun) ->
-    case call(?SERVER, {get_latest_snapshot, self()}, 10000) of
-        {ok, Ref, Seqno, HistoryId, Term, Config, Storage} ->
+    case chronicle_snapshot_mgr:get_latest_snapshot() of
+        {ok, Ref, Seqno, HistoryId, Term, Config} ->
             try
-                Fun(Seqno, HistoryId, Term, Config, Storage)
+                Fun(Seqno, HistoryId, Term, Config)
             after
-                gen_statem:cast(?SERVER, {release_snapshot, Ref})
+                chronicle_snapshot_mgr:release_snapshot(Ref)
             end;
         {error, no_snapshot} ->
             {no_snapshot, ?NO_SEQNO};
         {error, Error} ->
             exit(Error)
     end.
+
+release_snapshot(Seqno) ->
+    chronicle_utils:send(?SERVER, {release_snapshot, Seqno}, []).
 
 get_log() ->
     call(?SERVER, get_log).
@@ -604,8 +605,6 @@ init([]) ->
 
 handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
-handle_event(cast, {release_snapshot, Ref}, State, Data) ->
-    handle_release_snapshot(Ref, State, Data);
 handle_event(cast, prepare_wipe_done, State, Data) ->
     handle_prepare_wipe_done(State, Data);
 handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
@@ -616,6 +615,8 @@ handle_event(info, snapshot_timeout, State, Data) ->
     handle_snapshot_timeout(State, Data);
 handle_event(info, retry_snapshot, State, Data) ->
     handle_retry_snapshot(State, Data);
+handle_event(info, {release_snapshot, Seqno}, State, Data) ->
+    handle_release_snapshot(Seqno, State, Data);
 handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
@@ -631,8 +632,6 @@ handle_call({get_term_for_seqno, Seqno}, From, State, Data) ->
     handle_get_term_for_seqno(Seqno, From, State, Data);
 handle_call({register_rsm, Name, Pid}, From, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
-handle_call({get_latest_snapshot, Pid}, From, State, Data) ->
-    handle_get_latest_snapshot(Pid, From, State, Data);
 handle_call({provision, Machines}, From, State, Data) ->
     handle_provision(Machines, From, State, Data);
 handle_call(reprovision, From, State, Data) ->
@@ -842,49 +841,15 @@ maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
             Data
     end.
 
-handle_get_latest_snapshot(Pid, From, State,
-                           #data{snapshot_readers = Readers,
-                                 storage = Storage} = Data) ->
-    case check_provisioned_or_removed(State) of
-        ok ->
-            case get_and_hold_latest_snapshot(Data) of
-                {{Seqno, HistoryId, Term, Config}, NewData0} ->
-                    MRef = erlang:monitor(process, Pid),
-                    NewReaders = Readers#{MRef => Seqno},
-                    NewData = NewData0#data{snapshot_readers = NewReaders},
-                    Reply = {ok, MRef, Seqno, HistoryId, Term, Config, Storage},
+handle_release_snapshot(SnapshotSeqno, _State, Data) ->
+    {keep_state, release_snapshot(SnapshotSeqno, Data)}.
 
-                    {keep_state,
-                     NewData,
-                     {reply, From, Reply}};
-                no_snapshot ->
-                    {keep_state_and_data,
-                     {reply, From, {error, no_snapshot}}}
-            end;
-        {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
-    end.
-
-handle_release_snapshot(MRef, _State,
-                        #data{snapshot_readers = Readers} = Data) ->
-    {SnapshotSeqno, NewReaders} = maps:take(MRef, Readers),
-    erlang:demonitor(MRef, [flush]),
-    {keep_state, release_snapshot(SnapshotSeqno,
-                                  Data#data{snapshot_readers = NewReaders})}.
-
-handle_down(MRef, Pid, Reason, State,
-            #data{rsms_by_mref = MRefs,
-                  snapshot_readers = Readers} = Data) ->
+handle_down(MRef, Pid, Reason, _State, #data{rsms_by_mref = MRefs} = Data) ->
     case maps:find(MRef, MRefs) of
-        error ->
-            case maps:is_key(MRef, Readers) of
-                true ->
-                    handle_release_snapshot(MRef, State, Data);
-                false ->
-                    {stop, {unexpected_process_down, MRef, Pid, Reason}, Data}
-            end;
         {ok, Name} ->
-            {keep_state, handle_rsm_down(Name, MRef, Pid, Data)}
+            {keep_state, handle_rsm_down(Name, MRef, Pid, Data)};
+        error ->
+            {stop, {unexpected_process_down, MRef, Pid, Reason}, Data}
     end.
 
 handle_rsm_down(Name, MRef, Pid, #data{rsms_by_name = RSMs,
@@ -1138,13 +1103,14 @@ handle_prepare_wipe_done(State, Data) ->
 
     %% All RSMs and snapshot readers should be stopped by now, but it's
     %% possible(?) that we haven't processed all DOWN messages yet.
-    MRefs =
-        maps:keys(Data#data.snapshot_readers) ++
-        maps:keys(Data#data.rsms_by_mref),
+    MRefs = maps:keys(Data#data.rsms_by_mref),
     lists:foreach(
       fun (MRef) ->
               erlang:demonitor(MRef, [flush])
       end, MRefs),
+
+    chronicle_snapshot_mgr:wipe(),
+    ?FLUSH({release_snapshot, _}),
 
     ?INFO("Wiping"),
     chronicle_storage:close(Data#data.storage),
@@ -2146,10 +2112,18 @@ check_log_range(StartSeqno, EndSeqno, Data) ->
     end.
 
 init_data() ->
-    #data{storage = storage_open(),
-          rsms_by_name = #{},
-          rsms_by_mref = #{},
-          snapshot_readers = #{}}.
+    pass_snapshot_to_mgr(#data{storage = storage_open(),
+                               rsms_by_name = #{},
+                               rsms_by_mref = #{}}).
+
+pass_snapshot_to_mgr(Data) ->
+    case get_and_hold_latest_snapshot(Data) of
+        {Snapshot, NewData} ->
+            chronicle_snapshot_mgr:store_snapshot(Snapshot),
+            NewData;
+        no_snapshot ->
+            Data
+    end.
 
 get_state_path() ->
     case application:get_env(chronicle, data_dir) of
@@ -2322,7 +2296,7 @@ record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
                 #data{storage = Storage} = Data) ->
     NewStorage = chronicle_storage:record_snapshot(Seqno, HistoryId, Term,
                                                    ConfigEntry, Storage),
-    Data#data{storage = NewStorage}.
+    pass_snapshot_to_mgr(Data#data{storage = NewStorage}).
 
 install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                  RSMSnapshots, Metadata, #data{storage = Storage} = Data) ->
@@ -2338,7 +2312,7 @@ install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                                            SnapshotHistoryId, SnapshotTerm,
                                            SnapshotConfig, Metadata, Storage),
     chronicle_storage:sync(NewStorage),
-    Data#data{storage = publish_storage(NewStorage)}.
+    pass_snapshot_to_mgr(Data#data{storage = publish_storage(NewStorage)}).
 
 get_peer_name() ->
     Peer = ?PEER(),
@@ -2504,8 +2478,8 @@ cancel_snapshot(#data{snapshot_state = SnapshotState,
 get_rsms(#log_entry{value = Config}) ->
     chronicle_config:get_rsms(Config).
 
-read_rsm_snapshot(Name, Seqno, Storage) ->
-    case chronicle_storage:read_rsm_snapshot(Name, Seqno, Storage) of
+read_rsm_snapshot(Name, Seqno) ->
+    case chronicle_storage:read_rsm_snapshot(Name, Seqno) of
         {ok, Snapshot} ->
             Snapshot;
         {error, Error} ->
