@@ -830,8 +830,9 @@ check_provisioned_or_removed(State) ->
             {error, {bad_state, get_external_state(State)}}
     end.
 
-check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
-    case check_provisioned_or_removed(State) of
+check_register_rsm(Name, State, #data{rsms_by_name = RSMs} = Data) ->
+    case ?CHECK(check_provisioned_or_removed(State),
+                check_existing_rsm(Name, Data)) of
         ok ->
             case maps:find(Name, RSMs) of
                 {ok, {_, OtherPid}} ->
@@ -846,6 +847,21 @@ check_register_rsm(Name, State, #data{rsms_by_name = RSMs}) ->
             end;
         {error, _} = Error ->
             Error
+    end.
+
+check_existing_rsm(Name, Data) ->
+    %% TODO: change it to use committed config
+    case get_config(Data) of
+        undefined ->
+            {error, {unknown_rsm, Name, []}};
+        Config ->
+            RSMs = get_rsms(Config),
+            case maps:is_key(Name, RSMs) of
+                true ->
+                    ok;
+                false ->
+                    {error, {unknown_rsm, Name, maps:keys(RSMs)}}
+            end
     end.
 
 maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
