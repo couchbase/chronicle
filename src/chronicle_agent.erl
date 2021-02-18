@@ -912,6 +912,9 @@ handle_snapshot_failed(_State,
     ?ERROR("Failed to take snapshot at seqno ~p. "
            "~p attempts remaining.~nSnapshot state:~n~p",
            [Seqno, AttemptsRemaining, SnapshotState]),
+
+    chronicle_storage:delete_snapshot(Seqno, Storage),
+
     NewData = Data#data{snapshot_attempts = NewAttempts},
     case AttemptsRemaining > 0 of
         true ->
