@@ -930,12 +930,8 @@ install_snapshot(Seqno, HistoryId, Term, Config, Meta,
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
 
-save_rsm_snapshot(Seqno, RSM, RSMState,
-                  #storage{data_dir = DataDir, snapshots = Snapshots}) ->
-    %% Make sure we are not overwriting an existing snapshot.
-    false = lists:keymember(Seqno, 1, Snapshots),
-
-    SnapshotDir = snapshot_dir(DataDir, Seqno),
+save_rsm_snapshot(Seqno, RSM, RSMState) ->
+    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
     ok = chronicle_utils:mkdir_p(SnapshotDir),
 
     Path = rsm_snapshot_path(SnapshotDir, RSM),
