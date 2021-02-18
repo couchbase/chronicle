@@ -186,11 +186,22 @@ handle_cancel_pending_snapshot(Seqno,
     end.
 
 handle_get_snapshot_saver(RSM, RSMPid, Seqno, State) ->
-    case need_snapshot(RSM, Seqno, State) of
-        true ->
-            Snapshot = State#state.pending_snapshot,
-            {Pid, NewSnapshot} = spawn_snapshot_saver(RSM, RSMPid, Snapshot),
-            {reply, {ok, Pid}, State#state{pending_snapshot = NewSnapshot}};
+    case need_snapshot(RSM, State) of
+        {true, NeededSeqno} ->
+            %% It's a bug if an RSM comes to us with a snapshot we're not yet
+            %% aware of
+            true = (NeededSeqno >= Seqno),
+
+            case NeededSeqno =:= Seqno of
+                true ->
+                    Snapshot = State#state.pending_snapshot,
+                    {Pid, NewSnapshot} =
+                        spawn_snapshot_saver(RSM, RSMPid, Snapshot),
+                    {reply, {ok, Pid},
+                     State#state{pending_snapshot = NewSnapshot}};
+                false ->
+                    {reply, {error, rejected}, State}
+            end;
         false ->
             {reply, {error, rejected}, State}
     end.
@@ -242,13 +253,18 @@ snapshot_saver(RSM, RSMPid, Seqno) ->
             failed
     end.
 
-need_snapshot(RSM, Seqno, #state{pending_snapshot = Snapshot}) ->
+need_snapshot(RSM, #state{pending_snapshot = Snapshot}) ->
     case Snapshot of
         undefined ->
             false;
         #pending_snapshot{seqno = SnapshotSeqno,
                           remaining_rsms = RSMs} ->
-            Seqno =:= SnapshotSeqno andalso sets:is_element(RSM, RSMs)
+            case sets:is_element(RSM, RSMs) of
+                true ->
+                    {true, SnapshotSeqno};
+                false ->
+                    false
+            end
     end.
 
 handle_snapshot_result(RSM, Pid, Result, State) ->
