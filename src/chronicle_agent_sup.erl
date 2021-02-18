@@ -28,7 +28,10 @@ start_link() ->
 %% callbacks
 init([]) ->
     Flags = #{strategy => one_for_all,
-              intensity => 3,
+              %% Make sure that everything following chronicle_agent_sup in
+              %% the top-level supervisor restarts if any of the processes
+              %% here crash.
+              intensity => 0,
               period => 10},
     {ok, {Flags, child_specs()}}.
 
