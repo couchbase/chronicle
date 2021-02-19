@@ -166,11 +166,11 @@ note_term_established(Pid, HistoryId, Term, Seqno) ->
 note_term_finished(Pid, HistoryId, Term) ->
     gen_statem:cast(Pid, {term_finished, HistoryId, Term}).
 
-note_seqno_committed(Pid, Seqno) ->
-    gen_statem:cast(Pid, {seqno_committed, Seqno}).
+note_seqno_committed(Name, Seqno) ->
+    gen_statem:cast(?SERVER(Name), {seqno_committed, Seqno}).
 
-take_snapshot(Pid, Seqno) ->
-    gen_statem:cast(Pid, {take_snapshot, Seqno}).
+take_snapshot(Name, Seqno) ->
+    gen_statem:cast(?SERVER(Name), {take_snapshot, Seqno}).
 
 %% gen_statem callbacks
 callback_mode() ->
@@ -213,7 +213,7 @@ init([Name, Mod, ModArgs]) ->
                           mod_state = ModState,
                           mod_data = ModData},
             Data = maybe_restore_snapshot(Data0),
-            {State, Effects} = register_with_agent(Data0),
+            {State, Effects} = init_from_agent(Data0),
 
             {ok, State, Data,
              [{state_timeout, ?INIT_TIMEOUT, init_timeout} | Effects]};
@@ -802,8 +802,9 @@ local_revision(#data{applied_history_id = AppliedHistoryId,
                      applied_seqno = AppliedSeqno}) ->
     {AppliedHistoryId, AppliedSeqno}.
 
-register_with_agent(#data{name = Name} = Data) ->
-    {ok, Info} = chronicle_agent:register_rsm(Name, self()),
+init_from_agent(#data{name = Name} = Data) ->
+    %% TODO: deal with {error, no_rsm}
+    {ok, Info} = chronicle_agent:get_info_for_rsm(Name),
     #{committed_seqno := CommittedSeqno} = Info,
 
     true = (Data#data.read_seqno =< CommittedSeqno),

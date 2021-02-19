@@ -85,8 +85,6 @@
 -record(join_cluster, { from, config, seqno }).
 
 -record(data, { storage,
-                rsms_by_name,
-                rsms_by_mref,
 
                 snapshot_attempts = 0,
                 snapshot_state :: undefined
@@ -158,8 +156,32 @@ check_grant_vote(HistoryId, Position) ->
             end
     end.
 
-register_rsm(Name, Pid) ->
-    call(?SERVER, {register_rsm, Name, Pid}, 10000).
+get_info_for_rsm(Name) ->
+    case get_system_state() of
+        {State, Metadata} when State =:= provisioned;
+                               State =:= removed ->
+            %% TODO: change it to use committed config
+            case check_existing_rsm(Name, Metadata#metadata.config) of
+                ok ->
+                    Info0 =
+                        #{committed_seqno => Metadata#metadata.committed_seqno},
+                    Info =
+                        case chronicle_snapshot_mgr:need_snapshot(Name) of
+                            {true, Seqno} ->
+                                Info0#{need_snapshot_seqno => Seqno};
+                            false ->
+                                Info0
+                        end,
+
+                    {ok, Info};
+                {error, no_rsm} = Error ->
+                    Error
+            end;
+        {State, _} ->
+            exit({bad_state, State});
+        State ->
+            exit({bad_state, State})
+    end.
 
 save_rsm_snapshot(Name, Seqno, Snapshot) ->
     chronicle_snapshot_mgr:save_snapshot(Name, Seqno, Snapshot).
@@ -608,8 +630,6 @@ handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
 handle_event(cast, prepare_wipe_done, State, Data) ->
     handle_prepare_wipe_done(State, Data);
-handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
-    handle_down(MRef, Pid, Reason, State, Data);
 handle_event(info, snapshot_timeout, State, Data) ->
     handle_snapshot_timeout(State, Data);
 handle_event(info, retry_snapshot, State, Data) ->
@@ -634,8 +654,6 @@ handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data);
 handle_call({get_term_for_seqno, Seqno}, From, State, Data) ->
     handle_get_term_for_seqno(Seqno, From, State, Data);
-handle_call({register_rsm, Name, Pid}, From, State, Data) ->
-    handle_register_rsm(Name, Pid, From, State, Data);
 handle_call({provision, Machines}, From, State, Data) ->
     handle_provision(Machines, From, State, Data);
 handle_call(reprovision, From, State, Data) ->
@@ -778,120 +796,21 @@ handle_get_term_for_seqno(Seqno, From, _State,
 
     {keep_state_and_data, {reply, From, Reply}}.
 
-handle_register_rsm(Name, Pid, From, State,
-                    #data{rsms_by_name = RSMs,
-                          rsms_by_mref = MRefs} = Data) ->
-    case check_register_rsm(Name, State, Data) of
-        ok ->
-            NewData0 = maybe_cleanup_old_rsm(Name, Data),
-
-            ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
-
-            MRef = erlang:monitor(process, Pid),
-            NewRSMs = RSMs#{Name => {MRef, Pid}},
-            NewMRefs = MRefs#{MRef => Name},
-
-            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, NewData0),
-            Info0 = #{committed_seqno => CommittedSeqno},
-            Info1 = case need_snapshot(NewData0) of
-                        {true, NeedSnapshotSeqno} ->
-                            Info0#{need_snapshot_seqno => NeedSnapshotSeqno};
-                        false ->
-                            Info0
-                    end,
-
-            Reply = {ok, Info1},
-            NewData = NewData0#data{rsms_by_name = NewRSMs,
-                                    rsms_by_mref = NewMRefs},
-
-            {keep_state, NewData, {reply, From, Reply}};
-        {error, Error} ->
-            ?DEBUG("Ingored register_rsm for ~w<~w>: ~w", [Name, Pid, Error]),
-            keep_state_and_data
-    end.
-
-need_snapshot(#data{snapshot_state = SnapshotState}) ->
-    case SnapshotState of
+check_existing_rsm(Name, Config) ->
+    case Config of
         undefined ->
-            false;
-        {retry, _} ->
-            false;
-        #snapshot_state{seqno = SnapshotSeqno} ->
-            {true, SnapshotSeqno}
-    end.
-
-check_provisioned_or_removed(State) ->
-    case State of
-        provisioned ->
-            ok;
-        removed ->
-            ok;
-        _ ->
-            {error, {bad_state, get_external_state(State)}}
-    end.
-
-check_register_rsm(Name, State, #data{rsms_by_name = RSMs} = Data) ->
-    case ?CHECK(check_provisioned_or_removed(State),
-                check_existing_rsm(Name, Data)) of
-        ok ->
-            case maps:find(Name, RSMs) of
-                {ok, {_, OtherPid}} ->
-                    case is_process_alive(OtherPid) of
-                        true ->
-                            {error, {already_registered, Name, OtherPid}};
-                        false ->
-                            ok
-                    end;
-                error ->
-                    ok
-            end;
-        {error, _} = Error ->
-            Error
-    end.
-
-check_existing_rsm(Name, Data) ->
-    %% TODO: change it to use committed config
-    case get_config(Data) of
-        undefined ->
-            {error, {unknown_rsm, Name, []}};
+            {error, no_rsm};
         Config ->
-            RSMs = get_rsms(Config),
-            case maps:is_key(Name, RSMs) of
+            case maps:is_key(Name, get_rsms(Config)) of
                 true ->
                     ok;
                 false ->
-                    {error, {unknown_rsm, Name, maps:keys(RSMs)}}
+                    {error, no_rsm}
             end
-    end.
-
-maybe_cleanup_old_rsm(Name, #data{rsms_by_name = RSMs} = Data) ->
-    case maps:find(Name, RSMs) of
-        {ok, {MRef, Pid}} ->
-            handle_rsm_down(Name, MRef, Pid, Data);
-        error ->
-            Data
     end.
 
 handle_release_snapshot(SnapshotSeqno, _State, Data) ->
     {keep_state, release_snapshot(SnapshotSeqno, Data)}.
-
-handle_down(MRef, Pid, Reason, _State, #data{rsms_by_mref = MRefs} = Data) ->
-    case maps:find(MRef, MRefs) of
-        {ok, Name} ->
-            {keep_state, handle_rsm_down(Name, MRef, Pid, Data)};
-        error ->
-            {stop, {unexpected_process_down, MRef, Pid, Reason}, Data}
-    end.
-
-handle_rsm_down(Name, MRef, Pid, #data{rsms_by_name = RSMs,
-                                       rsms_by_mref = MRefs} = Data) ->
-    ?DEBUG("RSM ~p~p terminated", [Name, Pid]),
-
-    erlang:demonitor(MRef, [flush]),
-    NewRSMs = maps:remove(Name, RSMs),
-    NewMRefs = maps:remove(MRef, MRefs),
-
-    Data#data{rsms_by_name = NewRSMs, rsms_by_mref = NewMRefs}.
 
 handle_snapshot_result(Seqno, Result, State,
                        #data{snapshot_state = SnapshotState} = Data) ->
@@ -950,11 +869,17 @@ handle_retry_snapshot(_State, Data) ->
     {retry, _} = Data#data.snapshot_state,
     {keep_state, initiate_snapshot(Data#data{snapshot_state = undefined})}.
 
-foreach_rsm(Fun, #data{rsms_by_name = RSMs}) ->
-    chronicle_utils:maps_foreach(
-      fun (Name, {_, Pid}) ->
-              Fun(Name, Pid)
-      end, RSMs).
+foreach_rsm(Fun, Data) ->
+    case get_config(Data) of
+        undefined ->
+            ok;
+        Config ->
+            RSMs = get_rsms(Config),
+            chronicle_utils:maps_foreach(
+              fun (Name, _) ->
+                      Fun(Name)
+              end, RSMs)
+    end.
 
 handle_reprovision(From, State, Data) ->
     case check_reprovision(State, Data) of
@@ -1124,14 +1049,6 @@ handle_prepare_wipe_done(State, Data) ->
     undefined = Data#data.snapshot_state,
 
     {wiping, From} = Data#data.wipe_state,
-
-    %% All RSMs and snapshot readers should be stopped by now, but it's
-    %% possible(?) that we haven't processed all DOWN messages yet.
-    MRefs = maps:keys(Data#data.rsms_by_mref),
-    lists:foreach(
-      fun (MRef) ->
-              erlang:demonitor(MRef, [flush])
-      end, MRefs),
 
     chronicle_snapshot_mgr:wipe(),
     flush_snapshot_mgr_msgs(),
@@ -2049,9 +1966,7 @@ check_log_range(StartSeqno, EndSeqno, Data) ->
     end.
 
 init_data() ->
-    pass_snapshot_to_mgr(#data{storage = storage_open(),
-                               rsms_by_name = #{},
-                               rsms_by_mref = #{}}).
+    pass_snapshot_to_mgr(#data{storage = storage_open()}).
 
 pass_snapshot_to_mgr(Data) ->
     case get_and_hold_latest_snapshot(Data) of
@@ -2149,8 +2064,8 @@ announce_new_config(Data) ->
 
 announce_committed_seqno(CommittedSeqno, Data) ->
     foreach_rsm(
-      fun (_Name, Pid) ->
-              chronicle_rsm:note_seqno_committed(Pid, CommittedSeqno)
+      fun (Name) ->
+              chronicle_rsm:note_seqno_committed(Name, CommittedSeqno)
       end, Data).
 
 announce_system_state(SystemState) ->
@@ -2352,8 +2267,8 @@ initiate_snapshot(Data) ->
     RSMs = maps:keys(CommittedRSMs),
     chronicle_snapshot_mgr:pending_snapshot(CommittedSeqno, RSMs),
     foreach_rsm(
-      fun (_Name, Pid) ->
-              chronicle_rsm:take_snapshot(Pid, CommittedSeqno)
+      fun (Name) ->
+              chronicle_rsm:take_snapshot(Name, CommittedSeqno)
       end, Data),
 
     ?INFO("Taking snapshot at seqno ~p.~n"

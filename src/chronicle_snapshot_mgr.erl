@@ -20,7 +20,7 @@
 -export([start_link/0]).
 -export([get_latest_snapshot/0, release_snapshot/1, store_snapshot/1]).
 -export([pending_snapshot/2, cancel_pending_snapshot/1, save_snapshot/3]).
--export([wipe/0]).
+-export([need_snapshot/1, wipe/0]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -76,6 +76,9 @@ save_snapshot(Name, Seqno, Snapshot) ->
                   "sequence number ~p got rejected.", [Name, Seqno])
     end.
 
+need_snapshot(Name) ->
+    gen_server:call(?SERVER, {need_snapshot, Name}, ?TIMEOUT).
+
 wipe() ->
     ok = gen_server:call(?SERVER, wipe, ?TIMEOUT).
 
@@ -91,6 +94,8 @@ handle_call({get_snapshot_saver, RSM, RSMPid, Seqno}, _From, State) ->
     handle_get_snapshot_saver(RSM, RSMPid, Seqno, State);
 handle_call({cancel_pending_snapshot, Seqno}, _From, State) ->
     handle_cancel_pending_snapshot(Seqno, State);
+handle_call({need_snapshot, RSM}, _From, State) ->
+    {reply, need_snapshot(RSM, State), State};
 handle_call(wipe, _From, State) ->
     handle_wipe(State);
 handle_call(_Call, _From, State) ->
