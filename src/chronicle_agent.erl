@@ -248,6 +248,11 @@ get_log() ->
 
 -type get_log_committed_result() :: {ok, [#log_entry{}]} | {error, compacted}.
 
+-spec get_log_committed(chronicle:seqno()) -> get_log_committed_result().
+get_log_committed(StartSeqno) ->
+    #metadata{committed_seqno = CommittedSeqno} = get_metadata(),
+    get_log_committed(StartSeqno, CommittedSeqno).
+
 -spec get_log_committed(chronicle:seqno(), chronicle:seqno()) ->
           get_log_committed_result().
 get_log_committed(StartSeqno, EndSeqno) ->
