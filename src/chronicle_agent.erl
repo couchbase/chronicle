@@ -443,7 +443,8 @@ append(Peer, Opaque, HistoryId, Term,
                 CommittedSeqno, AtTerm, AtSeqno, Entries},
                Options).
 
--type install_snapshot_result() :: ok | {error, install_snapshot_error()}.
+-type install_snapshot_result() :: {ok, #metadata{}}
+                                 | {error, install_snapshot_error()}.
 -type install_snapshot_error() ::
         {bad_state, not_provisioned | removed} |
         {history_mismatch, chronicle:history_id()} |
