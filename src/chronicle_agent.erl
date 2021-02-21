@@ -246,6 +246,10 @@ snapshot_result(Seqno, Result) ->
 get_log() ->
     call(?SERVER, get_log).
 
+-type get_log_committed_result() :: {ok, [#log_entry{}]} | {error, compacted}.
+
+-spec get_log_committed(chronicle:seqno(), chronicle:seqno()) ->
+          get_log_committed_result().
 get_log_committed(StartSeqno, EndSeqno) ->
     chronicle_storage:get_log_committed(StartSeqno, EndSeqno).
 
