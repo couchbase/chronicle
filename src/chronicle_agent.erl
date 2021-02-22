@@ -56,6 +56,8 @@
 -define(JOIN_CLUSTER_TIMEOUT,
         chronicle_settings:get({agent, join_cluster_timeout}, 120000)).
 
+-define(APPEND_TIMEOUT,
+        chronicle_settings:get({agent, install_snapshot_timeout}, 120000)).
 -define(INSTALL_SNAPSHOT_TIMEOUT,
         chronicle_settings:get({agent, install_snapshot_timeout}, 120000)).
 
@@ -246,15 +248,19 @@ snapshot_result(Seqno, Result) ->
 get_log() ->
     call(?SERVER, get_log).
 
--type get_log_committed_result() :: {ok, [#log_entry{}]} | {error, compacted}.
-
--spec get_log_committed(chronicle:seqno()) -> get_log_committed_result().
+-spec get_log_committed(chronicle:seqno()) ->
+          {ok, chronicle:seqno(), [#log_entry{}]} | {error, compacted}.
 get_log_committed(StartSeqno) ->
     #metadata{committed_seqno = CommittedSeqno} = get_metadata(),
-    get_log_committed(StartSeqno, CommittedSeqno).
+    case get_log_committed(StartSeqno, CommittedSeqno) of
+        {ok, Entries} ->
+            {ok, CommittedSeqno, Entries};
+        {error, _} = Error ->
+            Error
+    end.
 
 -spec get_log_committed(chronicle:seqno(), chronicle:seqno()) ->
-          get_log_committed_result().
+          {ok, [#log_entry{}]} | {error, compacted}.
 get_log_committed(StartSeqno, EndSeqno) ->
     case StartSeqno > EndSeqno of
         true ->
@@ -456,6 +462,19 @@ append(Peer, Opaque, HistoryId, Term,
                {append, HistoryId, Term,
                 CommittedSeqno, AtTerm, AtSeqno, Entries},
                Options).
+
+-spec append(peer(),
+             chronicle:history_id(),
+             chronicle:leader_term(),
+             chronicle:seqno(),
+             chronicle:leader_term(),
+             chronicle:seqno(),
+             [#log_entry{}]) -> append_result().
+append(Peer, HistoryId, Term,
+       CommittedSeqno, AtTerm, AtSeqno, Entries) ->
+    call(?SERVER(Peer),
+         {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
+         ?APPEND_TIMEOUT).
 
 -type install_snapshot_result() :: {ok, #metadata{}}
                                  | {error, install_snapshot_error()}.

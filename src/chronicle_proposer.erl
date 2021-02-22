@@ -897,8 +897,8 @@ sync_quorum_reply_not_leader(#data{sync_requests = SyncRequests} = Data) ->
 
 handle_catchup_result(Peer, Result, proposing = State, Data) ->
     case Result of
-        {ok, Metadata} ->
-            set_peer_catchup_done(Peer, Metadata, Data),
+        {ok, SentCommittedSeqno} ->
+            set_peer_catchup_done(Peer, SentCommittedSeqno, Data),
             {keep_state, replicate(Peer, Data)};
         {error, Error} ->
             case handle_common_error(Peer, Error, Data) of
@@ -1428,11 +1428,11 @@ set_peer_active(Peer, Metadata, Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     %% We should never overwrite an existing peer status.
     status_requested = PeerStatus#peer_status.state,
-    do_set_peer_active(Peer, PeerStatus, Metadata, Data).
+    set_peer_active(Peer, PeerStatus, Metadata, Data).
 
-do_set_peer_active(Peer, PeerStatus, Metadata,
-                   #data{committed_seqno = CommittedSeqno,
-                         high_seqno = HighSeqno} = Data) ->
+set_peer_active(Peer, PeerStatus, Metadata,
+                #data{committed_seqno = CommittedSeqno,
+                      high_seqno = HighSeqno} = Data) ->
     #metadata{committed_seqno = PeerCommittedSeqno,
               high_term = PeerHighTerm,
               high_seqno = PeerHighSeqno} = Metadata,
@@ -1465,11 +1465,14 @@ do_set_peer_active(Peer, PeerStatus, Metadata,
                 {PeerCommittedSeqno, PeerCommittedSeqno}
         end,
 
+    set_peer_active(Peer, PeerStatus, SentHighSeqno, SentCommittedSeqno, Data).
+
+set_peer_active(Peer, PeerStatus, HighSeqno, CommittedSeqno, Data) ->
     NewPeerStatus = PeerStatus#peer_status{
-                      acked_seqno = SentHighSeqno,
-                      sent_seqno = SentHighSeqno,
-                      acked_commit_seqno = SentCommittedSeqno,
-                      sent_commit_seqno = SentCommittedSeqno,
+                      acked_seqno = HighSeqno,
+                      sent_seqno = HighSeqno,
+                      acked_commit_seqno = CommittedSeqno,
+                      sent_commit_seqno = CommittedSeqno,
                       state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
 
@@ -1507,10 +1510,11 @@ set_peer_catchup(Peer, Data) ->
               PeerStatus#peer_status{state = catchup}
       end, Data).
 
-set_peer_catchup_done(Peer, Metadata, Data) ->
+set_peer_catchup_done(Peer, SentCommittedSeqno, Data) ->
     {ok, PeerStatus} = get_peer_status(Peer, Data),
     catchup = PeerStatus#peer_status.state,
-    do_set_peer_active(Peer, PeerStatus, Metadata, Data).
+    set_peer_active(Peer, PeerStatus,
+                    SentCommittedSeqno, SentCommittedSeqno, Data).
 
 set_peer_acked_sync_round(Peer, Round, Data) ->
     update_peer_status(

@@ -145,7 +145,23 @@ spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
 
 do_catchup(Peer, PeerSeqno, State) ->
     Snapshot = get_full_snapshot(PeerSeqno),
-    install_snapshot(Peer, Snapshot, State).
+    case install_snapshot(Peer, Snapshot, State) of
+        {ok, _} ->
+            {SnapshotSeqno, _, SnapshotTerm, _, _} = Snapshot,
+            case chronicle_agent:get_log_committed(SnapshotSeqno + 1) of
+                {ok, _, []} ->
+                    {ok, SnapshotSeqno};
+                {ok, CommittedSeqno, Entries} ->
+                    append(Peer, CommittedSeqno,
+                           SnapshotTerm, SnapshotSeqno, Entries, State);
+                {error, compacted} ->
+                    %% Pretend everything went find and let the proposer
+                    %% schedule another catchup.
+                    {ok, SnapshotSeqno}
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 get_full_snapshot(PeerSeqno) ->
     case chronicle_agent:get_full_snapshot() of
@@ -165,6 +181,16 @@ install_snapshot(Peer,
                                      SnapshotSeqno,
                                      SnapshotHistoryId, SnapshotTerm,
                                      SnapshotConfig, RSMSnapshots).
+
+append(Peer, CommittedSeqno, AtTerm, AtSeqno, Entries,
+       #state{history_id = HistoryId, term = Term}) ->
+    case chronicle_agent:append(Peer, HistoryId, Term,
+                                CommittedSeqno, AtTerm, AtSeqno, Entries) of
+        ok ->
+            {ok, CommittedSeqno};
+        {error, _} = Error ->
+            Error
+    end.
 
 cancel_active(Peer, #state{pids = Pids} = State) ->
     NewPids =
