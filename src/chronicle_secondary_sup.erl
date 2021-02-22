@@ -88,11 +88,12 @@ child_specs(joining_cluster) ->
 child_specs(removed) ->
     child_specs(provisioned);
 child_specs(provisioned) ->
-    Status = #{id => chronicle_status,
-               start => {chronicle_status, start_link, []},
-               restart => permanent,
-               shutdown => brutal_kill,
-               type => worker},
+    RestartableSup = #{id => chronicle_secondary_restartable_sup,
+                       start => {chronicle_secondary_restartable_sup,
+                                 start_link, []},
+                       restart => permanent,
+                       shutdown => infinity,
+                       type => supervisor},
 
     Server = #{id => chronicle_server,
                start => {chronicle_server, start_link, []},
@@ -100,16 +101,10 @@ child_specs(provisioned) ->
                shutdown => 5000,
                type => worker},
 
-    Failover = #{id => chronicle_failover,
-                 start => {chronicle_failover, start_link, []},
-                 restart => permanent,
-                 shutdown => 5000,
-                 type => worker},
-
     RSMSup = #{id => chronicle_rsm_sup,
                start => {chronicle_rsm_sup, start_link, []},
                restart => permanent,
                shutdown => infinity,
                type => supervisor},
 
-    child_specs(joining_cluster) ++ [Status, Server, Failover, RSMSup].
+    child_specs(joining_cluster) ++ [RestartableSup, Server, RSMSup].
