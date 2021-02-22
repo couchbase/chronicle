@@ -723,22 +723,17 @@ read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
     end.
 
 get_log(StartSeqno, EndSeqno, #data{name = Name}) ->
-    case StartSeqno > EndSeqno of
-        true ->
-            {ok, []};
-        false ->
-            case chronicle_agent:get_log_for_rsm(Name, StartSeqno, EndSeqno) of
-                {ok, _} = Ok ->
-                    Ok;
-                {error, compacted} = Error ->
-                    Error;
-                {error, Error} ->
-                    ?ERROR("Unexpected error reading log for RSM ~p: ~p.~n"
-                           "Start seqno: ~p~n"
-                           "End seqno: ~p",
-                           [Name, Error, StartSeqno, EndSeqno]),
-                    exit({read_log_error, Name, Error, StartSeqno, EndSeqno})
-            end
+    case chronicle_agent:get_log_for_rsm(Name, StartSeqno, EndSeqno) of
+        {ok, _} = Ok ->
+            Ok;
+        {error, compacted} = Error ->
+            Error;
+        {error, Error} ->
+            ?ERROR("Unexpected error reading log for RSM ~p: ~p.~n"
+                   "Start seqno: ~p~n"
+                   "End seqno: ~p",
+                   [Name, Error, StartSeqno, EndSeqno]),
+            exit({read_log_error, Name, Error, StartSeqno, EndSeqno})
     end.
 
 submit_command(Command, From,

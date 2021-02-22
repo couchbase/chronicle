@@ -256,7 +256,12 @@ get_log_committed(StartSeqno) ->
 -spec get_log_committed(chronicle:seqno(), chronicle:seqno()) ->
           get_log_committed_result().
 get_log_committed(StartSeqno, EndSeqno) ->
-    chronicle_storage:get_log_committed(StartSeqno, EndSeqno).
+    case StartSeqno > EndSeqno of
+        true ->
+            {ok, []};
+        false ->
+            chronicle_storage:get_log_committed(StartSeqno, EndSeqno)
+    end.
 
 get_log_for_rsm(Name, StartSeqno, EndSeqno) ->
     %% TODO: avoid O(NumberOfStateMachines * NumberOfEntries) complexity.
