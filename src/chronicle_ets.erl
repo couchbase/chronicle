@@ -65,9 +65,9 @@ handle_info({'DOWN', _MRef, process, Pid, _Reason}, State) ->
 handle_register_writer(Pid, Keys, Writers) ->
     case ?CHECK(check_not_registered(Pid, Writers),
                 check_key_conflicts(Keys, Writers)) of
-        ok ->
+        {ok, NewWriters0} ->
             erlang:monitor(process, Pid),
-            NewWriters = maps:put(Pid, Keys, Writers),
+            NewWriters = maps:put(Pid, Keys, NewWriters0),
             {reply, ok, NewWriters};
         {error, _} = Error ->
             {reply, Error, Writers}
@@ -83,8 +83,9 @@ check_not_registered(Pid, Writers) ->
 
 check_key_conflicts(Keys, Writers) ->
     try
-        chronicle_utils:maps_foreach(
-          fun (Pid, PidKeys) ->
+        NewWriters =
+            maps:filter(
+              fun (Pid, PidKeys) ->
                   Intersection = sets:intersection(Keys, PidKeys),
                   case sets:size(Intersection) > 0 of
                       true ->
@@ -98,16 +99,17 @@ check_key_conflicts(Keys, Writers) ->
                                   %% received/processed the monitor
                                   %% notification yet. Other processes might
                                   %% have done so already. So don't error out
-                                  %% unnecessarily. We'll eventually see the
-                                  %% DOWN message.
-                                  ok
+                                  %% unnecessarily.
+                                  erlang:demonitor(Pid, [flush]),
+                                  delete_keys(PidKeys),
+                                  false
                           end;
                       false ->
-                          ok
+                          true
                   end
           end, Writers),
 
-        ok
+        {ok, NewWriters}
     catch
         throw:{key_conflict, _Pid, _ConflictKeys} = Error ->
             {error, Error}
@@ -115,9 +117,11 @@ check_key_conflicts(Keys, Writers) ->
 
 handle_down(Pid, Writers) ->
     {Keys, NewWriters} = maps:take(Pid, Writers),
+    delete_keys(Keys),
+    {noreply, NewWriters}.
+
+delete_keys(Keys) ->
     lists:foreach(
       fun (Key) ->
               ets:delete(?TABLE, Key)
-      end, sets:to_list(Keys)),
-
-    {noreply, NewWriters}.
+      end, sets:to_list(Keys)).
