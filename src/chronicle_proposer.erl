@@ -898,6 +898,7 @@ sync_quorum_reply_not_leader(#data{sync_requests = SyncRequests} = Data) ->
 handle_catchup_result(Peer, Result, proposing = State, Data) ->
     case Result of
         {ok, SentCommittedSeqno} ->
+            ?DEBUG("Caught up peer ~w to seqno ~b", [Peer, SentCommittedSeqno]),
             set_peer_catchup_done(Peer, SentCommittedSeqno, Data),
             {keep_state, replicate(Peer, Data)};
         {compacted, PeerSeqno} ->
@@ -1668,6 +1669,8 @@ catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
               {ok, Ref} = get_peer_monitor(Peer, NewData),
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               Opaque = make_agent_opaque(Ref, Peer, catchup),
+
+              ?DEBUG("Catching up peer ~w from seqno ~b", [Peer, PeerSeqno]),
               chronicle_catchup:catchup_peer(Pid, Opaque, Peer, PeerSeqno)
       end, Peers),
 
