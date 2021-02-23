@@ -164,15 +164,10 @@ do_catchup(Peer, PeerSeqno, State) ->
     end.
 
 get_full_snapshot(PeerSeqno) ->
-    case chronicle_agent:get_full_snapshot() of
+    case chronicle_agent:get_full_snapshot(PeerSeqno) of
         {ok, Seqno, HistoryId, Term, Config, RSMSnapshots} ->
-            case Seqno > PeerSeqno of
-                true ->
-                    {Seqno, HistoryId, Term, Config, RSMSnapshots};
-                false ->
-                    no_snapshot
-            end;
-        {no_snapshot, _} ->
+            {Seqno, HistoryId, Term, Config, RSMSnapshots};
+        {error, no_snapshot} ->
             no_snapshot
     end.
 

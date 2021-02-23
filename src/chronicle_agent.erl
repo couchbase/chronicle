@@ -189,10 +189,14 @@ save_rsm_snapshot(Name, Seqno, Snapshot) ->
     chronicle_snapshot_mgr:save_snapshot(Name, Seqno, Snapshot).
 
 get_rsm_snapshot(Name) ->
-    with_latest_snapshot(
-      fun (Seqno, _HistoryId,_Term, Config) ->
-              get_rsm_snapshot(Name, Seqno, Config)
-      end).
+    case with_latest_snapshot(fun (Seqno, _HistoryId, _Term, Config) ->
+                                      get_rsm_snapshot(Name, Seqno, Config)
+                              end) of
+        {error, no_snapshot} ->
+            {no_snapshot, ?NO_SEQNO};
+        Other ->
+            Other
+    end.
 
 get_rsm_snapshot(Name, Seqno, Config) ->
     RSMs = get_rsms(Config),
@@ -204,8 +208,16 @@ get_rsm_snapshot(Name, Seqno, Config) ->
             {no_snapshot, Seqno}
     end.
 
-get_full_snapshot() ->
-    with_latest_snapshot(fun get_full_snapshot/4).
+get_full_snapshot(HaveSeqno) ->
+    with_latest_snapshot(
+      fun (SnapshotSeqno, HistoryId, Term, Config) ->
+              case SnapshotSeqno > HaveSeqno of
+                  true ->
+                      get_full_snapshot(SnapshotSeqno, HistoryId, Term, Config);
+                  false ->
+                      {error, no_snapshot}
+              end
+      end).
 
 get_full_snapshot(Seqno, HistoryId, Term, Config) ->
     RSMs = get_rsms(Config),
@@ -225,8 +237,8 @@ with_latest_snapshot(Fun) ->
             after
                 chronicle_snapshot_mgr:release_snapshot(Ref)
             end;
-        {error, no_snapshot} ->
-            {no_snapshot, ?NO_SEQNO};
+        {error, no_snapshot} = Error->
+            Error;
         {error, Error} ->
             exit(Error)
     end.
