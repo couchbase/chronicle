@@ -144,32 +144,36 @@ spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
     State#state{pids = Pids#{Pid => {Peer, Opaque}}}.
 
 do_catchup(Peer, PeerSeqno, State) ->
-    Snapshot = get_full_snapshot(PeerSeqno),
-    case install_snapshot(Peer, Snapshot, State) of
-        {ok, _} ->
-            {SnapshotSeqno, _, SnapshotTerm, _, _} = Snapshot,
-            case chronicle_agent:get_log_committed(SnapshotSeqno + 1) of
-                {ok, _, []} ->
-                    {ok, SnapshotSeqno};
-                {ok, CommittedSeqno, Entries} ->
-                    append(Peer, CommittedSeqno,
-                           SnapshotTerm, SnapshotSeqno, Entries, State);
+    case get_full_snapshot(PeerSeqno) of
+        no_snapshot ->
+            case chronicle_agent:get_term_for_seqno(PeerSeqno) of
+                {ok, AtTerm} ->
+                    send_entries(Peer, AtTerm, PeerSeqno, State);
                 {error, compacted} ->
-                    %% Pretend everything went find and let the proposer
-                    %% schedule another catchup.
-                    {ok, SnapshotSeqno}
+                    %% Have the proposer retry.
+                    {compacted, PeerSeqno}
             end;
-        {error, _} = Error ->
-            Error
+        Snapshot ->
+            case install_snapshot(Peer, Snapshot, State) of
+                {ok, _} ->
+                    {SnapshotSeqno, _, SnapshotTerm, _, _} = Snapshot,
+                    send_entries(Peer, SnapshotTerm, SnapshotSeqno, State);
+                {error, _} = Error ->
+                    Error
+            end
     end.
 
 get_full_snapshot(PeerSeqno) ->
     case chronicle_agent:get_full_snapshot() of
-        {ok, Seqno, HistoryId, Term, Config, RSMSnapshots}
-          when Seqno > PeerSeqno ->
-            {Seqno, HistoryId, Term, Config, RSMSnapshots};
-        _ ->
-            exit(no_snapshot)
+        {ok, Seqno, HistoryId, Term, Config, RSMSnapshots} ->
+            case Seqno > PeerSeqno of
+                true ->
+                    {Seqno, HistoryId, Term, Config, RSMSnapshots};
+                false ->
+                    no_snapshot
+            end;
+        {no_snapshot, _} ->
+            no_snapshot
     end.
 
 install_snapshot(Peer,
@@ -181,6 +185,17 @@ install_snapshot(Peer,
                                      SnapshotSeqno,
                                      SnapshotHistoryId, SnapshotTerm,
                                      SnapshotConfig, RSMSnapshots).
+
+send_entries(Peer, AtTerm, AtSeqno, State) ->
+    case chronicle_agent:get_log_committed(AtSeqno + 1) of
+        {ok, _, []} ->
+            {ok, AtSeqno};
+        {ok, CommittedSeqno, Entries} ->
+            append(Peer, CommittedSeqno, AtTerm, AtSeqno, Entries, State);
+        {error, compacted} ->
+            %% Have the proposer retry.
+            {compacted, AtSeqno}
+    end.
 
 append(Peer, CommittedSeqno, AtTerm, AtSeqno, Entries,
        #state{history_id = HistoryId, term = Term}) ->

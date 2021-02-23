@@ -900,6 +900,12 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
         {ok, SentCommittedSeqno} ->
             set_peer_catchup_done(Peer, SentCommittedSeqno, Data),
             {keep_state, replicate(Peer, Data)};
+        {compacted, PeerSeqno} ->
+            ?INFO("Catchup to peer ~w failed because "
+                  "log/snapshots got compacted. Last sent seqno: ~b",
+                  [Peer, PeerSeqno]),
+            set_peer_catchup_done(Peer, PeerSeqno, Data),
+            {keep_state, replicate(Peer, Data)};
         {error, Error} ->
             case handle_common_error(Peer, Error, Data) of
                 {stop, Reason} ->
