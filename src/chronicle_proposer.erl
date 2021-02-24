@@ -1684,6 +1684,8 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
             ok
     end.
 
+get_entries(Seqno, _Data) when Seqno =:= ?NO_SEQNO ->
+    need_catchup;
 get_entries(Seqno, Data) ->
     case get_term_for_seqno(Seqno, Data) of
         {ok, Term} ->
