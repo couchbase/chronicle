@@ -78,10 +78,11 @@ command(Name, Command) ->
     command(Name, Command, 5000).
 
 command(Name, Command, Timeout) ->
+    PackedCommand = pack_command(Command),
     unwrap_command_reply(
       with_leader(Timeout,
                   fun (TRef, Leader, {HistoryId, _Term}) ->
-                          command(Leader, Name, HistoryId, Command, TRef)
+                          command(Leader, Name, HistoryId, PackedCommand, TRef)
                   end)).
 
 command(Leader, Name, HistoryId, Command, Timeout) ->
@@ -483,7 +484,7 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies},
             true = (HistoryId =:= EntryHistoryId),
 
             {reply, Reply, NewModState, NewModData} =
-                Mod:apply_command(Command,
+                Mod:apply_command(unpack_command(Command),
                                   Revision, AppliedRevision, ModState, ModData),
 
             EntryTerm = Entry#log_entry.term,
@@ -832,3 +833,10 @@ apply_snapshot(Seqno, Snapshot, Data) ->
               read_seqno = Seqno,
               mod_state = ModState,
               mod_data = ModData}.
+
+pack_command(Command) ->
+    {binary, term_to_binary(Command, [{compressed, 1}])}.
+
+unpack_command(PackedCommand) ->
+    {binary, Binary} = PackedCommand,
+    binary_to_term(Binary).
