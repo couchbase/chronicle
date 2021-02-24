@@ -42,7 +42,7 @@
 -export([specs/2,
          init/2, post_init/3,
          apply_snapshot/5, apply_command/5,
-         handle_command/4, handle_query/4, handle_info/4,
+         handle_query/4, handle_info/4,
          handle_config/5,
          terminate/4]).
 
@@ -535,9 +535,6 @@ apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
 
     notify_snapshot_installed(SnapshotRevision, Data),
     {ok, Data#data{kv_table = KvTable}}.
-
-handle_command(_, _StateRevision, _State, Data) ->
-    {apply, Data}.
 
 handle_query({rewrite, Fun}, StateRevision, State, Data) ->
     handle_rewrite(Fun, StateRevision, State, Data);

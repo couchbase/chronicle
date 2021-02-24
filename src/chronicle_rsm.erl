@@ -307,15 +307,7 @@ handle_command(_HistoryId, _Command, From, #follower{}, _Data) ->
      {reply, From, {error, {leader_error, not_leader}}}}.
 
 handle_command_leader(Command, From, State, Data) ->
-    case call_callback(handle_command, [Command], Data) of
-        {apply, NewModData} ->
-            NewData = set_mod_data(NewModData, Data),
-            {keep_state, submit_command(Command, From, State, NewData)};
-        {reject, Reply, NewModData} ->
-            {keep_state,
-             set_mod_data(NewModData, Data),
-             {reply, From, Reply}}
-    end.
+    {keep_state, submit_command(Command, From, State, Data)}.
 
 handle_query(Query, From, _State, Data) ->
     {reply, Reply, NewModData} = call_callback(handle_query, [Query], Data),
