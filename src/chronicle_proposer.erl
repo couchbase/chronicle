@@ -201,16 +201,15 @@ handle_event(info, {{agent_response, Ref, Peer, Request}, Result}, State,
                 {ok, OurRef} when OurRef =:= Ref ->
                     handle_agent_response(Peer, Request, Result, State, Data);
                 _ ->
-                    ?DEBUG("Ignoring a stale response from peer ~p.~n"
-                           "Request:~n~p",
+                    ?DEBUG("Ignoring a stale response "
+                           "from peer ~w. Request: ~w",
                            [Peer, Request]),
                     keep_state_and_data
             end;
         false ->
-            ?INFO("Ignoring a response from a removed peer ~p.~n"
-                  "Peers:~n~p~n"
-                  "Request:~n~p",
-                  [Peer, Peers, Request]),
+            ?INFO("Ignoring a response from a removed peer ~w. Request: ~w~n"
+                  "Peers: ~w",
+                  [Peer, Request, Peers]),
             keep_state_and_data
     end;
 handle_event(info, {nodeup, Peer, Info}, State, Data) ->
@@ -265,17 +264,17 @@ handle_state_enter(establish_term,
                 true ->
                     establish_term_init(Metadata, Data);
                 false ->
-                    ?INFO("Refusing to start a term ~p in history id ~p. "
+                    ?INFO("Refusing to start a term ~w in history id ~p. "
                           "We're not a voting member anymore.~n"
-                          "Peers:~n~p",
+                          "Peers: ~w",
                           [Term, HistoryId, Peers]),
                     {stop, {not_voter, Peers}}
             end;
         {error, Error} ->
             ?DEBUG("Error trying to establish local term. Stepping down.~n"
-                   "History id: ~p~n"
-                   "Term: ~p~n"
-                   "Error: ~p",
+                   "History id: ~w~n"
+                   "Term: ~w~n"
+                   "Error: ~w",
                    [HistoryId, Term, Error]),
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
@@ -323,10 +322,10 @@ preload_pending_entries(#data{history_id = HistoryId,
                     ?WARNING("Encountered an error while fetching "
                              "uncommitted entries from local agent.~n"
                              "History id: ~p~n"
-                             "Term: ~p~n"
-                             "Committed seqno: ~p~n"
-                             "High seqno: ~p~n"
-                             "Error: ~p",
+                             "Term: ~w~n"
+                             "Committed seqno: ~w~n"
+                             "High seqno: ~w~n"
+                             "Error: ~w",
                              [HistoryId, Term,
                               LocalCommittedSeqno, HighSeqno, Error]),
                     exit({preload_pending_entries_failed, Error})
@@ -355,10 +354,10 @@ establish_term_init(Metadata,
     QuorumPeers = get_quorum_peers(Quorum),
     AllPeers = require_self_peer(get_all_peers(Metadata)),
 
-    ?DEBUG("Going to establish term ~p (history id ~p).~n"
-           "Metadata:~n~p~n"
-           "Quorum peers:~n~p",
-           [Term, HistoryId, Metadata, QuorumPeers]),
+    ?DEBUG("Going to establish term ~w (history id ~p).~n"
+           "Quorum peers: ~w~n"
+           "Metadata:~n~p",
+           [Term, HistoryId, QuorumPeers, Metadata]),
 
     #metadata{config = ConfigEntry,
               high_seqno = HighSeqno,
@@ -402,17 +401,17 @@ establish_term_init(Metadata,
             %% This should be a rare situation. That's because to be
             %% elected a leader we need to get a quorum of votes. So
             %% at least a quorum of nodes should be alive.
-            ?WARNING("Can't establish term ~p, history id ~p. "
+            ?WARNING("Can't establish term ~w, history id ~p. "
                      "Too many busy peers.~n"
-                     "Quorum peers:~n~p~n"
-                     "Busy peers:~n~p~n"
-                     "Quorum:~n~p",
+                     "Quorum peers: ~w~n"
+                     "Busy peers: ~w~n"
+                     "Quorum: ~w",
                      [Term, HistoryId, QuorumPeers, BusyPeers, Quorum]),
             {stop, {error, no_quorum}}
     end.
 
 handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
-    ?ERROR("Failed to establish term ~p after ~bms",
+    ?ERROR("Failed to establish term ~w after ~bms",
            [Term, ?ESTABLISH_TERM_TIMEOUT]),
     {stop, establish_term_timeout}.
 
@@ -506,8 +505,8 @@ handle_establish_term_result(Peer,
                     stop(Reason, State, Data);
                 ignored ->
                     ?WARNING("Failed to establish "
-                             "term ~p (history id ~p, log position ~p) "
-                             "on peer ~p: ~p",
+                             "term ~w (history id ~p, log position ~w) "
+                             "on peer ~w: ~w",
                              [Term, HistoryId, Position, Peer, Error]),
 
                     Ignore =
@@ -548,10 +547,10 @@ handle_common_error(Peer, Error,
 
             case OtherTermNumber > OurTermNumber of
                 true ->
-                    ?INFO("Conflicting term on peer ~p. Stopping.~n"
+                    ?INFO("Conflicting term on peer ~w. Stopping.~n"
                           "History id: ~p~n"
-                          "Our term: ~p~n"
-                          "Conflicting term: ~p",
+                          "Our term: ~w~n"
+                          "Conflicting term: ~w",
                           [Peer, HistoryId, Term, OtherTerm]),
                     {stop, {conflicting_term, Term, OtherTerm}};
                 false ->
@@ -562,16 +561,16 @@ handle_common_error(Peer, Error,
                     %% able propose and replicate just fine. So we ignore such
                     %% conflicts.
                     true = (OurTermNumber =:= OtherTermNumber),
-                    ?INFO("Conflicting term on peer ~p. Ignoring.~n"
+                    ?INFO("Conflicting term on peer ~w. Ignoring.~n"
                           "History id: ~p~n"
-                          "Our term: ~p~n"
-                          "Conflicting term: ~p~n",
+                          "Our term: ~w~n"
+                          "Conflicting term: ~w~n",
                           [Peer, HistoryId, Term, OtherTerm]),
 
                     ignored
             end;
         {history_mismatch, OtherHistoryId} ->
-            ?INFO("Saw history mismatch when trying on peer ~p.~n"
+            ?INFO("Saw history mismatch when talking to peer ~w.~n"
                   "Our history id: ~p~n"
                   "Conflicting history id: ~p",
                   [Peer, HistoryId, OtherHistoryId]),
@@ -621,9 +620,9 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                 case NewCommittedSeqno =/= OurCommittedSeqno of
                     true ->
                         true = (HighSeqno >= NewCommittedSeqno),
-                        ?INFO("Discovered new committed seqno from peer ~p.~n"
-                              "Old committed seqno: ~p~n"
-                              "New committed seqno: ~p",
+                        ?INFO("Discovered new committed seqno from peer ~w.~n"
+                              "Old committed seqno: ~b~n"
+                              "New committed seqno: ~b",
                               [Peer, OurCommittedSeqno, NewCommittedSeqno]);
                     false ->
                         ok
@@ -646,8 +645,8 @@ establish_term_maybe_transition(establish_term = State,
                                       quorum = Quorum} = Data) ->
     case have_quorum(Votes, Quorum) of
         true ->
-            ?DEBUG("Established term ~p (history id ~p) successfully.~n"
-                   "Votes: ~p~n",
+            ?DEBUG("Established term ~w (history id ~p) successfully.~n"
+                   "Votes: ~w",
                    [Term, HistoryId, Votes]),
 
             {next_state, proposing, Data};
@@ -656,9 +655,9 @@ establish_term_maybe_transition(establish_term = State,
                 true ->
                     {keep_state, Data};
                 false ->
-                    ?WARNING("Couldn't establish term ~p, history id ~p.~n"
-                             "Votes received: ~p~n"
-                             "Quorum: ~p~n",
+                    ?WARNING("Couldn't establish term ~w, history id ~p.~n"
+                             "Votes received: ~w~n"
+                             "Quorum: ~w~n",
                              [Term, HistoryId, Votes, Quorum]),
                     stop({error, no_quorum}, State, Data)
             end
@@ -750,7 +749,7 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
         {stop, Reason} ->
             stop(Reason, State, Data);
         ignored ->
-            ?WARNING("Append failed on peer ~p: ~p", [Peer, Error]),
+            ?WARNING("Append failed on peer ~w: ~w", [Peer, Error]),
 
             case Error of
                 {bad_state, _}
@@ -912,7 +911,7 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
                 {stop, Reason} ->
                     stop(Reason, State, Data);
                 ignored ->
-                    ?ERROR("Catchup to peer ~p failed with error: ~p",
+                    ?ERROR("Catchup to peer ~w failed with error: ~w",
                            [Peer, Error]),
                     case Error of
                         {catchup_failed, _} ->
@@ -999,9 +998,9 @@ handle_config_post_append(OldData,
 
             case check_leader_got_removed(NewData2) of
                 true ->
-                    ?INFO("Shutting down because leader ~p "
+                    ?INFO("Shutting down because leader ~w "
                           "got removed from peers.~n"
-                          "Peers: ~p",
+                          "Peers: ~w",
                           [Peer, NewData2#data.quorum_peers]),
                     {stop, leader_removed, NewData2};
                 false ->
@@ -1077,7 +1076,7 @@ get_machines(ConfigEntry) ->
     maps:keys(chronicle_config:get_rsms(ConfigEntry#log_entry.value)).
 
 handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
-    ?INFO("Peer ~p came up", [Peer]),
+    ?INFO("Peer ~w came up", [Peer]),
     case State of
         establish_term ->
             %% Note, no attempt is made to send establish_term requests to
@@ -1112,7 +1111,7 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
                              send_heartbeat(Peer, Data)}
                     end;
                 false ->
-                    ?INFO("Peer ~p is not in peers:~n~p", [Peer, Peers]),
+                    ?INFO("Peer ~w is not in peers: ~w", [Peer, Peers]),
                     keep_state_and_data
             end
     end.
@@ -1125,14 +1124,14 @@ handle_nodedown(Peer, Info, _State, _Data) ->
 
 handle_down(MRef, Pid, Reason, State, Data) ->
     {ok, Peer, NewData} = take_monitor(MRef, Data),
-    ?INFO("Observed agent ~p on peer ~p "
-          "go down with reason ~p",
-          [Pid, Peer, sanitize_reason(Reason)]),
+    ?INFO("Observed agent ~w on peer ~w "
+          "go down with reason ~W",
+          [Pid, Peer, sanitize_reason(Reason), 10]),
 
     case Peer =:= ?SELF_PEER of
         true ->
             ?ERROR("Terminating proposer "
-                   "because local agent ~p terminated", [Pid]),
+                   "because local agent ~w terminated", [Pid]),
             stop(local_agent_terminated, State, Data);
         false ->
             maybe_cancel_peer_catchup(Peer, NewData),
@@ -1203,7 +1202,7 @@ handle_command({rsm_command, RSMName, Command}, Seqno,
             {ok, make_log_entry(Seqno, RSMCommand, Data), Data};
         false ->
             ?WARNING("Received a command "
-                     "referencing a non-existing RSM: ~p", [RSMName]),
+                     "referencing a non-existing RSM: ~w", [RSMName]),
             {reject, {error, {unknown_rsm, RSMName}}}
     end.
 
@@ -1291,7 +1290,7 @@ check_cas_config(NewConfig, CasRevision, #data{config = ConfigEntry}) ->
 
 handle_stop(From, State,
             #data{history_id = HistoryId, term = Term} = Data) ->
-    ?INFO("Proposer for term ~p "
+    ?INFO("Proposer for term ~w "
           "in history ~p is terminating.", [Term, HistoryId]),
     case State of
         {stopped, Reason} ->
@@ -1601,9 +1600,9 @@ send_establish_term(Peers, Metadata,
     maybe_send_requests(
       Peers, Request, Data,
       fun (Peer, Opaque) ->
-              ?DEBUG("Sending establish_term request to peer ~p. "
-                     "Term = ~p. History Id: ~p. "
-                     "Log position: ~p.",
+              ?DEBUG("Sending establish_term request to peer ~w. "
+                     "Term = ~w. History Id: ~p. "
+                     "Log position: ~w.",
                      [Peer, Term, HistoryId, Position]),
 
               case chronicle_agent:establish_term(Peer, Opaque,
@@ -1801,9 +1800,9 @@ log_busy_peers(Op, BusyPeers) ->
         [] ->
             ok;
         _ ->
-            ?WARNING("Didn't send ~p request to some peers due "
+            ?WARNING("Didn't send ~w request to some peers due "
                      "to distribution connection being busy.~n"
-                     "Peers:~n~p",
+                     "Peers: ~w",
                      [Op, BusyPeers])
     end.
 
@@ -2009,9 +2008,9 @@ sync_local_agent(#data{history_id = HistoryId,
         Other ->
             ?DEBUG("Failed to synchronize with local agent.~n"
                    "History id: ~p~n"
-                   "Term: ~p~n"
-                   "Committed seqno: ~p~n"
-                   "Error:~n~p",
+                   "Term: ~w~n"
+                   "Committed seqno: ~b~n"
+                   "Error: ~w",
                    [HistoryId, Term, CommittedSeqno, Other])
     end.
 
