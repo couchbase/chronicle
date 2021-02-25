@@ -1713,11 +1713,23 @@ do_get_entries(Seqno, #data{pending_entries = PendingEntries,
                     need_catchup
             end;
         false ->
-            Entries = chronicle_utils:queue_dropwhile(
-                        fun (Entry) ->
-                                Entry#log_entry.seqno =< Seqno
-                        end, PendingEntries),
-            {ok, queue:to_list(Entries)}
+            {ok, get_entries_from_queue(Seqno, PendingEntries)}
+    end.
+
+get_entries_from_queue(Seqno, Q) ->
+    get_entries_from_queue(Seqno, Q, []).
+
+get_entries_from_queue(Seqno, Q, Acc) ->
+    case queue:out_r(Q) of
+        {{value, Entry}, NewQ} ->
+            case Entry#log_entry.seqno > Seqno of
+                true ->
+                    get_entries_from_queue(Seqno, NewQ, [Entry|Acc]);
+                false ->
+                    Acc
+            end;
+        {empty, _} ->
+            Acc
     end.
 
 get_term_for_seqno(Seqno, #data{term = Term,
