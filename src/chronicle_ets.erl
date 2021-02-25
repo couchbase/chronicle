@@ -66,8 +66,8 @@ handle_register_writer(Pid, Keys, Writers) ->
     case ?CHECK(check_not_registered(Pid, Writers),
                 check_key_conflicts(Keys, Writers)) of
         {ok, NewWriters0} ->
-            erlang:monitor(process, Pid),
-            NewWriters = maps:put(Pid, Keys, NewWriters0),
+            MRef = erlang:monitor(process, Pid),
+            NewWriters = maps:put(Pid, {MRef, Keys}, NewWriters0),
             {reply, ok, NewWriters};
         {error, _} = Error ->
             {reply, Error, Writers}
@@ -85,7 +85,7 @@ check_key_conflicts(Keys, Writers) ->
     try
         NewWriters =
             maps:filter(
-              fun (Pid, PidKeys) ->
+              fun (Pid, {MRef, PidKeys}) ->
                   Intersection = sets:intersection(Keys, PidKeys),
                   case sets:size(Intersection) > 0 of
                       true ->
@@ -100,7 +100,7 @@ check_key_conflicts(Keys, Writers) ->
                                   %% notification yet. Other processes might
                                   %% have done so already. So don't error out
                                   %% unnecessarily.
-                                  erlang:demonitor(Pid, [flush]),
+                                  erlang:demonitor(MRef, [flush]),
                                   delete_keys(PidKeys),
                                   false
                           end;
@@ -116,7 +116,7 @@ check_key_conflicts(Keys, Writers) ->
     end.
 
 handle_down(Pid, Writers) ->
-    {Keys, NewWriters} = maps:take(Pid, Writers),
+    {{_, Keys}, NewWriters} = maps:take(Pid, Writers),
     delete_keys(Keys),
     {noreply, NewWriters}.
 
