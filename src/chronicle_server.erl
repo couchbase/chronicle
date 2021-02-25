@@ -168,7 +168,7 @@ handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, {reply, From, nack}};
 handle_event(Type, Event, _State, _Data) ->
-    ?WARNING("Unexpected event ~p", [{Type, Event}]),
+    ?WARNING("Unexpected event ~w", [{Type, Event}]),
     keep_state_and_data.
 
 terminate(_Reason, State, Data) ->
@@ -246,7 +246,7 @@ handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
     end.
 
 handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
-    ?INFO("Proposer ~p terminated with reason ~p",
+    ?INFO("Proposer ~w terminated:~n~p",
           [Pid, sanitize_reason(Reason)]),
 
     NewData = Data#data{proposer = undefined},
@@ -283,9 +283,9 @@ handle_proposer_ready(HistoryId, Term, HighSeqno,
 
 handle_proposer_stopping(Reason,
                          #leader{history_id = HistoryId, term = Term},
-                         Data) ->
-    ?INFO("Proposer for term ~p in history ~p is terminating. Reason: ~p",
-          [Term, HistoryId, sanitize_reason(Reason)]),
+                         #data{proposer = Proposer} = Data) ->
+    ?INFO("Proposer ~w for term ~w in history ~p is terminating:~n~p",
+          [Proposer, Term, HistoryId, sanitize_reason(Reason)]),
     {next_state, #follower{}, Data}.
 
 reply_request(ReplyTo, Reply) ->
@@ -413,7 +413,7 @@ deliver_cas_config(NewConfig, Revision, ReplyTo, #data{proposer = Proposer}) ->
     chronicle_proposer:cas_config(Proposer, ReplyTo, NewConfig, Revision).
 
 handle_register_rsm(Name, Pid, From, State, #data{rsms = RSMs} = Data) ->
-    ?DEBUG("Registering RSM ~p with pid ~p", [Name, Pid]),
+    ?DEBUG("Registering RSM ~w with pid ~w", [Name, Pid]),
     MRef = erlang:monitor(process, Pid),
     NewRSMs = maps:put(MRef, {Name, Pid}, RSMs),
     NewData = Data#data{rsms = NewRSMs},
@@ -449,7 +449,7 @@ handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
             {stop, {unexpected_process_down, MRef, Pid, Reason}};
         {{Name, RSMPid}, NewRSMs} ->
             true = (Pid =:= RSMPid),
-            ?DEBUG("RSM ~p~p terminated", [Name, RSMPid]),
+            ?DEBUG("RSM ~w~w terminated", [Name, RSMPid]),
             {keep_state, Data#data{rsms = NewRSMs}}
     end.
 
@@ -467,7 +467,7 @@ terminate_proposer(#data{proposer = Proposer} = Data) ->
                     exit({proposer_failed_to_terminate, Proposer})
             end,
 
-            ?INFO("Proposer ~p stopped", [Proposer]),
+            ?INFO("Proposer ~w stopped", [Proposer]),
             Data#data{proposer = undefined}
     end.
 
