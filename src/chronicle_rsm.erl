@@ -720,13 +720,7 @@ get_log(StartSeqno, EndSeqno, #data{name = Name}) ->
         {ok, _} = Ok ->
             Ok;
         {error, compacted} = Error ->
-            Error;
-        {error, Error} ->
-            ?ERROR("Unexpected error reading log for RSM ~p: ~p.~n"
-                   "Start seqno: ~p~n"
-                   "End seqno: ~p",
-                   [Name, Error, StartSeqno, EndSeqno]),
-            exit({read_log_error, Name, Error, StartSeqno, EndSeqno})
+            Error
     end.
 
 submit_command(Command, From,

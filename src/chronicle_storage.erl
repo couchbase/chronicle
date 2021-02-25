@@ -828,7 +828,7 @@ get_log_committed(StartSeqno, EndSeqno) ->
         get_published_seqno_range(),
     case EndSeqno > LogCommittedSeqno of
         true ->
-            {error, {uncommitted, StartSeqno, EndSeqno, LogCommittedSeqno}};
+            exit({uncommitted, StartSeqno, EndSeqno, LogCommittedSeqno});
         false ->
             case in_range(StartSeqno, EndSeqno, LogLowSeqno, LogHighSeqno) of
                 true ->

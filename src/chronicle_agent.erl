@@ -267,7 +267,7 @@ get_log_committed(StartSeqno) ->
     case get_log_committed(StartSeqno, CommittedSeqno) of
         {ok, Entries} ->
             {ok, CommittedSeqno, Entries};
-        {error, _} = Error ->
+        {error, compacted} = Error ->
             Error
     end.
 
@@ -327,9 +327,7 @@ get_term_for_seqno(Seqno) ->
                     Error;
                 {error, Error} ->
                     exit(Error)
-            end;
-        {error, Error} ->
-            exit(Error)
+            end
     end.
 
 -spec get_history_id(#metadata{}) -> chronicle:history_id().
