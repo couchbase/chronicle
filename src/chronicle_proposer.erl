@@ -24,7 +24,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--import(chronicle_utils, [get_position/1,
+-import(chronicle_utils, [get_all_peers/1,
+                          get_establish_quorum/1,
+                          get_position/1,
                           get_quorum_peers/1,
                           have_quorum/2,
                           is_quorum_feasible/3,
@@ -257,12 +259,13 @@ handle_state_enter(establish_term,
     %% going to be using won't change (unless another node starts a higher
     %% term) between when we get it here and when we get a majority of votes.
     case chronicle_agent:establish_local_term(HistoryId, Term) of
-        {ok, Metadata} ->
+        {ok, #metadata{peer = Self} = Metadata} ->
             Quorum = get_establish_quorum(Metadata),
             Peers = get_quorum_peers(Quorum),
-            case lists:member(?SELF_PEER, get_quorum_peers(Quorum)) of
+            case lists:member(Self, get_quorum_peers(Quorum)) of
                 true ->
-                    establish_term_init(Metadata, Data);
+                    NewData = Data#data{peer = Self},
+                    establish_term_init(Metadata, NewData);
                 false ->
                     ?INFO("Refusing to start a term ~w in history id ~p. "
                           "We're not a voting member anymore.~n"
@@ -290,8 +293,9 @@ handle_state_enter(proposing, Data) ->
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
-start_catchup_process(#data{history_id = HistoryId, term = Term} = Data) ->
-    case chronicle_catchup:start_link(HistoryId, Term) of
+start_catchup_process(#data{peer = Self,
+                            history_id = HistoryId, term = Term} = Data) ->
+    case chronicle_catchup:start_link(Self, HistoryId, Term) of
         {ok, Pid} ->
             Data#data{catchup_pid = Pid};
         {error, Error} ->
@@ -348,11 +352,11 @@ announce_proposer_ready(#data{parent = Parent,
     chronicle_server:proposer_ready(Parent, HistoryId, Term, HighSeqno).
 
 establish_term_init(Metadata,
-                    #data{history_id = HistoryId, term = Term} = Data) ->
-    Self = Metadata#metadata.peer,
-    Quorum = require_self_quorum(get_establish_quorum(Metadata)),
+                    #data{peer = Self,
+                          history_id = HistoryId, term = Term} = Data) ->
+    Quorum = require_self_quorum(get_establish_quorum(Metadata), Data),
     QuorumPeers = get_quorum_peers(Quorum),
-    AllPeers = require_self_peer(get_all_peers(Metadata)),
+    AllPeers = require_self_peer(get_all_peers(Metadata), Data),
 
     ?DEBUG("Going to establish term ~w (history id ~p).~n"
            "Quorum peers: ~w~n"
@@ -364,7 +368,7 @@ establish_term_init(Metadata,
               committed_seqno = CommittedSeqno,
               pending_branch = PendingBranch} = Metadata,
 
-    OtherQuorumPeers = QuorumPeers -- [?SELF_PEER],
+    OtherQuorumPeers = QuorumPeers -- [Self],
 
     %% Send a fake response to update our state with the knowledge that we've
     %% established the term locally. Initally, I wasn't planning to use such
@@ -724,8 +728,8 @@ handle_append_result(Peer, Request, Result, proposing = State, Data) ->
             handle_append_error(Peer, Error, State, Data)
     end.
 
-maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
-  when Peer =:= ?SELF_PEER ->
+maybe_drop_pending_entries(Peer, NewCommittedSeqno, #data{peer = Self} = Data)
+  when Peer =:= Self ->
     OldCommittedSeqno = Data#data.local_committed_seqno,
     case OldCommittedSeqno =:= NewCommittedSeqno of
         true ->
@@ -744,7 +748,8 @@ maybe_drop_pending_entries(Peer, NewCommittedSeqno, Data)
 maybe_drop_pending_entries(_, _, Data) ->
     Data.
 
-handle_append_error(Peer, Error, proposing = State, Data) ->
+handle_append_error(Peer, Error, proposing = State,
+                    #data{peer = Self} = Data) ->
     case handle_common_error(Peer, Error, Data) of
         {stop, Reason} ->
             stop(Reason, State, Data);
@@ -753,7 +758,7 @@ handle_append_error(Peer, Error, proposing = State, Data) ->
 
             case Error of
                 {bad_state, _}
-                  when Peer =/= ?SELF_PEER ->
+                  when Peer =/= Self ->
                     %% The peer may have gotten wiped or didn't get
                     %% initialized properly before being added to the
                     %% cluster. Attempting to ingore under the assumption that
@@ -816,7 +821,8 @@ check_committed_seqno_advanced(Options, State, Data) ->
             {keep_state, NewData}
     end.
 
-handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
+handle_heartbeat_result(Peer, Round, Result, proposing = State,
+                        #data{peer = Self} = Data) ->
     case Result of
         {ok, Metadata} ->
             maybe_set_peer_active(Peer, Metadata, Data),
@@ -843,7 +849,7 @@ handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
                 ignored ->
                     case Error of
                         {bad_state, _}
-                          when Peer =/= ?SELF_PEER ->
+                          when Peer =/= Self ->
                             maybe_cancel_peer_catchup(Peer, Data),
                             remove_peer_status(Peer, Data),
 
@@ -1018,7 +1024,7 @@ handle_config_post_append(OldData,
     end.
 
 reset_peers(#data{config = ConfigEntry} = Data) ->
-    Peers = require_self_peer(config_peers(ConfigEntry, Data)),
+    Peers = require_self_peer(config_peers(ConfigEntry), Data),
     NewData = Data#data{peers = Peers},
     handle_new_peers(Data, NewData).
 
@@ -1122,13 +1128,13 @@ handle_nodedown(Peer, Info, _State, _Data) ->
     ?INFO("Peer ~p went down: ~p", [Peer, Info]),
     keep_state_and_data.
 
-handle_down(MRef, Pid, Reason, State, Data) ->
+handle_down(MRef, Pid, Reason, State, #data{peer = Self} = Data) ->
     {ok, Peer, NewData} = take_monitor(MRef, Data),
     ?INFO("Observed agent ~w on peer ~w "
           "go down with reason ~W",
           [Pid, Peer, sanitize_reason(Reason), 10]),
 
-    case Peer =:= ?SELF_PEER of
+    case Peer =:= Self of
         true ->
             ?ERROR("Terminating proposer "
                    "because local agent ~w terminated", [Pid]),
@@ -1307,15 +1313,16 @@ make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
                seqno = Seqno,
                value = Value}.
 
-update_config(ConfigEntry, #data{quorum_peers = OldQuorumPeers} = Data) ->
-    RawQuorum = get_append_quorum(ConfigEntry, Data),
-    BeingRemoved = not lists:member(?SELF_PEER, get_quorum_peers(RawQuorum)),
+update_config(ConfigEntry, #data{peer = Self,
+                                 quorum_peers = OldQuorumPeers} = Data) ->
+    RawQuorum = get_append_quorum(ConfigEntry),
+    BeingRemoved = not lists:member(Self, get_quorum_peers(RawQuorum)),
 
     %% Always require include local to acknowledge writes, even if the node is
     %% being removed.
-    Quorum = require_self_quorum(RawQuorum),
+    Quorum = require_self_quorum(RawQuorum, Data),
     QuorumPeers = get_quorum_peers(Quorum),
-    AllPeers = require_self_peer(config_peers(ConfigEntry, Data)),
+    AllPeers = require_self_peer(config_peers(ConfigEntry), Data),
 
     %% When nodes are being removed, attempt to notify them about the new
     %% config that removes them. This is just a best-effort approach. If nodes
@@ -1555,7 +1562,9 @@ maybe_send_requests(Peers, Request, Data, Fun) ->
                 fun (Peer) ->
                         {ok, Ref} = get_peer_monitor(Peer, NewData),
                         Opaque = make_agent_opaque(Ref, Peer, Request),
-                        case Fun(Peer, Opaque) of
+                        ServerRef = chronicle_agent:server_ref(Peer,
+                                                               Data#data.peer),
+                        case Fun(Peer, ServerRef, Opaque) of
                             true ->
                                 false;
                             false ->
@@ -1574,22 +1583,22 @@ send_requests(Peers, Request, Data, Fun) ->
     {NewData, []} =
         maybe_send_requests(
           Peers, Request, Data,
-          fun (Peer, Opaque) ->
-                  Fun(Peer, Opaque),
+          fun (Peer, ServerRef, Opaque) ->
+                  Fun(Peer, ServerRef, Opaque),
                   true
           end),
     NewData.
 
 send_local_establish_term(Metadata,
-                          #data{history_id = HistoryId, term = Term} = Data) ->
-    Peer = ?SELF_PEER,
-    Peers = [Peer],
-    set_peer_status_requested(Peer, Data),
+                          #data{peer = Self,
+                                history_id = HistoryId, term = Term} = Data) ->
+    Peers = [Self],
+    set_peer_status_requested(Self, Data),
     Position = get_position(Metadata),
 
     send_requests(
       Peers, {establish_term, HistoryId, Term, Position}, Data,
-      fun (_Peer, Opaque) ->
+      fun (_Peer, _, Opaque) ->
               self() ! {Opaque, {ok, Metadata}}
       end).
 
@@ -1599,13 +1608,13 @@ send_establish_term(Peers, Metadata,
     Request = {establish_term, HistoryId, Term, Position},
     maybe_send_requests(
       Peers, Request, Data,
-      fun (Peer, Opaque) ->
+      fun (Peer, ServerRef, Opaque) ->
               ?DEBUG("Sending establish_term request to peer ~w. "
                      "Term = ~w. History Id: ~p. "
                      "Log position: ~w.",
                      [Peer, Term, HistoryId, Position]),
 
-              case chronicle_agent:establish_term(Peer, Opaque,
+              case chronicle_agent:establish_term(ServerRef, Opaque,
                                                   HistoryId, Term, Position,
                                                   [nosuspend]) of
                   ok ->
@@ -1636,11 +1645,11 @@ send_append(Peers, PeerSeqnos,
 
     maybe_send_requests(
       Peers, Request, Data,
-      fun (Peer, Opaque) ->
+      fun (Peer, ServerRef, Opaque) ->
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
                   {ok, AtTerm, Entries} ->
-                      case chronicle_agent:append(Peer, Opaque, HistoryId,
+                      case chronicle_agent:append(ServerRef, Opaque, HistoryId,
                                                   Term, CommittedSeqno,
                                                   AtTerm, PeerSeqno, Entries,
                                                   [nosuspend]) of
@@ -1767,8 +1776,9 @@ send_ensure_term(Peers, Request,
                  #data{history_id = HistoryId, term = Term} = Data) ->
     maybe_send_requests(
       Peers, Request, Data,
-      fun (Peer, Opaque) ->
-              case chronicle_agent:ensure_term(Peer, Opaque, HistoryId, Term,
+      fun (_Peer, ServerRef, Opaque) ->
+              case chronicle_agent:ensure_term(ServerRef,
+                                               Opaque, HistoryId, Term,
                                                [nosuspend]) of
                   ok ->
                       true;
@@ -1810,7 +1820,8 @@ reply_request(ReplyTo, Reply) ->
     chronicle_server:reply_request(ReplyTo, Reply).
 
 monitor_agents(Peers,
-               #data{monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
+               #data{peer = Self,
+                     monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
     {NewMPeers, NewMRefs} =
         lists:foldl(
           fun (Peer, {AccMPeers, AccMRefs} = Acc) ->
@@ -1819,7 +1830,8 @@ monitor_agents(Peers,
                           %% already monitoring
                           Acc;
                       false ->
-                          MRef = chronicle_agent:monitor(Peer),
+                          ServerRef = chronicle_agent:server_ref(Peer, Self),
+                          MRef = chronicle_agent:monitor(ServerRef),
                           {AccMPeers#{Peer => MRef}, AccMRefs#{MRef => Peer}}
                   end
           end, {MPeers, MRefs}, Peers),
@@ -2017,42 +2029,17 @@ sync_local_agent(#data{history_id = HistoryId,
 reply_not_leader(ReplyTo) ->
     reply_request(ReplyTo, {error, {leader_error, not_leader}}).
 
-require_self_quorum(Quorum) ->
-    {joint, {all, sets:from_list([?SELF_PEER])}, Quorum}.
+require_self_quorum(Quorum, #data{peer = Self}) ->
+    {joint, {all, sets:from_list([Self])}, Quorum}.
 
-require_self_peer(Peers) ->
-    lists:usort([?SELF_PEER | Peers]).
+require_self_peer(Peers, #data{peer = Self}) ->
+    lists:usort([Self | Peers]).
 
-get_establish_quorum(#metadata{peer = Self} = Metadata) ->
-    translate_quorum(chronicle_utils:get_establish_quorum(Metadata), Self).
+get_append_quorum(#log_entry{value = Config}) ->
+    chronicle_config:get_quorum(Config).
 
-get_all_peers(#metadata{peer = Self} = Metadata) ->
-    translate_peers(chronicle_utils:get_all_peers(Metadata), Self).
-
-get_append_quorum(#log_entry{value = Config}, #data{peer = Self}) ->
-    translate_quorum(chronicle_config:get_quorum(Config), Self).
-
-config_peers(#log_entry{value = Config}, #data{peer = Self}) ->
-    translate_peers(chronicle_config:get_peers(Config), Self).
-
-translate_peers(Peers, Self) when is_list(Peers) ->
-    sets:to_list(translate_peers(sets:from_list(Peers), Self));
-translate_peers(Peers, Self) ->
-    case sets:is_element(Self, Peers) of
-        true ->
-            sets:add_element(?SELF_PEER, sets:del_element(Self, Peers));
-        false ->
-            Peers
-    end.
-
-translate_quorum({all, Peers}, Self) ->
-    {all, translate_peers(Peers, Self)};
-translate_quorum({majority, Peers}, Self) ->
-    {majority, translate_peers(Peers, Self)};
-translate_quorum({joint, Quorum1, Quorum2}, Self) ->
-    {joint,
-     translate_quorum(Quorum1, Self),
-     translate_quorum(Quorum2, Self)}.
+config_peers(#log_entry{value = Config}) ->
+    chronicle_config:get_peers(Config).
 
 sanitize_data(#data{pending_entries = PendingQ} = Data) ->
     Pending = queue:to_list(PendingQ),

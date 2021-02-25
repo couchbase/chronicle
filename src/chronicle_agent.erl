@@ -37,13 +37,7 @@
 
 -define(NAME, ?MODULE).
 -define(SERVER, ?SERVER_NAME(?NAME)).
--define(SERVER(Peer),
-        case Peer of
-            ?SELF_PEER ->
-                ?SERVER;
-            _ ->
-                ?SERVER_NAME(Peer, ?NAME)
-        end).
+-define(SERVER(Peer), ?SERVER_NAME(Peer, ?NAME)).
 
 -define(PROVISION_TIMEOUT,
         chronicle_settings:get({agent, provision_timeout}, 10000)).
@@ -75,7 +69,6 @@
 %% _ReplyType. This is entirely useless for dializer, but is usefull for
 %% documentation purposes.
 -type maybe_replies(_Tag, _ReplyType) :: chronicle_utils:send_result().
--type peer() :: ?SELF_PEER | chronicle:peer().
 
 -record(snapshot_state, { tref,
                           seqno,
@@ -99,9 +92,20 @@
 start_link() ->
     gen_statem:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
 
--spec monitor(peer()) -> reference().
-monitor(Peer) ->
-    chronicle_utils:monitor_process(?SERVER(Peer)).
+-type server_ref() :: any().
+
+-spec server_ref(chronicle:peer(), chronicle:peer()) -> server_ref().
+server_ref(Peer, SelfPeer) ->
+    case Peer =:= SelfPeer of
+        true ->
+            ?SERVER;
+        false ->
+            ?SERVER_NAME(Peer, ?NAME)
+    end.
+
+-spec monitor(server_ref()) -> reference().
+monitor(ServerRef) ->
+    chronicle_utils:monitor_process(ServerRef).
 
 -spec get_system_state() ->
           not_provisioned |
@@ -353,7 +357,7 @@ provision(Machines) ->
                             | {error, reprovision_error()}.
 -type reprovision_error() :: {bad_state,
                               not_provisioned | joining_cluster | removed}
-                           | {bad_config, peer(), #config{}}.
+                           | {bad_config, chronicle:peer(), #config{}}.
 
 -spec reprovision() -> reprovision_result().
 reprovision() ->
@@ -414,16 +418,16 @@ establish_local_term(HistoryId, Term) ->
     call(?SERVER, {establish_term, HistoryId, Term},
          ?ESTABLISH_LOCAL_TERM_TIMEOUT).
 
--spec establish_term(peer(),
+-spec establish_term(server_ref(),
                      Opaque,
                      chronicle:history_id(),
                      chronicle:leader_term(),
                      chronicle:peer_position(),
                      chronicle_utils:send_options()) ->
           maybe_replies(Opaque, establish_term_result()).
-establish_term(Peer, Opaque, HistoryId, Term, Position, Options) ->
+establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
     %% TODO: don't abuse gen_server calls here and everywhere else
-    call_async(?SERVER(Peer), Opaque,
+    call_async(ServerRef, Opaque,
                {establish_term, HistoryId, Term, Position},
                Options).
 
@@ -436,14 +440,14 @@ establish_term(Peer, Opaque, HistoryId, Term, Position, Options) ->
         {history_mismatch, chronicle:history_id()} |
         {conflicting_term, chronicle:leader_term()}.
 
--spec ensure_term(peer(),
+-spec ensure_term(server_ref(),
                   Opaque,
                   chronicle:history_id(),
                   chronicle:leader_term(),
                   chronicle_utils:send_options()) ->
           maybe_replies(Opaque, ensure_term_result()).
-ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
-    call_async(?SERVER(Peer), Opaque,
+ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
+    call_async(ServerRef, Opaque,
                {ensure_term, HistoryId, Term},
                Options).
 
@@ -455,7 +459,7 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
         {missing_entries, #metadata{}} |
         {protocol_error, any()}.
 
--spec append(peer(),
+-spec append(server_ref(),
              Opaque,
              chronicle:history_id(),
              chronicle:leader_term(),
@@ -465,24 +469,24 @@ ensure_term(Peer, Opaque, HistoryId, Term, Options) ->
              [#log_entry{}],
              chronicle_utils:send_options()) ->
           maybe_replies(Opaque, append_result()).
-append(Peer, Opaque, HistoryId, Term,
+append(ServerRef, Opaque, HistoryId, Term,
        CommittedSeqno,
        AtTerm, AtSeqno, Entries, Options) ->
-    call_async(?SERVER(Peer), Opaque,
+    call_async(ServerRef, Opaque,
                {append, HistoryId, Term,
                 CommittedSeqno, AtTerm, AtSeqno, Entries},
                Options).
 
--spec append(peer(),
+-spec append(server_ref(),
              chronicle:history_id(),
              chronicle:leader_term(),
              chronicle:seqno(),
              chronicle:leader_term(),
              chronicle:seqno(),
              [#log_entry{}]) -> append_result().
-append(Peer, HistoryId, Term,
+append(ServerRef, HistoryId, Term,
        CommittedSeqno, AtTerm, AtSeqno, Entries) ->
-    call(?SERVER(Peer),
+    call(ServerRef,
          {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
          ?APPEND_TIMEOUT).
 
@@ -494,7 +498,7 @@ append(Peer, HistoryId, Term,
         {conflicting_term, chronicle:leader_term()} |
         {protocol_error, any()}.
 
--spec install_snapshot(peer(),
+-spec install_snapshot(server_ref(),
                        chronicle:history_id(),
                        chronicle:leader_term(),
                        chronicle:seqno(),
@@ -503,10 +507,10 @@ append(Peer, HistoryId, Term,
                        ConfigEntry::#log_entry{},
                        #{RSM::atom() => RSMSnapshot::binary()}) ->
           install_snapshot_result().
-install_snapshot(Peer, HistoryId, Term,
+install_snapshot(ServerRef, HistoryId, Term,
                  SnapshotSeqno, SnapshotHistoryId,
                  SnapshotTerm, SnapshotConfig, RSMSnapshots) ->
-    call(?SERVER(Peer),
+    call(ServerRef,
          {install_snapshot,
           HistoryId, Term,
           SnapshotSeqno, SnapshotHistoryId,

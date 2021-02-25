@@ -31,7 +31,6 @@
 -define(ETS_TABLE(Name), Name).
 -endif.
 
--define(SELF_PEER, 'self@nohost').
 -define(NO_PEER, 'nonode@nohost').
 -define(NO_PEER_ID, <<>>).
 -define(NO_HISTORY, <<"no-history">>).
