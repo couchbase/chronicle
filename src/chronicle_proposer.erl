@@ -80,8 +80,6 @@
                 monitors_refs,
 
                 %% Used only when the state is 'establish_term'.
-                %% TODO: consider using different data records for
-                %% establish_term and proposing states
                 votes,
                 failed_votes,
                 branch,
@@ -169,7 +167,7 @@ init([Parent, HistoryId, Term]) ->
                   peer_statuses = PeerStatuses,
                   monitors_peers = #{},
                   monitors_refs = #{},
-                  %% TODO: store votes, failed_votes and peers as sets
+
                   votes = [],
                   failed_votes = [],
                   pending_entries = queue:new(),
