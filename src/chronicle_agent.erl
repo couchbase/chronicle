@@ -1428,50 +1428,44 @@ post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
 check_append(HistoryId, Term, CommittedSeqno,
              AtTerm, AtSeqno, Entries, State, Data) ->
     ?CHECK(check_prepared(State),
-           check_append_history_id(HistoryId, Entries, Data),
+           check_history_id(HistoryId, Data),
            check_not_earlier_term(Term, Data),
            check_append_obsessive(HistoryId, Term, CommittedSeqno,
                                   AtTerm, AtSeqno, Entries, Data)).
 
-check_append_history_id(HistoryId, Entries, Data) ->
-    case check_history_id(HistoryId, Data) of
-        ok ->
-            OldHistoryId = get_meta(?META_HISTORY_ID, Data),
-            case HistoryId =:= OldHistoryId of
-                true ->
-                    ok;
-                false ->
-                    NewHistoryEntries =
-                        lists:dropwhile(
-                          fun (#log_entry{history_id = EntryHistoryId}) ->
-                                  EntryHistoryId =:= OldHistoryId
-                          end, Entries),
+check_append_history_invariants(HistoryId, Entries, Info, Data) ->
+    OldHistoryId = get_meta(?META_HISTORY_ID, Data),
+    case HistoryId =:= OldHistoryId of
+        true ->
+            {ok, Info};
+        false ->
+            NewHistoryEntries =
+                lists:dropwhile(
+                  fun (#log_entry{history_id = EntryHistoryId}) ->
+                          EntryHistoryId =:= OldHistoryId
+                  end, Entries),
 
-                    %% The first entry in any history must be a config entry
-                    %% committing that history.
-                    case NewHistoryEntries of
-                        [] ->
-                            %% Partial append.
-                            ok;
-                        [#log_entry{history_id = HistoryId,
-                                    value = #config{}} | _] ->
-                            ok;
-                        _ ->
-                            ?ERROR("Malformed entries in an append "
-                                   "request starting a new history.~n"
-                                   "Old history id: ~p~n"
-                                   "New history id: ~p~n"
-                                   "Entries:~n~p",
-                                   [OldHistoryId, HistoryId,
-                                    sanitize_entries(NewHistoryEntries)]),
-                            {error, {protocol_error,
-                                     {missing_config_starting_history,
-                                      OldHistoryId, HistoryId,
-                                      sanitize_entries(NewHistoryEntries)}}}
-                    end
-            end;
-        {error, _} = Error ->
-            Error
+            %% The first entry in any history must be a config entry
+            %% committing that history.
+            case NewHistoryEntries of
+                [] ->
+                    %% Partial append.
+                    {ok, Info};
+                [#log_entry{history_id = HistoryId, value = #config{}} | _] ->
+                    {ok, Info};
+                _ ->
+                    ?ERROR("Malformed entries in an append "
+                           "request starting a new history.~n"
+                           "Old history id: ~p~n"
+                           "New history id: ~p~n"
+                           "Entries:~n~p",
+                           [OldHistoryId, HistoryId,
+                            sanitize_entries(NewHistoryEntries)]),
+                    {error, {protocol_error,
+                             {missing_config_starting_history,
+                              OldHistoryId, HistoryId,
+                              sanitize_entries(NewHistoryEntries)}}}
+            end
     end.
 
 check_append_obsessive(HistoryId, Term,
@@ -1493,13 +1487,15 @@ check_append_obsessive(HistoryId, Term,
                             case check_committed_seqno(Term, CommittedSeqno,
                                                        EndSeqno, Data) of
                                 {ok, FinalCommittedSeqno} ->
-                                    {ok,
-                                     #{entries => FinalEntries,
-                                       start_seqno => StartSeqno,
-                                       end_seqno => EndSeqno,
-                                       committed_seqno => FinalCommittedSeqno,
-                                       truncate => Truncate,
-                                       commit_branch => CommitBranch}};
+                                    Info = #{entries => FinalEntries,
+                                             start_seqno => StartSeqno,
+                                             end_seqno => EndSeqno,
+                                             committed_seqno =>
+                                                 FinalCommittedSeqno,
+                                             truncate => Truncate,
+                                             commit_branch => CommitBranch},
+                                    check_append_history_invariants(
+                                      HistoryId, FinalEntries, Info, Data);
                                 {error, _} = Error ->
                                     Error
                             end;
@@ -1691,7 +1687,6 @@ check_committed_seqno_rollback(Term, CommittedSeqno, Data) ->
 check_committed_seqno_known(CommittedSeqno, HighSeqno, Data) ->
     case CommittedSeqno > HighSeqno of
         true ->
-            %% TODO: add more information here?
             {error, {missing_entries, build_metadata(Data)}};
         false ->
             ok
