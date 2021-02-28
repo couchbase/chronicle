@@ -723,7 +723,7 @@ handle_append_result(Peer, Request, Result, proposing = State, Data) ->
             NewData = maybe_drop_pending_entries(Peer, CommittedSeqno, Data),
             handle_append_ok(Peer, HighSeqno, CommittedSeqno, State, NewData);
         {error, Error} ->
-            handle_append_error(Peer, Error, State, Data)
+            handle_replication_error(Peer, Error, append, State, Data)
     end.
 
 maybe_drop_pending_entries(Peer, NewCommittedSeqno, #data{peer = Self} = Data)
@@ -746,25 +746,39 @@ maybe_drop_pending_entries(Peer, NewCommittedSeqno, #data{peer = Self} = Data)
 maybe_drop_pending_entries(_, _, Data) ->
     Data.
 
-handle_append_error(Peer, Error, proposing = State,
-                    #data{peer = Self} = Data) ->
+handle_replication_error(Peer, Error, Op, State, Data) ->
+    handle_replication_error(Peer, Error, Op,
+                             fun (_) -> false end,
+                             State, Data).
+
+handle_replication_error(Peer, Error, Op, ErrorPred,
+                         proposing = State, #data{peer = Self} = Data) ->
     case handle_common_error(Peer, Error, Data) of
         {stop, Reason} ->
             stop(Reason, State, Data);
         ignored ->
-            ?WARNING("Append failed on peer ~w: ~w", [Peer, Error]),
+            ?WARNING("Error on peer ~w while sending ~w: ~w",
+                     [Peer, Op, Error]),
 
-            case Error of
-                {bad_state, _}
-                  when Peer =/= Self ->
-                    %% The peer may have gotten wiped or didn't get
-                    %% initialized properly before being added to the
-                    %% cluster. Attempting to ingore under the assumption that
-                    %% eventually the condition that lead to the error will
-                    %% get resolved.
+            Ignore =
+                case Error of
+                    {bad_state, _} ->
+                        %% The peer may have gotten wiped or didn't get
+                        %% initialized properly before being added to the
+                        %% cluster. Attempting to ingore under the assumption
+                        %% that eventually the condition that lead to the
+                        %% error will get resolved.
+                        Peer =/= Self;
+                    _ ->
+                        ErrorPred(Error)
+                end,
+
+            case Ignore of
+                true ->
+                    maybe_cancel_peer_catchup(Peer, Data),
                     remove_peer_status(Peer, Data),
                     {keep_state, demonitor_agents([Peer], Data)};
-                _ ->
+                false ->
                     stop({unexpected_error, Peer, Error}, State, Data)
             end
     end.
@@ -819,8 +833,7 @@ check_committed_seqno_advanced(Options, State, Data) ->
             {keep_state, NewData}
     end.
 
-handle_heartbeat_result(Peer, Round, Result, proposing = State,
-                        #data{peer = Self} = Data) ->
+handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
     case Result of
         {ok, Metadata} ->
             maybe_set_peer_active(Peer, Metadata, Data),
@@ -841,26 +854,7 @@ handle_heartbeat_result(Peer, Round, Result, proposing = State,
             check_committed_seqno_advanced(
               #{must_replicate_to => Peer}, State, NewData);
         {error, Error} ->
-            case handle_common_error(Peer, Error, Data) of
-                {stop, Reason} ->
-                    stop(Reason, State, Data);
-                ignored ->
-                    case Error of
-                        {bad_state, _}
-                          when Peer =/= Self ->
-                            maybe_cancel_peer_catchup(Peer, Data),
-                            remove_peer_status(Peer, Data),
-
-                            %% TODO: maybe_cancel_peer_catchup() is currently
-                            %% asynchronous, so demonitor_agents() is needed
-                            %% to ignore a potential catchup response that
-                            %% gets delivered to us.
-                            NewData = demonitor_agents([Peer], Data),
-                            {keep_state, NewData};
-                        _ ->
-                            stop({unexpected_error, Peer, Error}, State, Data)
-                    end
-            end
+            handle_replication_error(Peer, Error, heartbeat, State, Data)
     end.
 
 check_sync_round_advanced(#data{acked_sync_round = AckedRound} = Data) ->
@@ -911,23 +905,21 @@ handle_catchup_result(Peer, Result, proposing = State, Data) ->
             set_peer_catchup_done(Peer, PeerSeqno, Data),
             {keep_state, replicate(Peer, Data)};
         {error, Error} ->
-            case handle_common_error(Peer, Error, Data) of
-                {stop, Reason} ->
-                    stop(Reason, State, Data);
-                ignored ->
-                    ?ERROR("Catchup to peer ~w failed with error: ~w",
-                           [Peer, Error]),
-                    case Error of
-                        {catchup_failed, _} ->
-                            %% Catchup failed for an unknown reason, attempt
-                            %% to ignore.
-                            remove_peer_status(Peer, Data),
-                            {keep_state, Data};
-                        _ ->
-                            stop({unexpected_error, Peer, Error}, State, Data)
-                    end
-            end
+            handle_catchup_error(Peer, Error, State, Data)
     end.
+
+handle_catchup_error(Peer, Error, State, Data) ->
+    handle_replication_error(Peer, Error, catchup,
+                             fun (Err) ->
+                                     case Err of
+                                         %% Catchup failed for an unknown
+                                         %% reason, attempt to ignore.
+                                         {catchup_failed, _} ->
+                                             true;
+                                         _ ->
+                                             false
+                                     end
+                             end, State, Data).
 
 maybe_complete_config_transition(#data{config = ConfigEntry} = Data) ->
     Config = ConfigEntry#log_entry.value,
