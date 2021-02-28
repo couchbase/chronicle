@@ -769,6 +769,22 @@ handle_replication_error(Peer, Error, Op, ErrorPred,
                         %% that eventually the condition that lead to the
                         %% error will get resolved.
                         Peer =/= Self;
+                    {missing_entries, _} ->
+                        %% This should not happen normally. But I couldn't
+                        %% convince myself that erlang guarantees that the
+                        %% following isn't possible:
+                        %%
+                        %% 1. Connection to remote node disappears.
+                        %%
+                        %% 2. We send more stuff to the node without realizing
+                        %% it.
+                        %%
+                        %% 3. This reestablishes the connection and the agent
+                        %% sends us back a response.
+                        %%
+                        %% 4. We process this response before DOWN message
+                        %% about (1) is delivered.
+                        Peer =/= Self;
                     _ ->
                         ErrorPred(Error)
                 end,
