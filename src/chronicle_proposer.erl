@@ -486,7 +486,7 @@ handle_agent_response(Peer,
                       Result, State, Data) ->
     handle_establish_term_result(Peer, Result, State, Data);
 handle_agent_response(Peer,
-                      {append, _, _, _, _} = Request,
+                      {append, _, _} = Request,
                       Result, State, Data) ->
     handle_append_result(Peer, Request, Result, State, Data);
 handle_agent_response(Peer, {heartbeat, Round}, Result, State, Data) ->
@@ -715,10 +715,7 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     force_propose_config(NewConfig, NewData).
 
 handle_append_result(Peer, Request, Result, proposing = State, Data) ->
-    {append, HistoryId, Term, CommittedSeqno, HighSeqno} = Request,
-
-    true = (HistoryId =:= Data#data.history_id),
-    true = (Term =:= Data#data.term),
+    {append, CommittedSeqno, HighSeqno} = Request,
 
     case Result of
         ok ->
@@ -1644,7 +1641,7 @@ send_append(Peers, PeerSeqnos,
                   term = Term,
                   committed_seqno = CommittedSeqno,
                   high_seqno = HighSeqno} = Data) ->
-    Request = {append, HistoryId, Term, CommittedSeqno, HighSeqno},
+    Request = {append, CommittedSeqno, HighSeqno},
 
     maybe_send_requests(
       Peers, Request, Data,
