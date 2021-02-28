@@ -83,6 +83,7 @@
                 votes,
                 failed_votes,
                 branch,
+                position,
 
                 %% Used when the state is 'proposing'.
                 pending_entries,
@@ -375,9 +376,10 @@ establish_term_init(Metadata,
     %% transition to propsing state immediately. But brain-dead gen_statem
     %% won't let you transition to a different state from a state_enter
     %% callback. So here we are.
+    Position = get_position(Metadata),
     NewData0 = send_local_establish_term(Metadata, Data),
     {NewData1, BusyPeers} = send_establish_term(OtherQuorumPeers,
-                                                Metadata, NewData0),
+                                                Position, NewData0),
     log_busy_peers(establish_term, BusyPeers),
 
     case is_quorum_feasible(QuorumPeers, BusyPeers, Quorum) of
@@ -389,6 +391,7 @@ establish_term_init(Metadata,
                                     machines = get_machines(ConfigEntry),
                                     votes = [],
                                     failed_votes = BusyPeers,
+                                    position = Position,
                                     config = ConfigEntry,
                                     high_seqno = HighSeqno,
                                     committed_seqno = CommittedSeqno,
@@ -479,9 +482,9 @@ schedule_check_quorum(#data{sync_round = SyncRound,
     NewData.
 
 handle_agent_response(Peer,
-                      {establish_term, _, _, _} = Request,
+                      establish_term,
                       Result, State, Data) ->
-    handle_establish_term_result(Peer, Request, Result, State, Data);
+    handle_establish_term_result(Peer, Result, State, Data);
 handle_agent_response(Peer,
                       {append, _, _, _, _} = Request,
                       Result, State, Data) ->
@@ -491,12 +494,7 @@ handle_agent_response(Peer, {heartbeat, Round}, Result, State, Data) ->
 handle_agent_response(Peer, catchup, Result, State, Data) ->
     handle_catchup_result(Peer, Result, State, Data).
 
-handle_establish_term_result(Peer,
-                             {establish_term, HistoryId, Term, Position},
-                             Result, State, Data) ->
-    true = (HistoryId =:= Data#data.history_id),
-    true = (Term =:= Data#data.term),
-
+handle_establish_term_result(Peer, Result, State, Data) ->
     case Result of
         {ok, #metadata{committed_seqno = CommittedSeqno} = Metadata} ->
             set_peer_active(Peer, Metadata, Data),
@@ -506,6 +504,10 @@ handle_establish_term_result(Peer,
                 {stop, Reason} ->
                     stop(Reason, State, Data);
                 ignored ->
+                    #data{history_id = HistoryId,
+                          term = Term,
+                          position = Position} = Data,
+
                     ?WARNING("Failed to establish "
                              "term ~w (history id ~p, log position ~w) "
                              "on peer ~w: ~w",
@@ -1595,25 +1597,20 @@ send_requests(Peers, Request, Data, Fun) ->
           end),
     NewData.
 
-send_local_establish_term(Metadata,
-                          #data{peer = Self,
-                                history_id = HistoryId, term = Term} = Data) ->
+send_local_establish_term(Metadata, #data{peer = Self} = Data) ->
     Peers = [Self],
     set_peer_status_requested(Self, Data),
-    Position = get_position(Metadata),
 
     send_requests(
-      Peers, {establish_term, HistoryId, Term, Position}, Data,
+      Peers, establish_term, Data,
       fun (_Peer, _, Opaque) ->
               self() ! {Opaque, {ok, Metadata}}
       end).
 
-send_establish_term(Peers, Metadata,
+send_establish_term(Peers, Position,
                     #data{history_id = HistoryId, term = Term} = Data) ->
-    Position = get_position(Metadata),
-    Request = {establish_term, HistoryId, Term, Position},
     maybe_send_requests(
-      Peers, Request, Data,
+      Peers, establish_term, Data,
       fun (Peer, ServerRef, Opaque) ->
               ?DEBUG("Sending establish_term request to peer ~w. "
                      "Term = ~w. History Id: ~p. "
