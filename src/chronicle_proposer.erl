@@ -1600,21 +1600,22 @@ replicate_to_peers(Peers, Data) ->
     log_busy_peers(append, BusyPeers),
     catchup_peers(CatchupPeers, NewData).
 
-should_replicate_to(Peer, HighSeqno, CommitSeqno, Data) ->
+should_replicate_to(Peer, HighSeqno, CommitSeqno, MaxInflight, Data) ->
     case get_peer_status(Peer, Data) of
         {ok, #peer_status{acked_seqno = AckedSeqno,
                           sent_seqno = PeerSentSeqno,
                           sent_commit_seqno = PeerSentCommitSeqno,
                           state = active}} ->
             InFlight = (PeerSentSeqno - AckedSeqno),
+            Credit = MaxInflight - InFlight,
             DoSync =
-                InFlight < ?MAX_INFLIGHT
+                Credit > 0
                 andalso (HighSeqno > PeerSentSeqno
                          orelse CommitSeqno > PeerSentCommitSeqno),
 
             case DoSync of
                 true ->
-                    {true, PeerSentSeqno};
+                    {true, PeerSentSeqno, Credit};
                 false ->
                     false
             end;
@@ -1626,12 +1627,14 @@ send_append(Peers, #data{history_id = HistoryId,
                          term = Term,
                          high_seqno = HighSeqno,
                          committed_seqno = CommittedSeqno} = Data) ->
+    MaxInflight = ?MAX_INFLIGHT,
     maybe_send_requests(
       Peers, Data,
       fun (Peer, PeerRef, ServerRef) ->
-              case should_replicate_to(Peer, HighSeqno, CommittedSeqno, Data) of
-                  {true, PeerSeqno} ->
-                      send_append_to_peer(Peer, PeerRef, PeerSeqno,
+              case should_replicate_to(Peer, HighSeqno, CommittedSeqno,
+                                       MaxInflight, Data) of
+                  {true, PeerSeqno, PeerCredit} ->
+                      send_append_to_peer(Peer, PeerCredit, PeerRef, PeerSeqno,
                                           ServerRef, HistoryId, Term, Data);
                   false ->
                       %% Nothing to be sent, so exclude from "not sent" list.
@@ -1639,9 +1642,9 @@ send_append(Peers, #data{history_id = HistoryId,
               end
       end).
 
-send_append_to_peer(Peer, PeerRef, PeerSeqno,
+send_append_to_peer(Peer, PeerCredit, PeerRef, PeerSeqno,
                     ServerRef, HistoryId, Term, Data) ->
-    case get_entries(PeerSeqno, Data) of
+    case get_entries(PeerSeqno, PeerCredit, Data) of
         {ok, AtTerm, CommittedSeqno, HighSeqno, Entries} ->
             Request = {append, CommittedSeqno, HighSeqno},
             Opaque = make_agent_opaque(PeerRef, Peer, Request),
@@ -1686,9 +1689,6 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
         _ ->
             ok
     end.
-
-get_entries(Seqno, Data) ->
-    get_entries(Seqno, 500, Data).
 
 get_entries(PeerSeqno, _, _Data) when PeerSeqno =:= ?NO_SEQNO ->
     need_catchup;
