@@ -1638,18 +1638,14 @@ replicate_to_peers(PeerSeqnos0, Data) ->
     catchup_peers(CatchupPeers, PeerSeqnos, NewData).
 
 send_append(Peers, PeerSeqnos,
-            #data{history_id = HistoryId,
-                  term = Term,
-                  committed_seqno = CommittedSeqno,
-                  high_seqno = HighSeqno} = Data) ->
-    Request = {append, CommittedSeqno, HighSeqno},
-
+            #data{history_id = HistoryId, term = Term} = Data) ->
     maybe_send_requests(
       Peers, Data,
       fun (Peer, PeerRef, ServerRef) ->
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
-                  {ok, AtTerm, Entries} ->
+                  {ok, AtTerm, CommittedSeqno, HighSeqno, Entries} ->
+                      Request = {append, CommittedSeqno, HighSeqno},
                       Opaque = make_agent_opaque(PeerRef, Peer, Request),
                       case chronicle_agent:append(ServerRef, Opaque, HistoryId,
                                                   Term, CommittedSeqno,
@@ -1694,47 +1690,86 @@ maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
             ok
     end.
 
-get_entries(Seqno, _Data) when Seqno =:= ?NO_SEQNO ->
-    need_catchup;
 get_entries(Seqno, Data) ->
-    case get_term_for_seqno(Seqno, Data) of
+    get_entries(Seqno, 500, Data).
+
+get_entries(PeerSeqno, _, _Data) when PeerSeqno =:= ?NO_SEQNO ->
+    need_catchup;
+get_entries(PeerSeqno, MaxEntries, Data) ->
+    case get_term_for_seqno(PeerSeqno, Data) of
         {ok, Term} ->
-            case do_get_entries(Seqno, Data) of
-                {ok, Entries} ->
-                    {ok, Term, Entries};
-                need_catchup ->
-                    need_catchup
-            end;
+            get_entries_with_term(PeerSeqno, MaxEntries, Term, Data);
         {error, compacted} ->
             need_catchup
     end.
 
-do_get_entries(Seqno, #data{pending_entries = PendingEntries,
-                            local_committed_seqno = LocalCommittedSeqno}) ->
-    case Seqno < LocalCommittedSeqno of
+get_entries_with_term(PeerSeqno, MaxEntries, Term,
+                      #data{high_seqno = HighSeqno} = Data) ->
+    StartSeqno = PeerSeqno + 1,
+    EndSeqno = min(PeerSeqno + MaxEntries, HighSeqno),
+    CommittedSeqno = min(EndSeqno, Data#data.committed_seqno),
+
+    case StartSeqno =< EndSeqno of
+        true ->
+            case do_get_entries(StartSeqno, EndSeqno, Data) of
+                {ok, Entries} ->
+                    {ok, Term, CommittedSeqno, EndSeqno, Entries};
+                need_catchup ->
+                    need_catchup
+            end;
+        false ->
+            {ok, Term, CommittedSeqno, EndSeqno, []}
+    end.
+
+do_get_entries(StartSeqno, EndSeqno,
+               #data{pending_entries = PendingEntries,
+                     local_committed_seqno = LocalCommittedSeqno}) ->
+    case StartSeqno =< LocalCommittedSeqno of
         true ->
             %% TODO: consider triggerring catchup even if we've got all the
             %% entries to send, but there more than some configured number of
             %% them.
-            case get_local_log(Seqno + 1, LocalCommittedSeqno) of
-                {ok, BackfillEntries} ->
-                    {ok, BackfillEntries ++ queue:to_list(PendingEntries)};
-                {error, compacted} ->
-                    need_catchup
+            case EndSeqno =< LocalCommittedSeqno of
+                true ->
+                    get_local_log(StartSeqno, EndSeqno);
+                false ->
+                    case get_local_log(StartSeqno, LocalCommittedSeqno) of
+                        {ok, BackfillEntries} ->
+                            QueuedEntries =
+                                get_entries_from_queue(LocalCommittedSeqno + 1,
+                                                       EndSeqno,
+                                                       PendingEntries),
+
+                            {ok, BackfillEntries ++ QueuedEntries};
+                        need_catchup ->
+                            need_catchup
+                    end
             end;
         false ->
-            {ok, get_entries_from_queue(Seqno, PendingEntries)}
+            {ok, get_entries_from_queue(StartSeqno, EndSeqno, PendingEntries)}
     end.
 
-get_entries_from_queue(Seqno, Q) ->
-    get_entries_from_queue(Seqno, Q, []).
+%% TODO: consider using a different data structure for pending entries
+get_entries_from_queue(StartSeqno, EndSeqno, Q) ->
+    true = (EndSeqno >= StartSeqno),
+    get_entries_from_queue_drop_tail(StartSeqno, EndSeqno, Q).
 
-get_entries_from_queue(Seqno, Q, Acc) ->
+get_entries_from_queue_drop_tail(StartSeqno, EndSeqno, Q) ->
+    {{value, Entry}, NewQ} = queue:out_r(Q),
+    EntrySeqno = Entry#log_entry.seqno,
+    case EntrySeqno > EndSeqno of
+        true ->
+            get_entries_from_queue_drop_tail(StartSeqno, EndSeqno, NewQ);
+        false ->
+            get_entries_from_queue_acc(StartSeqno, NewQ, [Entry])
+    end.
+
+get_entries_from_queue_acc(StartSeqno, Q, Acc) ->
     case queue:out_r(Q) of
         {{value, Entry}, NewQ} ->
-            case Entry#log_entry.seqno > Seqno of
+            case Entry#log_entry.seqno >= StartSeqno of
                 true ->
-                    get_entries_from_queue(Seqno, NewQ, [Entry|Acc]);
+                    get_entries_from_queue_acc(StartSeqno, NewQ, [Entry|Acc]);
                 false ->
                     Acc
             end;
@@ -1772,7 +1807,12 @@ get_term_for_seqno_pending(Seqno, #data{pending_entries = PendingEntries}) ->
     {ok, Entry#log_entry.term}.
 
 get_local_log(StartSeqno, EndSeqno) ->
-    chronicle_agent:get_log_committed(StartSeqno, EndSeqno).
+    case chronicle_agent:get_log_committed(StartSeqno, EndSeqno) of
+        {ok, _} = Ok ->
+            Ok;
+        {error, compacted} ->
+            need_catchup
+    end.
 
 send_ensure_term(Peers, Request,
                  #data{history_id = HistoryId, term = Term} = Data) ->
