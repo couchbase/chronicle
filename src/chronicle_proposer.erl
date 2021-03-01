@@ -1561,35 +1561,34 @@ remove_peer_statuses(Peers, #data{peer_statuses = Tab}) ->
               ets:delete(Tab, Peer)
       end, Peers).
 
-maybe_send_requests(Peers, Request, Data, Fun) ->
+maybe_send_requests(Peers, Data, Fun) ->
     NewData = monitor_agents(Peers, Data),
-    NotSent = lists:filtermap(
-                fun (Peer) ->
-                        {ok, Ref} = get_peer_monitor(Peer, NewData),
-                        Opaque = make_agent_opaque(Ref, Peer, Request),
-                        ServerRef = chronicle_agent:server_ref(Peer,
-                                                               Data#data.peer),
-                        case Fun(Peer, ServerRef, Opaque) of
-                            true ->
-                                false;
-                            false ->
-                                true;
-                            {false, Reason} ->
-                                {true, {Peer, Reason}}
-                        end
-                end, Peers),
+    NotSent =
+        lists:filtermap(
+          fun (Peer) ->
+                  {ok, Ref} = get_peer_monitor(Peer, NewData),
+                  ServerRef = chronicle_agent:server_ref(Peer, Data#data.peer),
+                  case Fun(Peer, Ref, ServerRef) of
+                      true ->
+                          false;
+                      false ->
+                          true;
+                      {false, Reason} ->
+                          {true, {Peer, Reason}}
+                  end
+          end, Peers),
 
     {NewData, NotSent}.
 
 make_agent_opaque(Ref, Peer, Request) ->
     {agent_response, Ref, Peer, Request}.
 
-send_requests(Peers, Request, Data, Fun) ->
+send_requests(Peers, Data, Fun) ->
     {NewData, []} =
         maybe_send_requests(
-          Peers, Request, Data,
-          fun (Peer, ServerRef, Opaque) ->
-                  Fun(Peer, ServerRef, Opaque),
+          Peers, Data,
+          fun (Peer, PeerRef, ServerRef) ->
+                  Fun(Peer, PeerRef, ServerRef),
                   true
           end),
     NewData.
@@ -1599,21 +1598,23 @@ send_local_establish_term(Metadata, #data{peer = Self} = Data) ->
     set_peer_status_requested(Self, Data),
 
     send_requests(
-      Peers, establish_term, Data,
-      fun (_Peer, _, Opaque) ->
+      Peers, Data,
+      fun (Peer, PeerRef, _ServerRef) ->
+              Opaque = make_agent_opaque(PeerRef, Peer, establish_term),
               self() ! {Opaque, {ok, Metadata}}
       end).
 
 send_establish_term(Peers, Position,
                     #data{history_id = HistoryId, term = Term} = Data) ->
     maybe_send_requests(
-      Peers, establish_term, Data,
-      fun (Peer, ServerRef, Opaque) ->
+      Peers, Data,
+      fun (Peer, PeerRef, ServerRef) ->
               ?DEBUG("Sending establish_term request to peer ~w. "
                      "Term = ~w. History Id: ~p. "
                      "Log position: ~w.",
                      [Peer, Term, HistoryId, Position]),
 
+              Opaque = make_agent_opaque(PeerRef, Peer, establish_term),
               case chronicle_agent:establish_term(ServerRef, Opaque,
                                                   HistoryId, Term, Position,
                                                   [nosuspend]) of
@@ -1644,11 +1645,12 @@ send_append(Peers, PeerSeqnos,
     Request = {append, CommittedSeqno, HighSeqno},
 
     maybe_send_requests(
-      Peers, Request, Data,
-      fun (Peer, ServerRef, Opaque) ->
+      Peers, Data,
+      fun (Peer, PeerRef, ServerRef) ->
               PeerSeqno = maps:get(Peer, PeerSeqnos),
               case get_entries(PeerSeqno, Data) of
                   {ok, AtTerm, Entries} ->
+                      Opaque = make_agent_opaque(PeerRef, Peer, Request),
                       case chronicle_agent:append(ServerRef, Opaque, HistoryId,
                                                   Term, CommittedSeqno,
                                                   AtTerm, PeerSeqno, Entries,
@@ -1775,8 +1777,9 @@ get_local_log(StartSeqno, EndSeqno) ->
 send_ensure_term(Peers, Request,
                  #data{history_id = HistoryId, term = Term} = Data) ->
     maybe_send_requests(
-      Peers, Request, Data,
-      fun (_Peer, ServerRef, Opaque) ->
+      Peers, Data,
+      fun (Peer, PeerRef, ServerRef) ->
+              Opaque = make_agent_opaque(PeerRef, Peer, Request),
               case chronicle_agent:ensure_term(ServerRef,
                                                Opaque, HistoryId, Term,
                                                [nosuspend]) of
