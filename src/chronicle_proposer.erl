@@ -1040,49 +1040,6 @@ is_config_committed(#data{config = ConfigEntry} = Data) ->
 is_revision_committed({_, Seqno}, #data{committed_seqno = CommittedSeqno}) ->
     Seqno =< CommittedSeqno.
 
-replicate(#data{peers = Peers} = Data) ->
-    replicate(Peers, Data).
-
-replicate(Peers, Data) when is_list(Peers) ->
-    #data{committed_seqno = CommittedSeqno, high_seqno = HighSeqno} = Data,
-
-    case get_peers_to_replicate(HighSeqno, CommittedSeqno, Peers, Data) of
-        [] ->
-            Data;
-        PeersToReplicate ->
-            replicate_to_peers(PeersToReplicate, Data)
-    end;
-replicate(Peer, Data) when is_atom(Peer) ->
-    replicate([Peer], Data).
-
-get_peers_to_replicate(HighSeqno, CommitSeqno, Peers, Data) ->
-    lists:filtermap(
-      fun (Peer) ->
-              should_replicate_to(Peer, HighSeqno, CommitSeqno, Data)
-      end, Peers).
-
-should_replicate_to(Peer, HighSeqno, CommitSeqno, Data) ->
-    case get_peer_status(Peer, Data) of
-        {ok, #peer_status{acked_seqno = AckedSeqno,
-                          sent_seqno = PeerSentSeqno,
-                          sent_commit_seqno = PeerSentCommitSeqno,
-                          state = active}} ->
-            InFlight = (PeerSentSeqno - AckedSeqno),
-            DoSync =
-                InFlight < ?MAX_INFLIGHT
-                andalso (HighSeqno > PeerSentSeqno
-                         orelse CommitSeqno > PeerSentCommitSeqno),
-
-            case DoSync of
-                true ->
-                    {true, {Peer, PeerSentSeqno}};
-                false ->
-                    false
-            end;
-        _ ->
-            false
-    end.
-
 get_machines(ConfigEntry) ->
     maps:keys(chronicle_config:get_rsms(ConfigEntry#log_entry.value)).
 
@@ -1626,54 +1583,94 @@ send_establish_term(Peers, Position,
               end
       end).
 
-replicate_to_peers(PeerSeqnos0, Data) ->
-    PeerSeqnos = maps:from_list(PeerSeqnos0),
-    Peers = maps:keys(PeerSeqnos),
+replicate(#data{peers = Peers} = Data) ->
+    replicate(Peers, Data).
 
-    {NewData, NotSent} = send_append(Peers, PeerSeqnos, Data),
+replicate(Peers, Data) when is_list(Peers) ->
+    replicate_to_peers(Peers, Data);
+replicate(Peer, Data) when is_atom(Peer) ->
+    replicate([Peer], Data).
+
+replicate_to_peers(Peers, Data) ->
+    {NewData, NotSent} = send_append(Peers, Data),
     BusyPeers = [Peer || {Peer, busy} <- NotSent],
-    CatchupPeers = [Peer || {Peer, need_catchup} <- NotSent],
+    CatchupPeers = [{Peer, PeerSeqno} ||
+                       {Peer, {need_catchup, PeerSeqno}} <- NotSent],
 
     log_busy_peers(append, BusyPeers),
-    catchup_peers(CatchupPeers, PeerSeqnos, NewData).
+    catchup_peers(CatchupPeers, NewData).
 
-send_append(Peers, PeerSeqnos,
-            #data{history_id = HistoryId, term = Term} = Data) ->
+should_replicate_to(Peer, HighSeqno, CommitSeqno, Data) ->
+    case get_peer_status(Peer, Data) of
+        {ok, #peer_status{acked_seqno = AckedSeqno,
+                          sent_seqno = PeerSentSeqno,
+                          sent_commit_seqno = PeerSentCommitSeqno,
+                          state = active}} ->
+            InFlight = (PeerSentSeqno - AckedSeqno),
+            DoSync =
+                InFlight < ?MAX_INFLIGHT
+                andalso (HighSeqno > PeerSentSeqno
+                         orelse CommitSeqno > PeerSentCommitSeqno),
+
+            case DoSync of
+                true ->
+                    {true, PeerSentSeqno};
+                false ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+send_append(Peers, #data{history_id = HistoryId,
+                         term = Term,
+                         high_seqno = HighSeqno,
+                         committed_seqno = CommittedSeqno} = Data) ->
     maybe_send_requests(
       Peers, Data,
       fun (Peer, PeerRef, ServerRef) ->
-              PeerSeqno = maps:get(Peer, PeerSeqnos),
-              case get_entries(PeerSeqno, Data) of
-                  {ok, AtTerm, CommittedSeqno, HighSeqno, Entries} ->
-                      Request = {append, CommittedSeqno, HighSeqno},
-                      Opaque = make_agent_opaque(PeerRef, Peer, Request),
-                      case chronicle_agent:append(ServerRef, Opaque, HistoryId,
-                                                  Term, CommittedSeqno,
-                                                  AtTerm, PeerSeqno, Entries,
-                                                  [nosuspend]) of
-                          ok ->
-                              set_peer_sent_seqnos(Peer, HighSeqno,
-                                                   CommittedSeqno, Data),
-                              true;
-                          nosuspend ->
-                              {false, busy}
-                      end;
-                  need_catchup ->
-                      {false, need_catchup}
+              case should_replicate_to(Peer, HighSeqno, CommittedSeqno, Data) of
+                  {true, PeerSeqno} ->
+                      send_append_to_peer(Peer, PeerRef, PeerSeqno,
+                                          ServerRef, HistoryId, Term, Data);
+                  false ->
+                      %% Nothing to be sent, so exclude from "not sent" list.
+                      true
               end
       end).
 
-catchup_peers(Peers, PeerSeqnos, #data{catchup_pid = Pid} = Data) ->
+send_append_to_peer(Peer, PeerRef, PeerSeqno,
+                    ServerRef, HistoryId, Term, Data) ->
+    case get_entries(PeerSeqno, Data) of
+        {ok, AtTerm, CommittedSeqno, HighSeqno, Entries} ->
+            Request = {append, CommittedSeqno, HighSeqno},
+            Opaque = make_agent_opaque(PeerRef, Peer, Request),
+            case chronicle_agent:append(ServerRef, Opaque, HistoryId,
+                                        Term, CommittedSeqno,
+                                        AtTerm, PeerSeqno, Entries,
+                                        [nosuspend]) of
+                ok ->
+                    set_peer_sent_seqnos(Peer, HighSeqno,
+                                         CommittedSeqno, Data),
+                    true;
+                nosuspend ->
+                    {false, busy}
+            end;
+        need_catchup ->
+            {false, {need_catchup, PeerSeqno}}
+    end.
+
+catchup_peers(Peers, #data{catchup_pid = Pid} = Data) ->
     %% TODO: demonitor_agents() is needed to make sure that if there are any
     %% outstanding requests to the peers, we'll ignore their responses if we
     %% wind up receiving them. Consider doing something cleaner than this.
-    NewData = monitor_agents(Peers, demonitor_agents(Peers, Data)),
+    JustPeers = [Peer || {Peer, _} <- Peers],
+    NewData = monitor_agents(JustPeers, demonitor_agents(JustPeers, Data)),
     lists:foreach(
-      fun (Peer) ->
+      fun ({Peer, PeerSeqno}) ->
               set_peer_catchup(Peer, NewData),
 
               {ok, Ref} = get_peer_monitor(Peer, NewData),
-              PeerSeqno = maps:get(Peer, PeerSeqnos),
               Opaque = make_agent_opaque(Ref, Peer, catchup),
 
               ?DEBUG("Catching up peer ~w from seqno ~b", [Peer, PeerSeqno]),
