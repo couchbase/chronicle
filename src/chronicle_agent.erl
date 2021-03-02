@@ -1546,8 +1546,8 @@ preprocess_entries(HistoryId, AtSeqno, Entries,
             CommitBranch = (LastHistoryId =:= HistoryId),
             {ok, StartSeqno, EndSeqno, CommitBranch, Truncate, FinalEntries};
         {error, {malformed, Entry}} ->
-            ?ERROR("Received an ill-formed append request.~n"
-                   "At seqno: ~p"
+            ?ERROR("Received a malformed append request.~n"
+                   "At seqno: ~p~n"
                    "Stumbled upon this entry: ~p~n"
                    "Some entries:~n~p",
                    [AtSeqno,
