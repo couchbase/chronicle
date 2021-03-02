@@ -83,18 +83,31 @@ handle_catchup_peer(Peer, PeerSeqno, Opaque,
     true = (Peer =/= Self),
 
     NewPending = queue:in({Peer, PeerSeqno, Opaque}, Pending),
-    NewState = State#state{pending = NewPending},
-    {noreply, maybe_spawn_pending(NewState)}.
+    NewState0 = State#state{pending = NewPending},
+    {Spawned, NewState} = maybe_spawn_pending(NewState0),
+
+    case Spawned of
+        true ->
+            ok;
+        false ->
+            ?INFO("Catchup for peer ~w at seqno ~b "
+                  "delayed due to other catchups still in progress.",
+                  [Peer, PeerSeqno])
+    end,
+
+    {noreply, NewState}.
 
 handle_cancel_catchup(Peer, State) ->
     NewState0 = cancel_pending(Peer, State),
     NewState1 = cancel_active(Peer, NewState0),
-    {noreply, maybe_spawn_pending(NewState1)}.
+    {_, NewState} = maybe_spawn_pending(NewState1),
+    {noreply, NewState}.
 
 handle_catchup_result(Pid, Result, #state{pids = Pids} = State) ->
     {{_, Opaque}, NewPids} = maps:take(Pid, Pids),
     reply_to_parent(Opaque, Result, State),
-    {noreply, maybe_spawn_pending(State#state{pids = NewPids})}.
+    {_, NewState} = maybe_spawn_pending(State#state{pids = NewPids}),
+    {noreply, NewState}.
 
 reply_to_parent(Opaque, Reply, #state{parent = Parent}) ->
     Parent ! {Opaque, Reply},
@@ -110,23 +123,29 @@ terminate_child(Pid) ->
     chronicle_utils:terminate_linked_process(Pid, kill),
     ?FLUSH({catchup_result, Pid, _}).
 
-maybe_spawn_pending(#state{pids = Pids,
-                           pending = Pending} = State) ->
+maybe_spawn_pending(State) ->
+    maybe_spawn_pending(false, State).
+
+maybe_spawn_pending(Spawned, #state{pids = Pids,
+                                    pending = Pending} = State) ->
     case maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS of
         true ->
             case queue:out(Pending) of
                 {empty, _} ->
-                    State;
+                    {Spawned, State};
                 {{value, {Peer, PeerSeqno, Opaque}}, NewPending} ->
                     NewState = State#state{pending = NewPending},
                     maybe_spawn_pending(
+                      true,
                       spawn_catchup(Peer, PeerSeqno, Opaque, NewState))
             end;
         false ->
-            State
+            {Spawned, State}
     end.
 
 spawn_catchup(Peer, PeerSeqno, Opaque, #state{pids = Pids} = State) ->
+    ?DEBUG("Starting catchup for peer ~w at seqno ~b", [Peer, PeerSeqno]),
+
     true = (maps:size(Pids) < ?MAX_PARALLEL_CATCHUPS),
     Parent = self(),
     Pid = proc_lib:spawn_link(
