@@ -2377,7 +2377,7 @@ read_rsm_snapshot(Name, Seqno) ->
 
 check_got_removed(State, OldData, NewData) ->
     OldConfig = get_committed_config(OldData),
-    NewConfig = get_committed_config(OldData),
+    NewConfig = get_committed_config(NewData),
 
     OldRevision = chronicle_utils:log_entry_revision(OldConfig),
     NewRevision = chronicle_utils:log_entry_revision(NewConfig),
