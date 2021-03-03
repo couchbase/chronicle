@@ -74,7 +74,7 @@ init(Peer, Machines) ->
 
 reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
     {ok, PeerId} = get_peer_id(OldPeer, Config),
-    Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}.
+    reset_branch(Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}).
 
 branch(#branch{peers = Peers} = Branch, Config) ->
     %% TODO: figure out what to do with replicas
@@ -84,7 +84,7 @@ branch(#branch{peers = Peers} = Branch, Config) ->
                   branch = Branch}.
 
 set_lock(Lock, #config{} = Config) ->
-    Config#config{lock = Lock}.
+    reset_branch(Config#config{lock = Lock}).
 
 check_lock(LockReq, #config{lock = Lock}) ->
     case LockReq =:= unlocked orelse LockReq =:= Lock of
@@ -166,7 +166,7 @@ update_peers(Fun, #config{peers = OldPeers} = Config) ->
                 [] ->
                     {error, no_voters_left};
                 _ ->
-                    {ok, Config#config{peers = NewPeers}}
+                    {ok, reset_branch(Config#config{peers = NewPeers})}
             end;
         {error, _} = Error ->
             Error
@@ -258,7 +258,7 @@ is_peer(Peer, PeerId, Config) ->
 
 get_branch_opaque(#config{branch = Branch}) ->
     case Branch of
-        false ->
+        undefined ->
             no_branch;
         #branch{opaque = Opaque}->
             {ok, Opaque}
@@ -268,4 +268,12 @@ get_settings(#config{settings = Settings}) ->
     Settings.
 
 set_settings(NewSettings, Config) ->
-    Config#config{settings = NewSettings}.
+    reset_branch(Config#config{settings = NewSettings}).
+
+reset_branch(#config{branch = Branch} = Config) ->
+    case Branch of
+        undefined ->
+            Config;
+        _ ->
+            Config#config{branch = undefined}
+    end.
