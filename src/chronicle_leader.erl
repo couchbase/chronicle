@@ -666,7 +666,9 @@ handle_check_member_result(Result, Data) ->
                     ok;
                 {error, Error} ->
                     ?WARNING("Failed to mark node removed: ~p", [Error])
-            end
+            end;
+        {error, Error} ->
+            ?WARNING("Failed to check membership status: ~w", [Error])
     end,
 
     {next_state, make_observer(Data), Data}.
