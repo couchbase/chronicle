@@ -51,7 +51,7 @@
         chronicle_settings:get({agent, join_cluster_timeout}, 120000)).
 
 -define(APPEND_TIMEOUT,
-        chronicle_settings:get({agent, install_snapshot_timeout}, 120000)).
+        chronicle_settings:get({agent, append_timeout}, 120000)).
 -define(INSTALL_SNAPSHOT_TIMEOUT,
         chronicle_settings:get({agent, install_snapshot_timeout}, 120000)).
 
