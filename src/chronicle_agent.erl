@@ -586,6 +586,13 @@ sync_leader() ->
 is_wipe_requested() ->
     call(?SERVER, is_wipe_requested).
 
+-spec mark_removed(chronicle:peer(), chronicle:peer_id()) ->
+          ok | {error, Error} when
+      Error :: {bad_state, joining_cluster | not_provisioned | removed}
+             | wipe_requested
+             | {peer_mismatch,
+                {chronicle:peer(), chronicle:peer_id()},
+                {chronicle:peer(), chronicle:peer_id()}}.
 mark_removed(Peer, PeerId) ->
     call(?SERVER, {mark_removed, Peer, PeerId}).
 
