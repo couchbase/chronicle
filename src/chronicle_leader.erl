@@ -719,8 +719,14 @@ check_member_worker() ->
     exit({shutdown, {worker_result, Result}}).
 
 do_check_member_worker() ->
-    Metadata = chronicle_agent:get_metadata(),
+    case chronicle_agent:get_system_state() of
+        {provisioned, Metadata} ->
+            do_check_member_worker(Metadata);
+        _ ->
+            ok
+    end.
 
+do_check_member_worker(Metadata) ->
     HistoryId = chronicle_agent:get_history_id(Metadata),
     HighSeqno = Metadata#metadata.high_seqno,
     Self = Metadata#metadata.peer,
