@@ -47,8 +47,12 @@
         chronicle_settings:get({agent, local_mark_committed_timeout}, 5000)).
 -define(PREPARE_JOIN_TIMEOUT,
         chronicle_settings:get({agent, prepare_join_timeout}, 10000)).
+
 -define(JOIN_CLUSTER_TIMEOUT,
         chronicle_settings:get({agent, join_cluster_timeout}, 120000)).
+-define(JOIN_CLUSTER_NO_PROGRESS_TIMEOUT,
+        chronicle_settings:get(
+          {agent, join_cluster_no_progress_timeout}, 10000)).
 
 -define(APPEND_TIMEOUT,
         chronicle_settings:get({agent, append_timeout}, 120000)).
@@ -86,7 +90,8 @@
                                 | {retry, reference()}
                                 | #snapshot_state{},
 
-                wipe_state = false :: false | {wiping, From::any()}
+                wipe_state = false :: false | {wiping, From::any()},
+                join_cluster_tref
               }).
 
 start_link() ->
@@ -391,7 +396,8 @@ prepare_join(ClusterInfo) ->
                             | {not_in_peers,
                                chronicle:peer(), [chronicle:peer()]}
                             | wipe_requested
-                            | {bad_cluster_info, any()}.
+                            | {bad_cluster_info, any()}
+                            | no_progress.
 -spec join_cluster(chronicle:cluster_info()) -> join_cluster_result().
 join_cluster(ClusterInfo) ->
     case call(?SERVER, {join_cluster, ClusterInfo}, ?JOIN_CLUSTER_TIMEOUT) of
@@ -696,6 +702,8 @@ handle_event(info, {snapshot_mgr, Msg}, State, Data) ->
         {snapshot_result, Seqno, Result} ->
             handle_snapshot_result(Seqno, Result, State, Data)
     end;
+handle_event(info, join_cluster_timeout, State, Data) ->
+    handle_join_cluster_timeout(State, Data);
 handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
@@ -1170,10 +1178,11 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
                      ?META_STATE => {?META_STATE_JOIN_CLUSTER,
                                      #{seqno => Seqno,
                                        config => Config}}},
-            NewData = store_meta(Meta, Data),
+            NewData0 = store_meta(Meta, Data),
             NewState = #join_cluster{from = From,
                                      seqno = Seqno,
                                      config = Config},
+            NewData = start_join_cluster_timer(NewState, NewData0),
             publish_state(NewState, NewData),
 
             %% We might already have all entries we need.
@@ -1183,6 +1192,39 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
             {next_state, FinalState, FinalData};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
+    end.
+
+handle_join_cluster_timeout(State, Data) ->
+    #join_cluster{from = From} = State,
+
+    ?ERROR("Join cluster made no progress for ~bms.",
+           [?JOIN_CLUSTER_NO_PROGRESS_TIMEOUT]),
+
+    NewState = State#join_cluster{from = undefined},
+    NewData = Data#data{join_cluster_tref = undefined},
+
+    {next_state, NewState, NewData, {reply, From, {error, no_progress}}}.
+
+start_join_cluster_timer(State, Data) ->
+    case State of
+        #join_cluster{from = From} when From =/= undefined ->
+            NewData = cancel_join_cluster_timer(Data),
+            TRef = erlang:send_after(?JOIN_CLUSTER_NO_PROGRESS_TIMEOUT,
+                                     self(),
+                                     join_cluster_timeout),
+            NewData#data{join_cluster_tref = TRef};
+        _ ->
+            Data
+    end.
+
+cancel_join_cluster_timer(#data{join_cluster_tref = TRef} = Data) ->
+    case TRef of
+        undefined ->
+            Data;
+        _ ->
+            _ = erlang:cancel_timer(TRef),
+            ?FLUSH(join_cluster_timeout),
+            Data#data{join_cluster_tref = undefined}
     end.
 
 check_join_cluster(ClusterInfo, State, Data) ->
@@ -1256,7 +1298,7 @@ check_join_cluster_done(State, Data) ->
                             ok
                     end,
 
-                    {NewState, NewData};
+                    {NewState, cancel_join_cluster_timer(NewData)};
                 false ->
                     {State, Data}
             end;
@@ -1427,7 +1469,8 @@ post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
                         check_got_removed(State, OldData, NewData)
                 end;
             _ ->
-                check_state_transitions(State, NewData)
+                NewData1 = start_join_cluster_timer(State, NewData),
+                check_state_transitions(State, NewData1)
         end,
 
     {FinalState, maybe_initiate_snapshot(FinalState, FinalData)}.
