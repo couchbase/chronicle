@@ -186,7 +186,7 @@ init([]) ->
     {ok, make_observer(Data), Data}.
 
 handle_event(enter, OldState, State, Data) ->
-    handle_leader_transition(OldState, State, Data),
+    maybe_announce_stepping_down(OldState, State, Data),
     NewData0 = maybe_publish_leader(OldState, State, Data),
     NewData1 = handle_state_leave(OldState, NewData0),
     handle_state_enter(State, NewData1);
@@ -236,14 +236,14 @@ terminate(_Reason, State, Data) ->
 
     case State of
         #leader{} ->
-            on_leader_stepping_down(State, Data);
+            send_stepping_down(State, Data);
         _ ->
             ok
     end,
 
     _ = reply_to_leader_waiters(no_leader, Data),
     publish_leader(no_leader),
-    announce_leader_status(not_leader).
+    announce_leader_status(no_leader).
 
 %% internal
 handle_state_leave(_OldState, #data{worker = Worker} = Data) ->
@@ -257,28 +257,19 @@ handle_state_leave(_OldState, #data{worker = Worker} = Data) ->
             NewData#data{worker = undefined}
     end.
 
-handle_leader_transition(OldState, NewState, Data) ->
+maybe_announce_stepping_down(OldState, NewState, Data) ->
     WasLeader = is_record(OldState, leader),
     IsLeader = is_record(NewState, leader),
 
     case {WasLeader, IsLeader} of
         {true, false} ->
-            on_leader_stepping_down(OldState, Data);
-        {false, true} ->
-            on_leader_starting(NewState, Data);
+            send_stepping_down(OldState, Data);
         _ ->
             ok
     end.
 
-on_leader_starting(State, _Data) ->
-    announce_leader_status(state_leader_info(State)).
-
-on_leader_stepping_down(OldState, Data) ->
-    announce_leader_status(not_leader),
-    send_stepping_down(OldState, Data).
-
 send_stepping_down(#leader{} = OldState, Data) ->
-    LeaderInfo = state_leader_info(OldState),
+    {leader, LeaderInfo} = state_leader_info(OldState),
     send_msg_to_peers({stepping_down, LeaderInfo}, Data).
 
 handle_state_enter(State, Data) ->
@@ -940,7 +931,7 @@ handle_send_heartbeat(State, Data) ->
     {keep_state, schedule_send_heartbeat(Data)}.
 
 send_heartbeat(#leader{} = State, Data) ->
-    LeaderInfo = state_leader_info(State),
+    {leader, LeaderInfo} = state_leader_info(State),
     Heartbeat = {heartbeat, LeaderInfo},
     send_msg_to_peers(Heartbeat, Data).
 
@@ -954,14 +945,7 @@ send_msg(Peer, Msg) ->
     send(?SERVER(Peer), Msg, [nosuspend]).
 
 handle_announce_leader_status(State, _Data) ->
-    Status =
-        case State of
-            #leader{} ->
-                state_leader_info(State);
-            _ ->
-                not_leader
-        end,
-    announce_leader_status(Status),
+    announce_leader_status(state_leader_info(State)),
     keep_state_and_data.
 
 maybe_publish_leader(OldState, State, Data) ->
@@ -973,6 +957,7 @@ maybe_publish_leader(OldState, State, Data) ->
             Data;
         false ->
             publish_leader(NewLeaderInfo),
+            announce_leader_status(NewLeaderInfo),
             maybe_reply_to_leader_waiters(NewLeaderInfo, Data)
     end.
 
@@ -1042,7 +1027,7 @@ get_last_known_leader_term(State, Data) ->
     %% For a short period of time, the leader term that we've received via a
     %% heartbeat may be ahead of the established term.
     case state_leader_info(State) of
-        #{term := Term, status := Status} ->
+        {_, #{term := Term, status := Status}} ->
             {Term, Status};
         no_leader ->
             {Data#data.established_term, inactive}
@@ -1098,22 +1083,22 @@ state_leader_info(State) ->
     case State of
         #leader{peer = Peer,
                 history_id = HistoryId, term = Term, status = Status} ->
-            make_leader_info(Peer, HistoryId, Term, Status);
+            {leader, make_leader_info(Peer, HistoryId, Term, Status)};
         #follower{leader = Leader,
                   history_id = HistoryId,
                   term = Term,
                   status = Status} ->
-            make_leader_info(Leader, HistoryId, Term, Status);
+            {follower, make_leader_info(Leader, HistoryId, Term, Status)};
         _ ->
             no_leader
     end.
 
 leader_info_to_leader(no_leader) ->
     no_leader;
-leader_info_to_leader(#{leader := Leader,
-                        history_id := HistoryId,
-                        term := Term,
-                        status := Status}) ->
+leader_info_to_leader({_, #{leader := Leader,
+                            history_id := HistoryId,
+                            term := Term,
+                            status := Status}}) ->
     case Status of
         established ->
             %% Expose only established leaders to clients
@@ -1148,7 +1133,7 @@ announce_leader_status(Status) ->
 
 get_active_leader_and_term(State) ->
     case state_leader_info(State) of
-        #{leader := Leader, term := LeaderTerm} ->
+        {_, #{leader := Leader, term := LeaderTerm}} ->
             true = (LeaderTerm =/= undefined),
             {Leader, LeaderTerm};
         _ ->

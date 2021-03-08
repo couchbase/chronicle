@@ -219,9 +219,11 @@ handle_state_enter(_State, Data) ->
 handle_chronicle_event({leader_status, LeaderInfo}, State, Data) ->
     handle_leader_status(LeaderInfo, State, Data).
 
-handle_leader_status(not_leader, _State, Data) ->
+handle_leader_status(no_leader, _State, Data) ->
     {next_state, #follower{}, Data};
-handle_leader_status(LeaderInfo, State, Data) ->
+handle_leader_status({follower, _}, _State, Data) ->
+    {next_state, #follower{}, Data};
+handle_leader_status({leader, LeaderInfo}, State, Data) ->
     #{history_id := HistoryId, term := Term} = LeaderInfo,
 
     case State of
