@@ -312,6 +312,9 @@ reply_not_leader(ReplyTo) ->
 handle_leader_request(_, ReplyTo, #follower{}, _Fun) ->
     reply_not_leader(ReplyTo),
     keep_state_and_data;
+handle_leader_request(_, ReplyTo, #leader{status = not_ready}, _) ->
+    reply_not_leader(ReplyTo),
+    keep_state_and_data;
 handle_leader_request(HistoryAndTerm, ReplyTo,
                       #leader{history_id = OurHistoryId, term = OurTerm},
                       Fun) ->
@@ -338,20 +341,8 @@ batch_leader_request(Req, HistoryAndTerm,
               {keep_state, NewData}
       end).
 
-handle_batch_ready(BatchField, #leader{} = State, Data) ->
-    postpone_if_not_ready(
-      State,
-      fun () ->
-              {keep_state, deliver_batch(BatchField, Data)}
-      end).
-
-postpone_if_not_ready(#leader{status = Status}, Fun) ->
-    case Status of
-        ready ->
-            Fun();
-        not_ready ->
-            {keep_state_and_data, postpone}
-    end.
+handle_batch_ready(BatchField, #leader{status = ready}, Data) ->
+    {keep_state, deliver_batch(BatchField, Data)}.
 
 update_batch(BatchField, Data, Fun) ->
     Batch = element(BatchField, Data),
@@ -389,12 +380,8 @@ handle_leader_query(Query, From, State, Data) ->
     handle_leader_request(
       any, ReplyTo, State,
       fun () ->
-              postpone_if_not_ready(
-                State,
-                fun () ->
-                        deliver_leader_query(Query, ReplyTo, Data),
-                        keep_state_and_data
-                end)
+              deliver_leader_query(Query, ReplyTo, Data),
+              keep_state_and_data
       end).
 
 deliver_leader_query(Query, ReplyTo, #data{proposer = Proposer}) ->
@@ -405,12 +392,8 @@ handle_cas_config(NewConfig, Revision, From, State, Data) ->
     handle_leader_request(
       any, ReplyTo, State,
       fun () ->
-              postpone_if_not_ready(
-                State,
-                fun () ->
-                        deliver_cas_config(NewConfig, Revision, ReplyTo, Data),
-                        keep_state_and_data
-                end)
+              deliver_cas_config(NewConfig, Revision, ReplyTo, Data),
+              keep_state_and_data
       end).
 
 deliver_cas_config(NewConfig, Revision, ReplyTo, #data{proposer = Proposer}) ->
@@ -439,12 +422,8 @@ handle_check_quorum(From, State, #data{proposer = Proposer}) ->
     handle_leader_request(
       any, ReplyTo, State,
       fun () ->
-              postpone_if_not_ready(
-                State,
-                fun () ->
-                        chronicle_proposer:sync_quorum(Proposer, ReplyTo),
-                        keep_state_and_data
-                end)
+              chronicle_proposer:sync_quorum(Proposer, ReplyTo),
+              keep_state_and_data
       end).
 
 handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
