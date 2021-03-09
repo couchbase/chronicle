@@ -306,9 +306,11 @@ reply_request(ReplyTo, Reply) ->
               end, ReplyTos)
     end.
 
+reply_not_leader(ReplyTo) ->
+    reply_request(ReplyTo, {error, {leader_error, not_leader}}).
+
 handle_leader_request(_, ReplyTo, #follower{}, _Fun) ->
-    %% TODO
-    reply_request(ReplyTo, {error, {leader_error, not_leader}}),
+    reply_not_leader(ReplyTo),
     keep_state_and_data;
 handle_leader_request(HistoryAndTerm, ReplyTo,
                       #leader{history_id = OurHistoryId, term = OurTerm},
@@ -318,7 +320,7 @@ handle_leader_request(HistoryAndTerm, ReplyTo,
         true ->
             Fun();
         false ->
-            reply_request(ReplyTo, {error, {leader_error, not_leader}}),
+            reply_not_leader(ReplyTo),
             keep_state_and_data
     end.
 
@@ -478,12 +480,10 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
     ?FLUSH({proposer_msg, _}),
     {PendingCommands, _} = chronicle_utils:batch_flush(CommandsBatch),
     {PendingSyncs, _} = chronicle_utils:batch_flush(SyncsBatch),
-    %% TODO: more detailed error
-    Reply = {error, {leader_error, not_leader}},
 
     lists:foreach(
       fun ({ReplyTo, _Command}) ->
-              reply_request(ReplyTo, Reply)
+              reply_not_leader(ReplyTo)
       end, PendingSyncs ++ PendingCommands),
 
     Data#data{syncs_batch = undefined,
