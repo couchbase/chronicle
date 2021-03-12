@@ -129,7 +129,7 @@ add_peers_loop([], AccPeers) ->
     {ok, AccPeers};
 add_peers_loop([{Peer, Role} | Rest], AccPeers) ->
     case maps:find(Peer, AccPeers) of
-        {ok, CurrentRole} ->
+        {ok, #{role := CurrentRole}} ->
             {error, {already_member, Peer, CurrentRole}};
         error ->
             add_peers_loop(Rest, AccPeers#{Peer => peer_info(Role)})
