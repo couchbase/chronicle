@@ -33,7 +33,8 @@
 -define(SYNCS_BATCH_AGE,
         chronicle_settings:get({proposer, syncs_batch_age}, 5)).
 
--record(follower, {}).
+-record(no_leader, {}).
+-record(follower, { leader, history_id, term }).
 -record(leader, { history_id, term, status, seqno }).
 
 %% TODO: reconsider the decision to have proposer run in a separate process
@@ -125,7 +126,8 @@ init([]) ->
       end),
 
     chronicle_leader:announce_leader_status(),
-    {ok, #follower{}, #data{}}.
+
+    {ok, #no_leader{}, #data{}}.
 
 handle_event(enter, OldState, State, Data) ->
     case should_trigger_state_events(OldState, State) of
@@ -220,9 +222,22 @@ handle_chronicle_event({leader_status, LeaderInfo}, State, Data) ->
     handle_leader_status(LeaderInfo, State, Data).
 
 handle_leader_status(no_leader, _State, Data) ->
-    {next_state, #follower{}, Data};
-handle_leader_status({follower, _}, _State, Data) ->
-    {next_state, #follower{}, Data};
+    {next_state, #no_leader{}, Data};
+handle_leader_status({follower, LeaderInfo}, _State, Data) ->
+    #{leader := Leader,
+      history_id := HistoryId,
+      term := Term,
+      status := Status} = LeaderInfo,
+
+    case Status of
+        established ->
+            {next_state, #follower{leader = Leader,
+                                   history_id = HistoryId,
+                                   term = Term},
+             Data};
+        tentative ->
+            {next_state, #no_leader{}, Data}
+    end;
 handle_leader_status({leader, LeaderInfo}, State, Data) ->
     #{history_id := HistoryId, term := Term} = LeaderInfo,
 
@@ -259,7 +274,7 @@ handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
             %% happen if the proposer fails to get enough votes when
             %% establishing the term. There's no reason to terminate
             %% chronicle_server in such case.
-            {next_state, #follower{}, NewData};
+            {next_state, #no_leader{}, NewData};
         ready ->
             %% Some requests may have never been processed by the proposer and
             %% the only way to indicate to the callers that something went
@@ -288,7 +303,7 @@ handle_proposer_stopping(Reason,
                          #data{proposer = Proposer} = Data) ->
     ?INFO("Proposer ~w for term ~w in history ~p is terminating:~n~p",
           [Proposer, Term, HistoryId, sanitize_reason(Reason)]),
-    {next_state, #follower{}, Data}.
+    {next_state, #no_leader{}, Data}.
 
 reply_request(ReplyTo, Reply) ->
     case ReplyTo of
@@ -309,23 +324,16 @@ reply_request(ReplyTo, Reply) ->
 reply_not_leader(ReplyTo) ->
     reply_request(ReplyTo, {error, {leader_error, not_leader}}).
 
-handle_leader_request(_, ReplyTo, #follower{}, _Fun) ->
+handle_leader_request(HistoryAndTerm, _ReplyTo,
+                      #leader{history_id = OurHistoryId, term = OurTerm,
+                              status = ready},
+                      Fun)
+  when HistoryAndTerm =:= any;
+       HistoryAndTerm =:= {OurHistoryId, OurTerm} ->
+    Fun();
+handle_leader_request(_HistoryAndTerm, ReplyTo, _State, _Fun) ->
     reply_not_leader(ReplyTo),
-    keep_state_and_data;
-handle_leader_request(_, ReplyTo, #leader{status = not_ready}, _) ->
-    reply_not_leader(ReplyTo),
-    keep_state_and_data;
-handle_leader_request(HistoryAndTerm, ReplyTo,
-                      #leader{history_id = OurHistoryId, term = OurTerm},
-                      Fun) ->
-    case HistoryAndTerm =:= any
-        orelse HistoryAndTerm =:= {OurHistoryId, OurTerm} of
-        true ->
-            Fun();
-        false ->
-            reply_not_leader(ReplyTo),
-            keep_state_and_data
-    end.
+    keep_state_and_data.
 
 batch_leader_request(Req, HistoryAndTerm,
                      ReplyTo, BatchField, State, Data) ->
