@@ -169,7 +169,7 @@ handle_event(Type, Event, _State, _Data) ->
     keep_state_and_data.
 
 terminate(_Reason, State, Data) ->
-    handle_state_leave(State, #no_leader{}, Data).
+    handle_event(enter, State, #no_leader{}, Data).
 
 %% internal
 is_interesting_event({leader_status, _}) ->
@@ -212,6 +212,9 @@ handle_state_enter(_OldState, State, Data) ->
     case State of
         #leader{status = not_ready} ->
             handle_leader_enter(State, Data);
+        #leader{status = ready} ->
+            announce_term_established(State, Data),
+            Data;
         _ ->
             Data
     end.
@@ -306,9 +309,7 @@ handle_proposer_ready(HistoryId, Term, HighSeqno,
                               term = Term,
                               status = not_ready} = State,
                       Data) ->
-    NewState = State#leader{status = ready,
-                            seqno = HighSeqno},
-    announce_term_established(NewState, Data),
+    NewState = State#leader{status = ready, seqno = HighSeqno},
     {next_state, NewState, Data}.
 
 handle_proposer_stopping(Reason,
