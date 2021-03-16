@@ -130,14 +130,9 @@ init([]) ->
     {ok, #no_leader{}, #data{}}.
 
 handle_event(enter, OldState, State, Data) ->
-    case should_trigger_state_events(OldState, State) of
-        true ->
-            LeaveData = handle_state_leave(OldState, Data),
-            EnterData = handle_state_enter(State, LeaveData),
-            {keep_state, EnterData};
-        false ->
-            keep_state_and_data
-    end;
+    NewData0 = handle_state_leave(OldState, State, Data),
+    NewData = handle_state_enter(OldState, State, NewData0),
+    {keep_state, NewData};
 handle_event(info, {chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
 handle_event(info, {'EXIT', Pid, Reason}, State, Data) ->
@@ -174,7 +169,7 @@ handle_event(Type, Event, _State, _Data) ->
     keep_state_and_data.
 
 terminate(_Reason, State, Data) ->
-    handle_state_leave(State, Data).
+    handle_state_leave(State, #no_leader{}, Data).
 
 %% internal
 is_interesting_event({leader_status, _}) ->
@@ -182,26 +177,46 @@ is_interesting_event({leader_status, _}) ->
 is_interesting_event(_) ->
     false.
 
-should_trigger_state_events(OldState, NewState) ->
+same_state(OldState, NewState) ->
     %% Don't generate state events if everything that changes is leader status.
     case {OldState, NewState} of
         {#leader{history_id = HistoryId, term = Term},
          #leader{history_id = HistoryId, term = Term}} ->
-            false;
+            true;
         _ ->
             %% Otherwise rely on gen_statem default logic of comparing states
             %% structurally.
-            true
+            OldState =:= NewState
     end.
 
-handle_state_leave(#leader{} = State, Data) ->
+handle_state_leave(OldState, State, Data) ->
+    case OldState of
+        #leader{} ->
+            case same_state(OldState, State) of
+                true ->
+                    %% Only status has changed, nothing to cleanup.
+                    Data;
+                false ->
+                    handle_leader_leave(OldState, Data)
+            end;
+        _ ->
+            Data
+    end.
+
+handle_leader_leave(State, Data) ->
     NewData = cleanup_after_proposer(terminate_proposer(Data)),
     announce_term_finished(State, NewData),
-    NewData;
-handle_state_leave(_OldState, Data) ->
-    Data.
+    NewData.
 
-handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
+handle_state_enter(_OldState, State, Data) ->
+    case State of
+        #leader{status = not_ready} ->
+            handle_leader_enter(State, Data);
+        _ ->
+            Data
+    end.
+
+handle_leader_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
     {ok, Proposer} = chronicle_proposer:start_link(HistoryId, Term),
 
     undefined = Data#data.commands_batch,
@@ -214,9 +229,7 @@ handle_state_enter(#leader{history_id = HistoryId, term = Term}, Data) ->
     NewData = Data#data{proposer = Proposer,
                         commands_batch = CommandsBatch,
                         syncs_batch = SyncsBatch},
-    NewData;
-handle_state_enter(_State, Data) ->
-    Data.
+    NewData.
 
 handle_chronicle_event({leader_status, LeaderInfo}, State, Data) ->
     handle_leader_status(LeaderInfo, State, Data).
