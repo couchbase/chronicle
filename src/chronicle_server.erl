@@ -130,6 +130,9 @@ init([]) ->
     {ok, #no_leader{}, #data{}}.
 
 handle_event(enter, OldState, State, Data) ->
+    %% RSMs need to be notified about leader status changes before
+    %% chronicle_leader exposes the leader to other nodes.
+    announce_leader_status(State, Data),
     NewData0 = handle_state_leave(OldState, State, Data),
     NewData = handle_state_enter(OldState, State, NewData0),
     {keep_state, NewData};
@@ -204,22 +207,21 @@ handle_state_leave(OldState, State, Data) ->
     end.
 
 handle_leader_leave(#leader{status = Status} = State, Data) ->
-    NewData = cleanup_after_proposer(terminate_proposer(Data)),
-
     case Status of
         ready ->
-            announce_term_finished(State, NewData);
+            announce_term_finished(State);
         not_ready ->
             ok
     end,
-    NewData.
+
+    cleanup_after_proposer(terminate_proposer(Data)).
 
 handle_state_enter(_OldState, State, Data) ->
     case State of
         #leader{status = not_ready} ->
             handle_leader_enter(State, Data);
         #leader{status = ready} ->
-            announce_term_established(State, Data),
+            announce_term_established(State),
             Data;
         _ ->
             Data
@@ -432,18 +434,28 @@ handle_register_rsm(Name, Pid, From, State, #data{rsms = RSMs} = Data) ->
     MRef = erlang:monitor(process, Pid),
     NewRSMs = maps:put(MRef, {Name, Pid}, RSMs),
     NewData = Data#data{rsms = NewRSMs},
-    Reply =
-        case State of
-            #leader{history_id = HistoryId,
-                    term = Term,
-                    seqno = Seqno,
-                    status = ready} ->
-                {ok, HistoryId, Term, Seqno};
-            _ ->
-                no_term
-        end,
+    {keep_state, NewData, {reply, From, leader_status(State)}}.
 
-    {keep_state, NewData, {reply, From, Reply}}.
+announce_leader_status(State, Data) ->
+    Status = leader_status(State),
+    foreach_rsm(
+      fun (Pid) ->
+              chronicle_rsm:note_leader_status(Pid, Status)
+      end, Data).
+
+leader_status(#no_leader{}) ->
+    no_leader;
+leader_status(#follower{leader = Leader,
+                        history_id = HistoryId, term = Term}) ->
+    {follower, Leader, HistoryId, Term};
+leader_status(#leader{history_id = HistoryId, term = Term,
+                      seqno = Seqno, status = Status}) ->
+    case Status of
+        ready ->
+            {leader, HistoryId, Term, Seqno};
+        not_ready ->
+            no_leader
+    end.
 
 handle_check_quorum(From, State, #data{proposer = Proposer}) ->
     ReplyTo = {from, From},
@@ -498,24 +510,10 @@ cleanup_after_proposer(#data{commands_batch = CommandsBatch,
 
 announce_term_established(#leader{history_id = HistoryId,
                                   term = Term,
-                                  status = ready,
-                                  seqno = Seqno},
-                          Data) ->
-    %% RSMs need to be notified first, so they are ready to handle requests by
-    %% the time other nodes know about the new leader.
-    foreach_rsm(
-      fun (Pid) ->
-              chronicle_rsm:note_term_established(Pid, HistoryId, Term, Seqno)
-      end, Data),
-
+                                  status = ready}) ->
     chronicle_leader:note_term_established(HistoryId, Term).
 
-announce_term_finished(#leader{history_id = HistoryId, term = Term}, Data) ->
-    foreach_rsm(
-      fun (Pid) ->
-              chronicle_rsm:note_term_finished(Pid, HistoryId, Term)
-      end, Data),
-
+announce_term_finished(#leader{history_id = HistoryId, term = Term}) ->
     chronicle_leader:note_term_finished(HistoryId, Term).
 
 foreach_rsm(Fun, #data{rsms = RSMs}) ->

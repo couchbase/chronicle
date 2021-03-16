@@ -161,11 +161,8 @@ sync(Name, Type, Timeout) ->
             exit({Error, {sync, Name, Type, Timeout}})
     end.
 
-note_term_established(Pid, HistoryId, Term, Seqno) ->
-    gen_statem:cast(Pid, {term_established, HistoryId, Term, Seqno}).
-
-note_term_finished(Pid, HistoryId, Term) ->
-    gen_statem:cast(Pid, {term_finished, HistoryId, Term}).
+note_leader_status(Pid, LeaderStatus) ->
+    gen_statem:cast(Pid, {leader_status, LeaderStatus}).
 
 note_seqno_committed(Name, Seqno) ->
     gen_statem:cast(?SERVER(Name), {seqno_committed, Seqno}).
@@ -224,14 +221,8 @@ init([Name, Mod, ModArgs]) ->
 
 complete_init(#init{}, #data{name = Name} = Data) ->
     publish_local_revision(Data),
-    Effects =
-        case chronicle_server:register_rsm(Name, self()) of
-            {ok, HistoryId, Term, Seqno} ->
-                {next_event, cast,
-                 {term_established, HistoryId, Term, Seqno}};
-            no_term ->
-                []
-        end,
+    LeaderStatus = chronicle_server:register_rsm(Name, self()),
+    Effects = [{next_event, cast, {leader_status, LeaderStatus}}],
 
     case call_callback(post_init, Data) of
         {ok, NewModData} ->
@@ -255,10 +246,8 @@ handle_event({call, From}, Call, State, Data) ->
         _ ->
             handle_call(Call, From, State, Data)
     end;
-handle_event(cast, {term_established, HistoryId, Term, Seqno}, State, Data) ->
-    handle_term_established(HistoryId, Term, Seqno, State, Data);
-handle_event(cast, {term_finished, HistoryId, Term}, State, Data) ->
-    handle_term_finished(HistoryId, Term, State, Data);
+handle_event(cast, {leader_status, LeaderStatus}, State, Data) ->
+    handle_leader_status(LeaderStatus, State, Data);
 handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
     handle_seqno_committed(Seqno, State, Data);
 handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
@@ -609,7 +598,15 @@ handle_command_result(Ref, Result, State,
 
     {keep_state, Data#data{pending_clients = NewRequests}}.
 
-handle_term_established(HistoryId, Term, Seqno, #follower{}, Data) ->
+handle_leader_status(Status, State, Data) ->
+    case Status of
+        {leader, HistoryId, Term, Seqno} ->
+            handle_became_leader(HistoryId, Term, Seqno, State, Data);
+        _ ->
+            handle_not_leader(State, Data)
+    end.
+
+handle_became_leader(HistoryId, Term, Seqno, #follower{}, Data) ->
     Status =
         case Data#data.read_seqno >= Seqno of
             true ->
@@ -629,12 +626,9 @@ handle_term_established(HistoryId, Term, Seqno, #follower{}, Data) ->
              status = Status},
      Data}.
 
-handle_term_finished(HistoryId, Term, State, Data) ->
+handle_not_leader(State, Data) ->
     case State of
         #leader{} ->
-            true = (HistoryId =:= State#leader.history_id),
-            true = (Term =:= State#leader.term),
-
             %% By the time chronicle_rsm receives the notification that the
             %% term has terminated, it must have already processed all
             %% notifications from chronicle_agent about commands that are
