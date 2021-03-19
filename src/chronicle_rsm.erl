@@ -49,7 +49,10 @@
 -type leader_status() :: {wait_for_seqno, chronicle:seqno()} | established.
 
 -record(init, { wait_for_seqno }).
--record(follower, {}).
+-record(no_leader, {}).
+-record(follower, { leader :: chronicle:peer(),
+                    history_id :: chronicle:history_id(),
+                    term :: chronicle:leader_term() }).
 -record(leader, { history_id :: chronicle:history_id(),
                   term :: chronicle:leader_term(),
                   status :: leader_status() }).
@@ -226,7 +229,7 @@ complete_init(#init{}, #data{name = Name} = Data) ->
 
     case call_callback(post_init, Data) of
         {ok, NewModData} ->
-            {next_state, #follower{}, set_mod_data(NewModData, Data), Effects};
+            {next_state, #no_leader{}, set_mod_data(NewModData, Data), Effects};
         {stop, _} = Stop ->
             Stop
     end.
@@ -408,10 +411,6 @@ handle_sync_revision_timeout(Request, _State,
 handle_seqno_committed_next_state(State,
                                   #data{read_seqno = ReadSeqno} = Data) ->
     case State of
-        #follower{} ->
-            {keep_state, Data};
-        #leader{status = established} ->
-            {keep_state, Data};
         #init{wait_for_seqno = Seqno} ->
             case ReadSeqno >= Seqno of
                 true ->
@@ -427,7 +426,9 @@ handle_seqno_committed_next_state(State,
                     {next_state, State#leader{status = established}, Data};
                 false ->
                     {keep_state, Data}
-            end
+            end;
+        _ ->
+            {keep_state, Data}
     end.
 
 apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
@@ -602,11 +603,18 @@ handle_leader_status(Status, State, Data) ->
     case Status of
         {leader, HistoryId, Term, Seqno} ->
             handle_became_leader(HistoryId, Term, Seqno, State, Data);
-        _ ->
-            handle_not_leader(State, Data)
+        {follower, Leader, HistoryId, Term} ->
+            NewState = #follower{leader = Leader,
+                                 history_id = HistoryId,
+                                 term = Term},
+            handle_not_leader(State, NewState, Data);
+        no_leader ->
+            handle_not_leader(State, #no_leader{}, Data)
     end.
 
-handle_became_leader(HistoryId, Term, Seqno, #follower{}, Data) ->
+handle_became_leader(HistoryId, Term, Seqno, State, Data) ->
+    true = is_record(State, no_leader) orelse is_record(State, follower),
+
     Status =
         case Data#data.read_seqno >= Seqno of
             true ->
@@ -626,25 +634,26 @@ handle_became_leader(HistoryId, Term, Seqno, #follower{}, Data) ->
              status = Status},
      Data}.
 
-handle_not_leader(State, Data) ->
-    case State of
-        #leader{} ->
-            %% By the time chronicle_rsm receives the notification that the
-            %% term has terminated, it must have already processed all
-            %% notifications from chronicle_agent about commands that are
-            %% known to have been committed by the outgoing leader. So there's
-            %% not a need to synchronize with chronicle_agent as it was done
-            %% previously.
-            {next_state,
-             #follower{},
+handle_not_leader(OldState, NewState, Data) ->
+    NewData =
+        case OldState of
+            #leader{} ->
+                %% By the time chronicle_rsm receives the notification that
+                %% the term has terminated, it must have already processed all
+                %% notifications from chronicle_agent about commands that are
+                %% known to have been committed by the outgoing leader. So
+                %% there's not a need to synchronize with chronicle_agent as
+                %% it was done previously.
 
-             %% We only respond to accepted commands here. Other in flight
-             %% requests will get a propoer response from chronicle_server.
-             flush_accepted_commands({error, {leader_error, leader_lost}},
-                                     Data)};
-        #follower{} ->
-            keep_state_and_data
-    end.
+                %% We only respond to accepted commands here. Other in flight
+                %% requests will get a propoer response from chronicle_server.
+                flush_accepted_commands({error, {leader_error, leader_lost}},
+                                        Data);
+            _ ->
+                Data
+        end,
+
+    {next_state, NewState, NewData}.
 
 handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
