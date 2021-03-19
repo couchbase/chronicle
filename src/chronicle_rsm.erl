@@ -292,7 +292,7 @@ handle_command(HistoryId, Command, From,
                #leader{history_id = OurHistoryId} = State, Data)
   when HistoryId =:= OurHistoryId ->
     handle_command_leader(Command, From, State, Data);
-handle_command(_HistoryId, _Command, From, #follower{}, _Data) ->
+handle_command(_HistoryId, _Command, From, _, _Data) ->
     {keep_state_and_data,
      {reply, From, {error, {leader_error, not_leader}}}}.
 
