@@ -350,6 +350,23 @@ sync_revision_add_request(HistoryId, Seqno, Timeout, From,
     NewRequests = gb_trees:insert(Request, RequestData, Requests),
     Data#data{sync_revision_requests = NewRequests}.
 
+manage_sync_revision_requests(OldData, NewData) ->
+    OldHistoryId = OldData#data.applied_history_id,
+    NewHistoryId = NewData#data.applied_history_id,
+
+    FinalData =
+        case OldHistoryId =:= NewHistoryId of
+            true ->
+                NewData;
+            false ->
+                %% Drop requests that have the history id different from the
+                %% one we just adopted. See the comment in
+                %% handle_sync_revision/4 for more context.
+                sync_revision_drop_diverged_requests(NewData)
+        end,
+
+    sync_revision_requests_reply(FinalData).
+
 sync_revision_requests_reply(#data{applied_seqno = Seqno,
                                    sync_revision_requests = Requests} = Data) ->
     NewRequests = sync_revision_requests_reply_loop(Seqno, Requests),
@@ -441,23 +458,11 @@ apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
                   apply_entry(Entry, Acc, Data)
           end, {HistoryId, AppliedSeqno, ModState, ModData, []}, Entries),
 
-    NewData0 = Data#data{mod_state = NewModState,
-                         mod_data = NewModData,
-                         applied_history_id = NewHistoryId,
-                         applied_seqno = NewAppliedSeqno,
-                         read_seqno = HighSeqno},
-    NewData1 =
-        case HistoryId =:= NewHistoryId of
-            true ->
-                NewData0;
-            false ->
-                %% Drop requests that have the history id different from the
-                %% one we just adopted. See the comment in
-                %% handle_sync_revision/4 for more context.
-                sync_revision_drop_diverged_requests(NewData0)
-        end,
-
-    NewData = sync_revision_requests_reply(NewData1),
+    NewData = Data#data{mod_state = NewModState,
+                        mod_data = NewModData,
+                        applied_history_id = NewHistoryId,
+                        applied_seqno = NewAppliedSeqno,
+                        read_seqno = HighSeqno},
     pending_commands_reply(Replies, State, NewData).
 
 apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies},
@@ -659,7 +664,8 @@ handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
     case CommittedSeqno >= ReadSeqno of
         true ->
-            NewData = read_log(CommittedSeqno, State, Data),
+            NewData0 = read_log(CommittedSeqno, State, Data),
+            NewData = manage_sync_revision_requests(Data, NewData0),
             maybe_publish_local_revision(State, NewData),
             handle_seqno_committed_next_state(State, NewData);
         false ->
