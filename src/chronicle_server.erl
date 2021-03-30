@@ -822,6 +822,7 @@ leader_transfer_test__(Nodes) ->
            fun () ->
                    RPid =
                        spawn_link(fun () ->
+                                          timer:sleep(rand:uniform(500)),
                                           ok = chronicle:remove_peer(Leader)
                                   end),
 
