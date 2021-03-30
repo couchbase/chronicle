@@ -2012,7 +2012,6 @@ stop(Reason, ExtraEffects, State,
            config_change_reply_to = ConfigReplyTo} = Data)
   when State =:= establish_term;
        State =:= proposing ->
-    chronicle_server:proposer_stopping(Pid, Reason),
     {NewData0, Effects} = unpostpone_config_requests(Data),
 
     %% Demonitor all agents so we don't process any more requests from them.
@@ -2044,6 +2043,7 @@ stop(Reason, ExtraEffects, State,
                 NewData2
         end,
 
+    chronicle_server:proposer_stopping(Pid, Reason),
     {next_state, {stopped, Reason}, NewData3, Effects ++ ExtraEffects};
 stop(_Reason, ExtraEffects, {stopped, _}, Data) ->
     {keep_state, Data, ExtraEffects}.
