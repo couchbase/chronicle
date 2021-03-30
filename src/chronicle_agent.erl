@@ -1059,6 +1059,16 @@ check_provisioned(State) ->
             {error, {bad_state, get_external_state(State)}}
     end.
 
+check_provisioned_or_removed(State) ->
+    case State of
+        provisioned ->
+            ok;
+        removed ->
+            ok;
+        _ ->
+            {error, {bad_state, get_external_state(State)}}
+    end.
+
 handle_wipe(From, State, #data{wipe_state = WipeState} = Data) ->
     case State of
         not_provisioned ->
@@ -1781,7 +1791,7 @@ handle_local_mark_committed(HistoryId, Term,
 check_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data) ->
     HighSeqno = get_high_seqno(Data),
 
-    ?CHECK(check_provisioned(State),
+    ?CHECK(check_provisioned_or_removed(State),
            check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            case check_committed_seqno(Term, CommittedSeqno, HighSeqno, Data) of
