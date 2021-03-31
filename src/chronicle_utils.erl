@@ -280,20 +280,18 @@ multi_call_recv(Refs, ParentMRef, TRef, OkPred, AccOk, AccBad) ->
             multi_call_recv(NewRefs, ParentMRef, TRef, OkPred, AccOk, NewAccBad)
     end.
 
-start_timeout({timeout, _, _} = Timeout) ->
-    Timeout;
+start_timeout({deadline, _} = Deadline) ->
+    Deadline;
 start_timeout(infinity) ->
     infinity;
 start_timeout(Timeout)
   when is_integer(Timeout), Timeout >= 0 ->
-    NowTs = erlang:monotonic_time(),
-    {timeout, NowTs, Timeout}.
+    NowTs = erlang:monotonic_time(millisecond),
+    {deadline, NowTs + Timeout}.
 
-read_timeout({timeout, StartTs, Timeout}) ->
-    NowTs = erlang:monotonic_time(),
-    Passed = erlang:convert_time_unit(NowTs - StartTs, native, millisecond),
-    Remaining = Timeout - Passed,
-    max(0, Remaining);
+read_timeout({deadline, Deadline}) ->
+    NowTs = erlang:monotonic_time(millisecond),
+    max(0, Deadline - NowTs);
 read_timeout(infinity) ->
     infinity;
 read_timeout(Timeout) when is_integer(Timeout) ->
