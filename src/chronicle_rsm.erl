@@ -29,7 +29,7 @@
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, call/4,
-                          read_timeout/1, read_deadline/1, start_timeout/1]).
+                          read_deadline/1, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
@@ -125,13 +125,12 @@ get_local_revision(Name) ->
 get_published_revision(Name) ->
     chronicle_ets:get(?LOCAL_REVISION_KEY(Name)).
 
-sync_revision(Name, Revision, Timeout0) ->
+sync_revision(Name, Revision, Timeout) ->
     case sync_revision_fast(Name, Revision) of
         ok ->
             ok;
         use_slow_path ->
-            Timeout = read_timeout(Timeout0),
-            Request = {sync_revision, Revision, Timeout},
+            Request = {sync_revision, Revision, read_deadline(Timeout)},
             case call(?SERVER(Name), Request, infinity) of
                 ok ->
                     ok;
@@ -155,7 +154,7 @@ sync(Name, Timeout) ->
         {ok, Revision} ->
             sync_revision(Name, Revision, TRef);
         {error, Error} ->
-            exit({Error, {sync, Name, Timeout}})
+            exit({Error, {sync, Name}})
     end.
 
 %% A temporary version to prevent ns_server from breaking.
@@ -321,8 +320,8 @@ handle_call({query, Query}, From, State, Data) ->
     handle_query(Query, From, State, Data);
 handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
-handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
-    handle_sync_revision(Revision, Timeout, From, State, Data);
+handle_call({sync_revision, Revision, Deadline}, From, State, Data) ->
+    handle_sync_revision(Revision, Deadline, From, State, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
@@ -609,7 +608,7 @@ handle_get_local_revision(From, _State,
                                 applied_seqno = Seqno}) ->
     {keep_state_and_data, {reply, From, {HistoryId, Seqno}}}.
 
-handle_sync_revision({_, Seqno} = Revision, Timeout, From,
+handle_sync_revision({_, Seqno} = Revision, Deadline, From,
                      _State,
                      #data{read_seqno = ReadSeqno,
                            config = Config} = Data) ->
@@ -621,7 +620,7 @@ handle_sync_revision({_, Seqno} = Revision, Timeout, From,
                 false ->
                     {keep_state,
                      sync_revision_add_request(Seqno, Revision,
-                                               Timeout, From, Data)}
+                                               Deadline, From, Data)}
             end;
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
@@ -635,10 +634,10 @@ check_revision_compatible(Revision, HighSeqno, Config) ->
             {error, {history_mismatch, Info}}
     end.
 
-sync_revision_add_request(Seqno, Revision, Timeout, From,
+sync_revision_add_request(Seqno, Revision, Deadline, From,
                           #data{sync_revision_requests = Requests} = Data) ->
     Request = {Seqno, make_ref()},
-    TRef = sync_revision_start_timer(Request, Timeout),
+    TRef = sync_revision_start_timer(Request, Deadline),
     RequestData = {From, TRef, Revision},
     NewRequests = gb_trees:insert(Request, RequestData, Requests),
     Data#data{sync_revision_requests = NewRequests}.
@@ -709,9 +708,10 @@ sync_revision_drop_diverged_requests(#data{read_seqno = ReadSeqno,
 
     Data#data{sync_revision_requests = NewRequests}.
 
-sync_revision_start_timer(Request, Timeout) ->
-    erlang:send_after(Timeout, self(),
-                      {?RSM_TAG, sync_revision_timeout, Request}).
+sync_revision_start_timer(Request, Deadline) ->
+    erlang:send_after(Deadline, self(),
+                      {?RSM_TAG, sync_revision_timeout, Request},
+                      [{abs, true}]).
 
 sync_revision_cancel_timer(Request, TRef) ->
     _ = erlang:cancel_timer(TRef),
