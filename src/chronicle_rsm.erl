@@ -29,8 +29,7 @@
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, call/4,
-                          read_timeout/1,
-                          start_timeout/1]).
+                          read_timeout/1, read_deadline/1, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
@@ -104,14 +103,7 @@ get_quorum_revision(Name, Timeout) ->
     leader_request(Name, get_quorum_revision, Timeout).
 
 leader_request(Name, Request, TRef) ->
-    Deadline =
-        case read_timeout(TRef) of
-            infinity ->
-                infinity;
-            Timeout when is_integer(Timeout) ->
-                erlang:monotonic_time(millisecond) + Timeout
-        end,
-
+    Deadline = read_deadline(TRef),
     case call(?SERVER(Name),
               {leader_request, Request, Deadline}, leader_request,
               infinity) of

@@ -297,6 +297,13 @@ read_timeout(infinity) ->
 read_timeout(Timeout) when is_integer(Timeout) ->
     Timeout.
 
+read_deadline({deadline, Deadline}) ->
+    Deadline;
+read_deadline(infinity) ->
+    infinity;
+read_deadline(Timeout) when is_integer(Timeout) ->
+    erlang:monotonic_time(millisecond) + Timeout.
+
 term_number({TermNumber, _TermLeader}) ->
     TermNumber.
 
