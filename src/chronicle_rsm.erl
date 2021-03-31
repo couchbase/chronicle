@@ -84,8 +84,9 @@
                 mod_state :: any(),
                 mod_data :: any() }).
 
-start_link(Name, Mod, ModArgs) ->
-    gen_statem:start_link(?START_NAME(Name), ?MODULE, [Name, Mod, ModArgs], []).
+start_link(Name, PeerId, Mod, ModArgs) ->
+    gen_statem:start_link(?START_NAME(Name), ?MODULE,
+                          [Name, PeerId, Mod, ModArgs], []).
 
 command(Name, Command) ->
     command(Name, Command, 5000).
@@ -208,7 +209,7 @@ sanitize_event({call, _} = Type, {query, _}) ->
 sanitize_event(Type, Event) ->
     {Type, Event}.
 
-init([Name, Mod, ModArgs]) ->
+init([Name, _PeerId, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),

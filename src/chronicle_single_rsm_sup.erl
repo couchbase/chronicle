@@ -18,21 +18,21 @@
 -module(chronicle_single_rsm_sup).
 
 -behavior(supervisor).
--export([start_link/3]).
+-export([start_link/4]).
 -export([init/1]).
 
-start_link(Name, Module, Args) ->
-    supervisor:start_link(?MODULE, [Name, Module, Args]).
+start_link(Name, PeerId, Module, Args) ->
+    supervisor:start_link(?MODULE, [Name, PeerId, Module, Args]).
 
 %% supervisor callbacks
-init([Name, Module, Args]) ->
+init([Name, PeerId, Module, Args]) ->
     Flags = #{strategy => one_for_all,
               intensity => 10,
               period => 10},
     %% TODO: make this optional
     ExtraSpecs = Module:specs(Name, Args),
     RSM = #{id => Name,
-            start => {chronicle_rsm, start_link, [Name, Module, Args]},
+            start => {chronicle_rsm, start_link, [Name, PeerId, Module, Args]},
             restart => permanent,
             shutdown => 5000,
             type => worker},

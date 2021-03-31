@@ -24,6 +24,9 @@
 -export([start_link/0]).
 -export([init/1, handle_event/2, child_specs/1]).
 
+-record(state, { peer_id :: chronicle:peer_id(),
+                 config :: #config{} }).
+
 start_link() ->
     dynamic_supervisor:start_link(?START_NAME(?MODULE), ?MODULE, []).
 
@@ -49,19 +52,22 @@ init([]) ->
               intensity => 3,
               period => 10},
 
+    PeerId = Metadata#metadata.peer_id,
     Config = chronicle_utils:get_config(Metadata),
-    {ok, Flags, chronicle_config:get_rsms(Config)}.
+    {ok, Flags, #state{peer_id = PeerId,
+                       config = Config}}.
 
-handle_event({new_config, Config}, _) ->
-    {noreply, chronicle_config:get_rsms(Config)}.
+handle_event({new_config, Config}, State) ->
+    {noreply, State#state{config = Config}}.
 
-child_specs(RSMs) ->
+child_specs(#state{peer_id = PeerId, config = Config}) ->
+    RSMs = chronicle_config:get_rsms(Config),
     lists:map(
       fun ({Name, #rsm_config{module = Module, args = Args}}) ->
               #{id => Name,
                 start => {chronicle_single_rsm_sup,
                           start_link,
-                          [Name, Module, Args]},
+                          [Name, PeerId, Module, Args]},
                 restart => permanent,
                 type => supervisor}
       end, maps:to_list(RSMs)).
