@@ -1276,7 +1276,7 @@ make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
                value = Value}.
 
 update_config(ConfigEntry, #data{peer = Self,
-                                 quorum_peers = OldQuorumPeers} = Data) ->
+                                 peers = OldPeers} = Data) ->
     RawQuorum = get_append_quorum(ConfigEntry),
     BeingRemoved = not lists:member(Self, get_quorum_peers(RawQuorum)),
 
@@ -1289,7 +1289,7 @@ update_config(ConfigEntry, #data{peer = Self,
     %% When nodes are being removed, attempt to notify them about the new
     %% config that removes them. This is just a best-effort approach. If nodes
     %% are down -- they are not going to get notified.
-    NewPeers = lists:usort(OldQuorumPeers ++ AllPeers),
+    NewPeers = lists:usort(OldPeers ++ AllPeers),
     NewData = Data#data{config = ConfigEntry,
                         being_removed = BeingRemoved,
                         quorum = Quorum,
