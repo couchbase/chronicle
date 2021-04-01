@@ -187,7 +187,8 @@ format_status(Opt, [_PDict, State, Data]) ->
             {State,
              case Data of
                  #data{} ->
-                     Data#data{mod_state = omitted};
+                     Data#data{mod_state = omitted,
+                               leader_requests = omitted};
                  _ ->
                      %% During gen_statem initialization Data may be undefined.
                      Data
