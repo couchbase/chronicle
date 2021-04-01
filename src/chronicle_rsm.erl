@@ -837,7 +837,6 @@ handle_leader_status(Status, State, Data) ->
                                  term = Term},
             handle_became_follower(NewState, NewData);
         no_leader ->
-            ?DEBUG("no leader; ~p pending requests", [length(get_leader_requests(NewData))]),
             {next_state, #no_leader{}, NewData}
     end.
 
