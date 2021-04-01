@@ -553,7 +553,8 @@ handle_command(Command, ReplyTo,
                #data{name = Name} = Data) ->
     {Request, NewData} = add_local_request(command, ReplyTo, Data),
     Tag = {?RSM_TAG, command, Request#request.ref},
-    chronicle_server:rsm_command(Tag, HistoryId, Term, Name, Command),
+    RSMCommand = #rsm_command{rsm_name = Name, command = Command},
+    chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
     {keep_state, NewData}.
 
 handle_command_result(Ref, Result, _State, Data) ->

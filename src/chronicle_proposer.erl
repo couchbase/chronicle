@@ -1192,13 +1192,12 @@ handle_append_commands(Commands,
 
     {keep_state, replicate(NewData1)}.
 
-handle_command({rsm_command, RSMName, Command}, Seqno,
+handle_command({rsm_command, Command}, Seqno,
                #data{machines = Machines} = Data) ->
+    RSMName = Command#rsm_command.rsm_name,
     case lists:member(RSMName, Machines) of
         true ->
-            RSMCommand = #rsm_command{rsm_name = RSMName,
-                                      command = Command},
-            {ok, make_log_entry(Seqno, RSMCommand, Data), Data};
+            {ok, make_log_entry(Seqno, Command, Data), Data};
         false ->
             ?WARNING("Received a command "
                      "referencing a non-existing RSM: ~w", [RSMName]),

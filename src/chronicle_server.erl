@@ -77,9 +77,9 @@ sync_quorum(Tag, HistoryId, Term) ->
     gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
 
 %% Used locally by corresponding chronicle_rsm instance.
-rsm_command(Tag, HistoryId, Term, RSMName, Command) ->
-    gen_statem:cast(?SERVER, {rsm_command,
-                              self(), Tag, HistoryId, Term, RSMName, Command}).
+rsm_command(Tag, HistoryId, Term, Command) ->
+    gen_statem:cast(?SERVER,
+                    {rsm_command, self(), Tag, HistoryId, Term, Command}).
 
 %% Meant to only be used by chronicle_proposer.
 proposer_ready(Pid, HistoryId, Term) ->
@@ -109,8 +109,9 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
-sanitize_event(cast, {rsm_command, Pid, Tag, HistoryId, Term, RSMName, _}) ->
-    {cast, {rsm_command, Pid, Tag, HistoryId, Term, RSMName, '...'}};
+sanitize_event(cast, {rsm_command, Pid, Tag, HistoryId, Term, Command0}) ->
+    Command = Command0#rsm_command{command = '...'},
+    {cast, {rsm_command, Pid, Tag, HistoryId, Term, Command}};
 sanitize_event(Type, Event) ->
     {Type, Event}.
 
@@ -158,10 +159,10 @@ handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
 handle_event({call, From}, check_quorum, State, Data) ->
     handle_check_quorum(From, State, Data);
 handle_event(cast,
-             {rsm_command, Pid, Tag, HistoryId, Term, RSMName, RSMCommand},
+             {rsm_command, Pid, Tag, HistoryId, Term, RSMCommand},
              State, Data) ->
     ReplyTo = {send, Pid, Tag},
-    Command = {rsm_command, RSMName, RSMCommand},
+    Command = {rsm_command, RSMCommand},
     batch_leader_request(Command, {HistoryId, Term}, ReplyTo,
                          #data.commands_batch, State, Data);
 handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
@@ -529,8 +530,8 @@ sanitize_data(#data{commands_batch = Commands} = Data) ->
     SanitizedCommands =
         chronicle_utils:batch_map(
           fun (Requests) ->
-                  [{ReplyTo, {rsm_command, Name, ommitted}} ||
-                      {ReplyTo, {rsm_command, Name, _}} <- Requests]
+                  [{ReplyTo, {rsm_command, ommitted}} ||
+                      {ReplyTo, {rsm_command, _}} <- Requests]
           end, Commands),
 
     Data#data{commands_batch = SanitizedCommands}.
