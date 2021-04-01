@@ -973,14 +973,6 @@ get_log(StartSeqno, EndSeqno, #data{name = Name}) ->
 set_mod_data(ModData, Data) ->
     Data#data{mod_data = ModData}.
 
-unwrap_command_reply(Reply) ->
-    case Reply of
-        {command_reply, R} ->
-            R;
-        _ ->
-            Reply
-    end.
-
 call_callback(Callback, Data) ->
     call_callback(Callback, [], Data).
 
