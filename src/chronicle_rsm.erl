@@ -62,6 +62,10 @@
 
 -record(data, { name :: atom(),
 
+                peer_id :: chronicle:peer_id(),
+                incarnation :: non_neg_integer(),
+                serial :: non_neg_integer(),
+
                 applied_history_id :: chronicle:history_id(),
                 applied_seqno :: chronicle:seqno(),
                 read_seqno :: chronicle:seqno(),
@@ -209,12 +213,17 @@ sanitize_event({call, _} = Type, {query, _}) ->
 sanitize_event(Type, Event) ->
     {Type, Event}.
 
-init([Name, _PeerId, Mod, ModArgs]) ->
+init([Name, PeerId, Mod, ModArgs]) ->
     case Mod:init(Name, ModArgs) of
         {ok, ModState, ModData} ->
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
 
             Data0 = #data{name = Name,
+
+                          peer_id = PeerId,
+                          incarnation = 0,
+                          serial = 0,
+
                           applied_history_id = ?NO_HISTORY,
                           applied_seqno = ?NO_SEQNO,
                           read_seqno = ?NO_SEQNO,
@@ -383,9 +392,23 @@ take_leader_request(Ref, Data) ->
 take_local_request(Ref, Data) ->
     take_request(Ref, #data.local_requests, Data).
 
-handle_leader_request_call(RawRequest, Deadline, From, State, Data) ->
-    {Request, NewData} = add_leader_request(RawRequest, Deadline, From, Data),
+handle_leader_request_call(RawRequest0, Deadline, From, State, Data) ->
+    {RawRequest, NewData0} = prepare_leader_request(RawRequest0, Data),
+    {Request, NewData} =
+        add_leader_request(RawRequest, Deadline, From, NewData0),
     maybe_forward_leader_request(Request, State, NewData).
+
+prepare_leader_request(Request, Data) ->
+    case Request of
+        {command, Command} ->
+            #data{peer_id = PeerId,
+                  incarnation = Incarnation,
+                  serial = Serial} = Data,
+            FinalRequest = {command, PeerId, Incarnation, Serial, Command},
+            {FinalRequest, Data#data{serial = Serial + 1}};
+        get_quorum_revision ->
+            {Request, Data}
+    end.
 
 get_forward_mode(State, Data) ->
     case State of
@@ -542,18 +565,23 @@ reply_leader_request(ReplyTo, Reply, Effects) ->
 
 do_leader_request(Request, ReplyTo, State, Data) ->
     case Request of
-        {command, Command} ->
-            handle_command(Command, ReplyTo, State, Data);
+        {command, PeerId, Incarnation, Serial, Command} ->
+            handle_command(PeerId, Incarnation, Serial, Command,
+                           ReplyTo, State, Data);
         get_quorum_revision ->
             handle_get_quorum_revision(ReplyTo, State, Data)
     end.
 
-handle_command(Command, ReplyTo,
+handle_command(PeerId, Incarnation, Serial, Command, ReplyTo,
                #leader{history_id = HistoryId, term = Term},
                #data{name = Name} = Data) ->
     {Request, NewData} = add_local_request(command, ReplyTo, Data),
     Tag = {?RSM_TAG, command, Request#request.ref},
-    RSMCommand = #rsm_command{rsm_name = Name, command = Command},
+    RSMCommand = #rsm_command{rsm_name = Name,
+                              peer_id = PeerId,
+                              peer_incarnation = Incarnation,
+                              serial = Serial,
+                              command = Command},
     chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
     {keep_state, NewData}.
 
