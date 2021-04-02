@@ -150,7 +150,7 @@ sync_revision(Name, Revision, Timeout0) ->
 
 sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
     case get_local_revision_fast(Name) of
-        {LocalHistoryId, LocalSeqno}
+        {ok, {LocalHistoryId, LocalSeqno}}
           when LocalHistoryId =:= RevHistoryId andalso LocalSeqno >= RevSeqno ->
             ok;
         _ ->
