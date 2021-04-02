@@ -44,7 +44,8 @@
          replace_settings/1, replace_settings/2,
          update_settings/1, update_settings/2]).
 
--export_type([uuid/0, peer/0, peer_id/0, history_id/0,
+-export_type([uuid/0, peer/0, peer_id/0,
+              history_id/0, history_log/0,
               leader_term/0, seqno/0, peer_position/0,
               revision/0, cluster_info/0]).
 
@@ -56,6 +57,7 @@
 -type peers() :: [peer()].
 -type peers_and_roles() :: [{peer(), role()}].
 -type history_id() :: binary().
+-type history_log() :: [{history_id(), seqno()}].
 
 -type leader_term() :: {non_neg_integer(), peer()}.
 -type seqno() :: non_neg_integer().

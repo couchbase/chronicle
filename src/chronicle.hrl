@@ -57,7 +57,9 @@
                   state_machines :: #{atom() => #rsm_config{}},
 
                   settings = #{} :: map(),
-                  branch :: undefined | #branch{} }).
+
+                  branch :: undefined | #branch{},
+                  history_log :: chronicle:history_log() }).
 
 -record(log_entry,
         { history_id :: chronicle:history_id(),

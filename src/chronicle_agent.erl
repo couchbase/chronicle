@@ -1011,7 +1011,7 @@ handle_provision(Machines, From, State, Data) ->
             Term = next_term(?NO_TERM, Peer),
             Seqno = 1,
 
-            Config = chronicle_config:init(Peer, Machines),
+            Config = chronicle_config:init(HistoryId, Peer, Machines),
             ConfigEntry = #log_entry{history_id = HistoryId,
                                      term = Term,
                                      seqno = Seqno,

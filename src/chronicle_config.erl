@@ -17,13 +17,15 @@
 
 -include("chronicle.hrl").
 
+-define(MAX_HISTORY_LOG_SIZE, 10).
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
 -export([is_config/1, is_stable/1]).
 -export([transition/2, next_config/1]).
--export([init/2, reinit/3, branch/2]).
+-export([init/3, reinit/3, branch/3]).
 -export([set_lock/2, check_lock/2]).
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
@@ -64,24 +66,37 @@ transition(NewConfig, OldConfig) ->
             NewConfig
     end.
 
-init(Peer, Machines) ->
+init(HistoryId, Peer, Machines) ->
     MachinesMap =
         maps:from_list(
           [{Name, #rsm_config{module = Module, args = Args}} ||
               {Name, Module, Args} <- Machines]),
     Peers = #{Peer => peer_info(voter)},
-    #config{peers = Peers, state_machines = MachinesMap}.
+    #config{peers = Peers,
+            state_machines = MachinesMap,
+            history_log = add_history(HistoryId, ?NO_SEQNO, [])}.
 
 reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
     {ok, PeerId} = get_peer_id(OldPeer, Config),
     reset_branch(Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}).
 
-branch(#branch{peers = Peers} = Branch, Config) ->
+branch(Seqno, #branch{peers = Peers,
+                      history_id = HistoryId} = Branch, Config) ->
+    #config{history_log = HistoryLog} = Config,
+    NewHistoryLog = add_history(HistoryId, Seqno, HistoryLog),
     %% TODO: figure out what to do with replicas
     PeerInfos = [{Peer, peer_info(Peer, Config, voter)} || Peer <- Peers],
     Config#config{peers = maps:from_list(PeerInfos),
                   old_peers = undefined,
-                  branch = Branch}.
+                  branch = Branch,
+                  history_log = NewHistoryLog}.
+
+add_history(HistoryId, Seqno, []) ->
+    [{HistoryId, Seqno}];
+add_history(HistoryId, Seqno, [{_, PrevSeqno} | _] = HistoryLog) ->
+    true = Seqno > PrevSeqno,
+    NewHistoryLog = [{HistoryId, Seqno} | HistoryLog],
+    lists:sublist(NewHistoryLog, ?MAX_HISTORY_LOG_SIZE).
 
 set_lock(Lock, #config{} = Config) ->
     reset_branch(Config#config{lock = Lock}).

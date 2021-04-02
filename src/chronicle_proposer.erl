@@ -702,7 +702,7 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
     %% will get truncated from the history. This can be confusing and it's
     %% possible to deal with this situation better. But for the time being I
     %% decided not to bother.
-    NewConfig = chronicle_config:branch(Branch, Config),
+    NewConfig = chronicle_config:branch(CommittedSeqno + 1, Branch, Config),
 
     ?INFO("Resolving a branch.~n"
           "High seqno: ~p~n"
