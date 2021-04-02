@@ -202,7 +202,7 @@ get_rsm_snapshot(Name) ->
                                       get_rsm_snapshot(Name, Seqno, Config)
                               end) of
         {error, no_snapshot} ->
-            {no_snapshot, ?NO_SEQNO};
+            {no_snapshot, ?NO_SEQNO, undefined};
         Other ->
             Other
     end.
@@ -212,9 +212,9 @@ get_rsm_snapshot(Name, Seqno, Config) ->
     case maps:is_key(Name, RSMs) of
         true ->
             Snapshot = read_rsm_snapshot(Name, Seqno),
-            {ok, Seqno, Snapshot};
+            {ok, Seqno, Config#log_entry.value, Snapshot};
         false ->
-            {no_snapshot, Seqno}
+            {no_snapshot, Seqno, Config#log_entry.value}
     end.
 
 get_full_snapshot(HaveSeqno) ->

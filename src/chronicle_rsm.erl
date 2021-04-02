@@ -70,6 +70,8 @@
                 pending_clients :: pending_clients(),
                 sync_revision_requests :: sync_revision_requests(),
 
+                config :: undefined | #config{},
+
                 mod :: atom(),
                 mod_state :: any(),
                 mod_data :: any() }).
@@ -451,21 +453,25 @@ handle_seqno_committed_next_state(State,
 apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
                                                applied_seqno = AppliedSeqno,
                                                mod_state = ModState,
-                                               mod_data = ModData} = Data) ->
-    {NewHistoryId, NewAppliedSeqno, NewModState, NewModData, Replies} =
+                                               mod_data = ModData,
+                                               config = Config} = Data) ->
+    {NewHistoryId, NewAppliedSeqno,
+     NewModState, NewModData, NewConfig, Replies} =
         lists:foldl(
           fun (Entry, Acc) ->
                   apply_entry(Entry, Acc, Data)
-          end, {HistoryId, AppliedSeqno, ModState, ModData, []}, Entries),
+          end,
+          {HistoryId, AppliedSeqno, ModState, ModData, Config, []}, Entries),
 
     NewData = Data#data{mod_state = NewModState,
                         mod_data = NewModData,
+                        config = NewConfig,
                         applied_history_id = NewHistoryId,
                         applied_seqno = NewAppliedSeqno,
                         read_seqno = HighSeqno},
     pending_commands_reply(Replies, State, NewData).
 
-apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies},
+apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Config, Replies},
             #data{mod = Mod} = Data) ->
     #log_entry{value = Value,
                history_id = EntryHistoryId,
@@ -484,13 +490,15 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Replies},
 
             EntryTerm = Entry#log_entry.term,
             NewReplies = [{EntryTerm, EntrySeqno, Reply} | Replies],
-            {HistoryId, EntrySeqno, NewModState, NewModData, NewReplies};
-        #config{} = Config ->
+            {HistoryId, EntrySeqno,
+             NewModState, NewModData, Config, NewReplies};
+        #config{} = NewConfig ->
             {ok, NewModState, NewModData} =
-                Mod:handle_config(Config,
+                Mod:handle_config(NewConfig,
                                   Revision, AppliedRevision,
                                   ModState, ModData),
-            {EntryHistoryId, EntrySeqno, NewModState, NewModData, Replies}
+            {EntryHistoryId, EntrySeqno,
+             NewModState, NewModData, NewConfig, Replies}
     end.
 
 pending_commands_reply(Replies,
@@ -707,14 +715,14 @@ read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
             %% by the leader. So we always expect to have a snapshot
             %% available, and the snapshot seqno is expected to be greater
             %% than our read seqno.
-            {ok, SnapshotSeqno, Snapshot} = get_snapshot(Data),
+            {ok, SnapshotSeqno, Config, Snapshot} = get_snapshot(Data),
             true = (SnapshotSeqno >= StartSeqno),
 
             ?DEBUG("Got log compacted when reading seqnos ~p to ~p. "
                    "Applying snapshot at seqno ~p",
                    [StartSeqno, EndSeqno, SnapshotSeqno]),
 
-            NewData = apply_snapshot(SnapshotSeqno, Snapshot, Data),
+            NewData = apply_snapshot(SnapshotSeqno, Config, Snapshot, Data),
             case EndSeqno > SnapshotSeqno of
                 true ->
                     %% There are more entries to read.
@@ -819,13 +827,13 @@ get_snapshot(#data{name = Name}) ->
 
 maybe_restore_snapshot(Data) ->
     case get_snapshot(Data) of
-        {ok, SnapshotSeqno, Snapshot} ->
-            apply_snapshot(SnapshotSeqno, Snapshot, Data);
-        {no_snapshot, SnapshotSeqno} ->
-            Data#data{read_seqno = SnapshotSeqno}
+        {ok, SnapshotSeqno, Config, Snapshot} ->
+            apply_snapshot(SnapshotSeqno, Config, Snapshot, Data);
+        {no_snapshot, SnapshotSeqno, Config} ->
+            Data#data{read_seqno = SnapshotSeqno, config = Config}
     end.
 
-apply_snapshot(Seqno, Snapshot, Data) ->
+apply_snapshot(Seqno, Config, Snapshot, Data) ->
     #snapshot{applied_history_id = AppliedHistoryId,
               applied_seqno = AppliedSeqno,
               mod_state = ModState} = Snapshot,
@@ -835,7 +843,8 @@ apply_snapshot(Seqno, Snapshot, Data) ->
               applied_seqno = AppliedSeqno,
               read_seqno = Seqno,
               mod_state = ModState,
-              mod_data = ModData}.
+              mod_data = ModData,
+              config = Config}.
 
 pack_command(Command) ->
     {binary, term_to_binary(Command, [{compressed, 1}])}.
