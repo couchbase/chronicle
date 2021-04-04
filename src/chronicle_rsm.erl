@@ -22,24 +22,21 @@
 %% bug.
 -define(INIT_TIMEOUT, chronicle_settings:get({rsm, init_timeout}, 60000)).
 
+-define(RETRY_AFTER, chronicle_settings:get({rsm, retry_after}, 2000)).
+-define(MAX_BACKOFF, chronicle_settings:get({rsm, max_backoff}, 4)).
+-define(DOWN_INTERVAL, chronicle_settings:get({rsm, down_interval}, 10000)).
+
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, call/4,
                           read_timeout/1,
-                          with_leader/2, start_timeout/1]).
+                          start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
 -define(SERVER(Peer, Name), ?SERVER_NAME(Peer, Name)).
 
 -define(LOCAL_REVISION_KEY(Name), {?RSM_TAG, Name, local_revision}).
-
--type pending_client() ::
-        {From :: any(),
-         Type :: command
-               | command_accepted
-               | sync_quorum}.
--type pending_clients() :: #{reference() => pending_client()}.
 
 -type sync_revision_requests() ::
         gb_trees:tree(
@@ -58,14 +55,29 @@
                     applied_seqno :: chronicle:seqno(),
                     mod_state :: any() }).
 
+-record(request, { ref,
+                   tref,
+                   reply_to,
+                   request
+                 }).
+
 -record(data, { name :: atom(),
 
                 applied_history_id :: chronicle:history_id(),
                 applied_seqno :: chronicle:seqno(),
                 read_seqno :: chronicle:seqno(),
 
-                pending_clients :: pending_clients(),
                 sync_revision_requests :: sync_revision_requests(),
+
+                leader_requests,
+                leader_sender,
+                leader_status = down :: active | down,
+
+                leader_backoff,
+                leader_last_retry,
+
+                local_requests,
+                accepted_commands,
 
                 config :: undefined | #config{},
 
@@ -80,16 +92,7 @@ command(Name, Command) ->
     command(Name, Command, 5000).
 
 command(Name, Command, Timeout) ->
-    PackedCommand = pack_command(Command),
-    unwrap_command_reply(
-      with_leader(Timeout,
-                  fun (TRef, Leader, {HistoryId, _Term}) ->
-                          command(Leader, Name, HistoryId, PackedCommand, TRef)
-                  end)).
-
-command(Leader, Name, HistoryId, Command, Timeout) ->
-    call(?SERVER(Leader, Name),
-         {command, HistoryId, Command}, command, Timeout).
+    leader_request(Name, {command, pack_command(Command)}, Timeout).
 
 query(Name, Query) ->
     query(Name, Query, 5000).
@@ -98,13 +101,25 @@ query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, query, Timeout).
 
 get_quorum_revision(Name, Timeout) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, {HistoryId, _Term}) ->
-                        get_quorum_revision(Leader, Name, HistoryId, TRef)
-                end).
+    leader_request(Name, get_quorum_revision, Timeout).
 
-get_quorum_revision(Leader, Name, HistoryId, Timeout) ->
-    call(?SERVER(Leader, Name), {get_quorum_revision, HistoryId}, Timeout).
+leader_request(Name, Request, TRef) ->
+    Deadline =
+        case read_timeout(TRef) of
+            infinity ->
+                infinity;
+            Timeout when is_integer(Timeout) ->
+                erlang:monotonic_time(millisecond) + Timeout
+        end,
+
+    case call(?SERVER(Name),
+              {leader_request, Request, Deadline}, leader_request,
+              infinity) of
+        {ok, Reply} ->
+            Reply;
+        {error, Error} ->
+            exit(Error)
+    end.
 
 get_local_revision(Name) ->
     case get_published_revision(Name) of
@@ -183,8 +198,20 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
-sanitize_event({call, _} = Type, {command, HistoryId, _}) ->
-    {Type, {command, HistoryId, '...'}};
+sanitize_event({call, _} = Type,
+               {leader_request, Request, Deadline} = LeaderRequest) ->
+    case Request of
+        {command, _} ->
+            {Type, {leader_request, {command, '...'}, Deadline}};
+        _ ->
+            {Type, LeaderRequest}
+    end;
+sanitize_event(cast, {leader_request, Pid, Tag, HistoryId, _}) ->
+    {cast, {leader_request, Pid, Tag, HistoryId, '...'}};
+sanitize_event(cast, {leader_request_result, Ref, _}) ->
+    {cast, {leader_request_result, Ref, '...'}};
+sanitize_event(internal, {leader_request, Tag, _}) ->
+    {internal, {leader_request, Tag, '...'}};
 sanitize_event({call, _} = Type, {query, _}) ->
     {Type, {query, '...'}};
 sanitize_event(Type, Event) ->
@@ -199,8 +226,10 @@ init([Name, Mod, ModArgs]) ->
                           applied_history_id = ?NO_HISTORY,
                           applied_seqno = ?NO_SEQNO,
                           read_seqno = ?NO_SEQNO,
-                          pending_clients = #{},
                           sync_revision_requests = gb_trees:empty(),
+                          leader_requests = #{},
+                          local_requests = #{},
+                          accepted_commands = #{},
                           mod = Mod,
                           mod_state = ModState,
                           mod_data = ModData},
@@ -213,14 +242,18 @@ init([Name, Mod, ModArgs]) ->
             Stop
     end.
 
-complete_init(#init{}, #data{name = Name} = Data) ->
+complete_init(Effects, #init{}, #data{name = Name} = Data) ->
     publish_local_revision(Data),
     LeaderStatus = chronicle_server:register_rsm(Name, self()),
-    Effects = [{next_event, cast, {leader_status, LeaderStatus}}],
+    FinalEffects =
+        [{next_event, cast, {leader_status, LeaderStatus}} | Effects],
 
     case call_callback(post_init, Data) of
         {ok, NewModData} ->
-            {next_state, #no_leader{}, set_mod_data(NewModData, Data), Effects};
+            {next_state,
+             #no_leader{},
+             set_mod_data(NewModData, Data),
+             FinalEffects};
         {stop, _} = Stop ->
             Stop
     end.
@@ -233,6 +266,8 @@ handle_event(state_timeout, init_timeout,
            "Read seqno: ~p",
            [?INIT_TIMEOUT, WaitedSeqno, ReadSeqno]),
     {stop, init_timeout};
+handle_event(state_timeout, retry_leader, State, Data) ->
+    handle_retry_leader(State, Data);
 handle_event({call, From}, Call, State, Data) ->
     case State of
         #init{} ->
@@ -246,12 +281,31 @@ handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
     handle_seqno_committed(Seqno, State, Data);
 handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
     handle_take_snapshot(Seqno, State, Data);
+handle_event(cast,
+             {leader_request, Pid, Tag, HistoryId, Request}, State, Data) ->
+    handle_leader_request(HistoryId, Pid, Tag, Request, State, Data);
+handle_event(cast, {leader_request_result, Ref, Result}, State, Data) ->
+    handle_leader_request_result(Ref, Result, State, Data);
+handle_event(internal, {leader_request, Tag, Request}, State, Data) ->
+    handle_leader_request_internal(Tag, Request, State, Data);
+handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
+    handle_request_timeout(Ref, State, Data);
+handle_event(info,
+             {?RSM_TAG, leader_request, Pid, Tag, HistoryId, Request},
+             State, Data) ->
+    handle_leader_request(HistoryId, Pid, Tag, Request, State, Data);
+handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
+    handle_leader_down(State, Data);
 handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
     handle_command_result(Ref, Result, State, Data);
-handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, State, Data) ->
-    handle_sync_quorum_result(Ref, Result, State, Data);
+handle_event(info, {{?RSM_TAG, sync_quorum, ReplyTo}, Result}, State, Data) ->
+    handle_sync_quorum_result(ReplyTo, Result, State, Data);
 handle_event(info, {?RSM_TAG, sync_revision_timeout, Request}, State, Data) ->
     handle_sync_revision_timeout(Request, State, Data);
+handle_event(info, {'EXIT', Pid, _}, _State, #data{leader_sender = Sender})
+  when Pid =:= Sender ->
+    %% In case the callback module set trap_exit to true
+    {stop, {leader_sender_died, Pid}};
 handle_event(info, Msg, _State, Data) ->
     case call_callback(handle_info, [Msg], Data) of
         {noreply, NewModData} ->
@@ -264,34 +318,295 @@ handle_event(Type, Event, State, _Data) ->
              "Current state: ~p", [Type, Event, State]),
     keep_state_and_data.
 
-terminate(Reason, _State, Data) ->
+terminate(Reason, State, Data) ->
+    _ = cleanup_after_leader(State, Data),
     call_callback(terminate, [Reason], Data).
 
 %% internal
-handle_call({command, HistoryId, Command}, From, State, Data) ->
-    handle_command(HistoryId, Command, From, State, Data);
+handle_call({leader_request, Request, Deadline}, From, State, Data) ->
+    handle_leader_request_call(Request, Deadline, From, State, Data);
 handle_call({query, Query}, From, State, Data) ->
     handle_query(Query, From, State, Data);
 handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
 handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
     handle_sync_revision(Revision, Timeout, From, State, Data);
-handle_call({get_quorum_revision, HistoryId}, From, State, Data) ->
-    handle_get_quorum_revision(HistoryId, From, State, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
 
-handle_command(HistoryId, Command, From,
-               #leader{history_id = OurHistoryId} = State, Data)
-  when HistoryId =:= OurHistoryId ->
-    handle_command_leader(Command, From, State, Data);
-handle_command(_HistoryId, _Command, From, _, _Data) ->
-    {keep_state_and_data,
-     {reply, From, {error, {leader_error, not_leader}}}}.
+add_request(RawRequest, Deadline, ReplyTo, Field, Data) ->
+    Ref = make_ref(),
+    TRef =
+        case Deadline of
+            infinity ->
+                undefined;
+            _ when is_integer(Deadline) ->
+                erlang:send_after(Deadline, self(),
+                                  {?RSM_TAG, request_timeout, Ref},
+                                  [{abs, true}])
+        end,
 
-handle_command_leader(Command, From, State, Data) ->
-    {keep_state, submit_command(Command, From, State, Data)}.
+    Request = #request{ref = Ref,
+                       tref = TRef,
+                       reply_to = ReplyTo,
+                       request = RawRequest},
+
+    Requests = element(Field, Data),
+    NewRequests = Requests#{Ref => Request},
+
+    {Request, setelement(Field, Data, NewRequests)}.
+
+cancel_request_timer(#request{ref = Ref, tref = TRef}) ->
+    case TRef of
+        undefined ->
+            ok;
+        _ ->
+            _ = erlang:cancel_timer(TRef),
+            ?FLUSH({?RSM_TAG, request_timeout, Ref}),
+            ok
+    end.
+
+add_leader_request(Request, Deadline, From, Data) ->
+    add_request(Request, Deadline, {from, From}, #data.leader_requests, Data).
+
+get_leader_requests(#data{leader_requests = LeaderRequests}) ->
+    maps:values(LeaderRequests).
+
+add_local_request(Request, ReplyTo, Data) ->
+    add_request(Request, infinity, ReplyTo, #data.local_requests, Data).
+
+take_request(Ref, Field, Data) ->
+    Requests = element(Field, Data),
+    case maps:take(Ref, Requests) of
+        error ->
+            no_request;
+        {Request, NewRequests} ->
+            {Request, setelement(Field, Data, NewRequests)}
+    end.
+
+take_leader_request(Ref, Data) ->
+    take_request(Ref, #data.leader_requests, Data).
+
+take_local_request(Ref, Data) ->
+    take_request(Ref, #data.local_requests, Data).
+
+handle_leader_request_call(RawRequest, Deadline, From, State, Data) ->
+    {Request, NewData} = add_leader_request(RawRequest, Deadline, From, Data),
+    maybe_forward_leader_request(Request, State, NewData).
+
+get_forward_mode(State, Data) ->
+    case State of
+        #leader{} ->
+            local;
+        #follower{} ->
+            case Data#data.leader_status of
+                active ->
+                    remote;
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
+
+maybe_forward_leader_request(Request, State, Data) ->
+    case get_forward_mode(State, Data) of
+        local ->
+            {keep_state, Data, leader_request_next_event(Request)};
+        remote ->
+            leader_sender_forward(Data#data.leader_sender, Request),
+            {keep_state, Data};
+        none ->
+            {keep_state, Data}
+    end.
+
+leader_request_next_event(#request{ref = Ref, request = Request}) ->
+    {next_event, internal, {leader_request, Ref, Request}}.
+
+maybe_forward_pending_leader_requests(State, Data) ->
+    maybe_forward_pending_leader_requests([], State, Data).
+
+maybe_forward_pending_leader_requests(Effects, State, Data) ->
+    case get_forward_mode(State, Data) of
+        local ->
+            ExtraEffects = [leader_request_next_event(Request) ||
+                               Request <- get_leader_requests(Data)],
+            {next_state, State, Data, ExtraEffects ++ Effects};
+        remote ->
+            Sender = Data#data.leader_sender,
+            Requests = get_leader_requests(Data),
+            lists:foreach(
+              fun (Request) ->
+                      leader_sender_forward(Sender, Request)
+              end, Requests),
+            {next_state, State, Data, Effects};
+        none ->
+            {next_state, State, Data, Effects}
+    end.
+
+handle_request_timeout(Ref, _State, Data) ->
+    {Request, NewData} = take_leader_request(Ref, Data),
+    {from, From} = Request#request.reply_to,
+    {keep_state, NewData, {reply, From, {error, timeout}}}.
+
+handle_leader_request_result(Ref, Result, _State, Data) ->
+    case take_leader_request(Ref, Data) of
+        {#request{reply_to = ReplyTo} = Request, NewData} ->
+            cancel_request_timer(Request),
+            {from, From} = ReplyTo,
+            {keep_state, NewData, {reply, From, {ok, Result}}};
+        no_request ->
+            keep_state_and_data
+    end.
+
+handle_leader_down(State, #data{leader_last_retry = LastRetry,
+                                leader_sender = Sender} = Data) ->
+    #follower{} = State,
+
+    unlink(Sender),
+    ?FLUSH({'EXIT', Sender, _}),
+
+    Now = erlang:monotonic_time(millisecond),
+    Backoff =
+        case LastRetry of
+            undefined ->
+                1;
+            _ ->
+                SinceRetry = Now - LastRetry,
+                case SinceRetry < ?DOWN_INTERVAL of
+                    true ->
+                        Data#data.leader_backoff * 2;
+                    false ->
+                        1
+                end
+        end,
+
+    RetryAfter = ?RETRY_AFTER * Backoff,
+    {keep_state,
+     Data#data{leader_status = down,
+               leader_backoff = Backoff,
+               leader_sender = undefined},
+     {state_timeout, RetryAfter, retry_leader}}.
+
+handle_retry_leader(State, Data) ->
+    Now = erlang:monotonic_time(millisecond),
+    NewData0 = Data#data{leader_last_retry = Now, leader_status = active},
+    NewData = spawn_leader_sender(State, NewData0),
+    maybe_forward_pending_leader_requests(State, NewData).
+
+leader_sender_forward(Sender, Request) ->
+    Sender ! {forward_request, Request},
+    ok.
+
+leader_sender(Leader, Parent, HistoryId, #data{name = Name}) ->
+    ServerRef = ?SERVER(Leader, Name),
+    MRef = chronicle_utils:monitor_process(ServerRef),
+    leader_sender_loop(ServerRef, Parent, HistoryId, MRef).
+
+leader_sender_loop(ServerRef, Parent, HistoryId, MRef) ->
+    receive
+        {'DOWN', MRef, _, _, _} ->
+            Parent ! {?RSM_TAG, leader_down};
+        {forward_request, Request} ->
+            send_leader_request(ServerRef, Parent, HistoryId, Request),
+            leader_sender_loop(ServerRef, Parent, HistoryId, MRef)
+    end.
+
+send_leader_request(ServerRef, Parent, HistoryId,
+                    #request{ref = RequestRef, request = Request}) ->
+    gen_statem:cast(ServerRef,
+                    {leader_request, Parent, RequestRef, HistoryId, Request}).
+
+handle_leader_request(HistoryId, Pid, Tag, Request, State, Data) ->
+    ReplyTo = {cast, Pid, Tag},
+    case State of
+        #leader{history_id = OurHistoryId} ->
+            case HistoryId =:= OurHistoryId of
+                true ->
+                    do_leader_request(Request, ReplyTo, State, Data);
+                false ->
+                    keep_state_and_data
+            end;
+        _ ->
+            keep_state_and_data
+    end.
+
+handle_leader_request_internal(Tag, Request, State, Data) ->
+    #leader{} = State,
+    do_leader_request(Request, {internal, Tag}, State, Data).
+
+reply_leader_request(ReplyTo, Reply) ->
+    reply_leader_request(ReplyTo, Reply, []).
+
+reply_leader_request(ReplyTo, Reply, Effects) ->
+    case ReplyTo of
+        {cast, Pid, Tag} ->
+            gen_statem:cast(Pid, {leader_request_result, Tag, Reply}),
+            Effects;
+        {internal, Tag} ->
+            [{next_event, cast, {leader_request_result, Tag, Reply}} | Effects]
+    end.
+
+do_leader_request(Request, ReplyTo, State, Data) ->
+    case Request of
+        {command, Command} ->
+            handle_command(Command, ReplyTo, State, Data);
+        get_quorum_revision ->
+            handle_get_quorum_revision(ReplyTo, State, Data)
+    end.
+
+handle_command(Command, ReplyTo,
+               #leader{history_id = HistoryId, term = Term},
+               #data{name = Name} = Data) ->
+    {Request, NewData} = add_local_request(command, ReplyTo, Data),
+    Tag = {?RSM_TAG, command, Request#request.ref},
+    chronicle_server:rsm_command(Tag, HistoryId, Term, Name, Command),
+    {keep_state, NewData}.
+
+handle_command_result(Ref, Result, _State, Data) ->
+    case take_local_request(Ref, Data) of
+        {#request{reply_to = ReplyTo}, NewData} ->
+            case Result of
+                {accepted, Seqno} ->
+                    {keep_state, add_accepted_command(Seqno, ReplyTo, NewData)};
+                {error, {leader_error, _}} ->
+                    %% TODO
+                    {keep_state, NewData}
+            end;
+        no_request ->
+            keep_state_and_data
+    end.
+
+add_accepted_command(Seqno, ReplyTo,
+                     #data{accepted_commands = Commands} = Data) ->
+    NewCommands = maps:put(Seqno, ReplyTo, Commands),
+    Data#data{accepted_commands = NewCommands}.
+
+handle_get_quorum_revision(ReplyTo, State, Data) ->
+    {keep_state, sync_quorum(ReplyTo, State, Data)}.
+
+sync_quorum(ReplyTo, #leader{history_id = HistoryId, term = Term}, Data) ->
+    {Request, NewData} = add_local_request(sync_quorum, ReplyTo, Data),
+    Tag = {?RSM_TAG, sync_quorum, Request#request.ref},
+    chronicle_server:sync_quorum(Tag, HistoryId, Term),
+    NewData.
+
+handle_sync_quorum_result(Ref, Result, State, Data) ->
+    case take_local_request(Ref, Data) of
+        {#request{reply_to = ReplyTo,
+                  request = sync_quorum}, NewData} ->
+            case Result of
+                {ok, _Revision} ->
+                    #leader{} = State,
+                    {keep_state, NewData,
+                     reply_leader_request(ReplyTo, Result)};
+                {error, {leader_error, _}} ->
+                    {keep_state, NewData}
+            end;
+        no_request ->
+            keep_state_and_data
+    end.
 
 handle_query(Query, From, _State, Data) ->
     {reply, Reply, NewModData} = call_callback(handle_query, [Query], Data),
@@ -416,18 +731,18 @@ handle_sync_revision_timeout(Request, _State,
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
-handle_seqno_committed_next_state(State,
+handle_seqno_committed_next_state(Effects, State,
                                   #data{read_seqno = ReadSeqno} = Data) ->
     case State of
         #init{wait_for_seqno = Seqno} ->
             case ReadSeqno >= Seqno of
                 true ->
-                    complete_init(State, Data);
+                    complete_init(Effects, State, Data);
                 false ->
-                    {keep_state, Data}
+                    {keep_state, Data, Effects}
             end;
         _ ->
-            {keep_state, Data}
+            {keep_state, Data, Effects}
     end.
 
 apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
@@ -483,18 +798,18 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Config, Replies},
 
 pending_commands_reply(Replies,
                        #leader{term = OurTerm},
-                       #data{pending_clients = Clients} = Data) ->
-    NewClients =
+                       #data{accepted_commands = Commands} = Data) ->
+    {NewCommands, Effects} =
         lists:foldl(
           fun ({Term, Seqno, Reply}, Acc) ->
                   pending_command_reply(Term, Seqno, Reply, OurTerm, Acc)
-          end, Clients, Replies),
+          end, {Commands, []}, Replies),
 
-    Data#data{pending_clients = NewClients};
+    {Data#data{accepted_commands = NewCommands}, Effects};
 pending_commands_reply(_Replies, _State, Data) ->
-    Data.
+    {Data, []}.
 
-pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
+pending_command_reply(Term, Seqno, Reply, OurTerm, {Commands, Effects} = Acc) ->
     %% Since chronicle_agent doesn't terminate all leader activities in a lock
     %% step, when some other nodes establishes a term, there's a short window
     %% of time when chronicle_rsm will continue to believe it's still in a
@@ -506,63 +821,20 @@ pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
     %% synchronously.
     case Term =:= OurTerm of
         true ->
-            case maps:take(Seqno, Clients) of
-                {{From, command_accepted}, NewClients} ->
-                    gen_statem:reply(From, {command_reply, Reply}),
-                    NewClients;
+            case maps:take(Seqno, Commands) of
+                {ReplyTo, NewCommands} ->
+                    NewEffects = reply_leader_request(ReplyTo, Reply, Effects),
+                    {NewCommands, NewEffects};
                 error ->
-                    Clients
+                    Acc
             end;
         false ->
-            Clients
+            Acc
     end.
 
-handle_get_quorum_revision(HistoryId, From,
-                           #leader{history_id = OurHistoryId} = State,
-                           Data)
-  when HistoryId =:= OurHistoryId ->
-    {keep_state, sync_quorum(From, State, Data)};
-handle_get_quorum_revision(_HistoryId, From, _State, _Data) ->
-    {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}}.
-
-sync_quorum(From, #leader{history_id = HistoryId, term = Term}, Data) ->
-    Ref = make_ref(),
-    Tag = {?RSM_TAG, sync_quorum, Ref},
-    chronicle_server:sync_quorum(Tag, HistoryId, Term),
-    add_pending_client(Ref, From, sync_quorum, Data).
-
-handle_sync_quorum_result(Ref, Result, State,
-                          #data{pending_clients = Requests} = Data) ->
-    {{From, sync_quorum}, NewRequests} = maps:take(Ref, Requests),
-
-    Reply =
-        case Result of
-            {ok, _Revision} = Ok ->
-                #leader{} = State,
-                Ok;
-            {error, _} ->
-                Result
-        end,
-    gen_statem:reply(From, Reply),
-    {keep_state, Data#data{pending_clients = NewRequests}}.
-
-handle_command_result(Ref, Result, State,
-                      #data{pending_clients = Requests} = Data) ->
-    {{From, command}, NewRequests0}  = maps:take(Ref, Requests),
-    NewRequests =
-        case Result of
-            {accepted, Seqno} ->
-                #leader{} = State,
-                false = maps:is_key(Seqno, Requests),
-                maps:put(Seqno, {From, command_accepted}, NewRequests0);
-            {error, _} = Error ->
-                gen_statem:reply(From, Error),
-                NewRequests0
-        end,
-
-    {keep_state, Data#data{pending_clients = NewRequests}}.
-
 handle_leader_status(Status, State, Data) ->
+    NewData = cleanup_after_leader(State, Data),
+
     case Status of
         {leader, HistoryId, Term} ->
             handle_became_leader(HistoryId, Term, State, Data);
@@ -570,47 +842,78 @@ handle_leader_status(Status, State, Data) ->
             NewState = #follower{leader = Leader,
                                  history_id = HistoryId,
                                  term = Term},
-            handle_not_leader(State, NewState, Data);
+            handle_became_follower(NewState, NewData);
         no_leader ->
-            handle_not_leader(State, #no_leader{}, Data)
+            ?DEBUG("no leader; ~p pending requests", [length(get_leader_requests(NewData))]),
+            {next_state, #no_leader{}, NewData}
     end.
 
 handle_became_leader(HistoryId, Term, State, Data) ->
     true = is_record(State, no_leader) orelse is_record(State, follower),
 
-    {next_state,
-     #leader{history_id = HistoryId, term = Term},
-     Data}.
+    NewState = #leader{history_id = HistoryId, term = Term},
+    NewData = Data#data{leader_status = active},
+    maybe_forward_pending_leader_requests(NewState, NewData).
 
-handle_not_leader(OldState, NewState, Data) ->
-    NewData =
-        case OldState of
-            #leader{} ->
-                %% By the time chronicle_rsm receives the notification that
-                %% the term has terminated, it must have already processed all
-                %% notifications from chronicle_agent about commands that are
-                %% known to have been committed by the outgoing leader. So
-                %% there's not a need to synchronize with chronicle_agent as
-                %% it was done previously.
+handle_became_follower(State, Data) ->
+    NewData0 = Data#data{leader_status = active,
+                         leader_backoff = 1,
+                         leader_last_retry = undefined},
+    NewData = spawn_leader_sender(State, NewData0),
 
-                %% We only respond to accepted commands here. Other in flight
-                %% requests will get a propoer response from chronicle_server.
-                flush_accepted_commands({error, {leader_error, leader_lost}},
-                                        Data);
-            _ ->
-                Data
-        end,
+    maybe_forward_pending_leader_requests(State, NewData).
 
-    {next_state, NewState, NewData}.
+spawn_leader_sender(State, Data) ->
+    #follower{leader = Leader, history_id = HistoryId} = State,
+    undefined = Data#data.leader_sender,
+
+    Self = self(),
+    Sender = proc_lib:spawn_link(
+               fun () ->
+                       leader_sender(Leader, Self, HistoryId, Data)
+               end),
+
+    Data#data{leader_sender = Sender}.
+
+cleanup_after_leader(State, Data) ->
+    case State of
+        #leader{} ->
+            %% By the time chronicle_rsm receives the notification that the
+            %% term has finished, it must have already processed all
+            %% notifications from chronicle_agent about commands that are
+            %% known to have been committed by the outgoing leader. So there's
+            %% not a need to synchronize with chronicle_agent as it was done
+            %% previously.
+
+            %% For simplicity, we don't respond to inflight commands. This is
+            %% because eventually all other nodes should realize that this
+            %% node is not the leader anymore and will retry the requests.
+            Data#data{accepted_commands = #{}, local_requests = #{}};
+        #follower{} ->
+            Sender = Data#data.leader_sender,
+
+            case Sender of
+                undefined ->
+                    ok;
+                _ when is_pid(Sender) ->
+                    chronicle_utils:terminate_linked_process(Sender, shutdown),
+                    ?FLUSH({?RSM_TAG, leader_down}),
+                    ok
+            end,
+
+            Data#data{leader_sender = undefined};
+        _ ->
+            Data
+    end.
 
 handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
     case CommittedSeqno >= ReadSeqno of
         true ->
-            NewData0 = read_log(CommittedSeqno, State, Data),
+            {NewData0, Effects} = read_log(CommittedSeqno, State, Data),
             NewData = manage_sync_revision_requests(Data, NewData0),
             maybe_publish_local_revision(State, NewData),
-            handle_seqno_committed_next_state(State, NewData);
+            handle_seqno_committed_next_state(Effects, State, NewData);
         false ->
             ?DEBUG("Ignoring seqno_committed ~p "
                    "when read seqno is ~p", [CommittedSeqno, ReadSeqno]),
@@ -663,7 +966,7 @@ read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
                     %% There are more entries to read.
                     read_log(EndSeqno, State, NewData);
                 false ->
-                    NewData
+                    {NewData, []}
             end
     end.
 
@@ -674,32 +977,6 @@ get_log(StartSeqno, EndSeqno, #data{name = Name}) ->
         {error, compacted} = Error ->
             Error
     end.
-
-submit_command(Command, From,
-               #leader{history_id = HistoryId, term = Term},
-               #data{name = Name} = Data) ->
-    Ref = make_ref(),
-    Tag = {?RSM_TAG, command, Ref},
-    chronicle_server:rsm_command(Tag, HistoryId, Term, Name, Command),
-    add_pending_client(Ref, From, command, Data).
-
-add_pending_client(Ref, From, ClientData,
-                   #data{pending_clients = Clients} = Data) ->
-    Data#data{pending_clients = maps:put(Ref, {From, ClientData}, Clients)}.
-
-flush_accepted_commands(Reply, #data{pending_clients = Clients} = Data) ->
-    NewClients =
-        maps:filter(
-          fun (_, {From, Type}) ->
-                  case Type of
-                      command_accepted ->
-                          gen_statem:reply(From, Reply),
-                          false;
-                      _ ->
-                          true
-                  end
-          end, Clients),
-    Data#data{pending_clients = NewClients}.
 
 set_mod_data(ModData, Data) ->
     Data#data{mod_data = ModData}.
