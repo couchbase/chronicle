@@ -140,11 +140,8 @@ sync_revision(Name, Revision, Timeout0) ->
             case call(?SERVER(Name), Request, infinity) of
                 ok ->
                     ok;
-                {error, timeout} ->
-                    exit({timeout, {sync_revision, Name, Revision, Timeout}});
-                {error, history_mismatch} ->
-                    exit({history_mismatch,
-                          {sync_revision, Name, Revision, Timeout}})
+                {error, Error} ->
+                    exit(Error)
             end
     end.
 
@@ -312,43 +309,37 @@ handle_get_local_revision(From, _State, Data) ->
     {keep_state_and_data,
      {reply, From, local_revision(Data)}}.
 
-handle_sync_revision({HistoryId, Seqno}, Timeout, From,
+handle_sync_revision({_, Seqno} = Revision, Timeout, From,
                      _State,
-                     #data{applied_history_id = AppliedHistoryId,
-                           applied_seqno = AppliedSeqno} = Data) ->
-    case HistoryId =:= AppliedHistoryId of
-        true ->
+                     #data{applied_seqno = AppliedSeqno,
+                           config = Config} = Data) ->
+    case check_revision_compatible(Revision, AppliedSeqno, Config) of
+        ok ->
             case Seqno =< AppliedSeqno of
                 true ->
                     {keep_state_and_data, {reply, From, ok}};
                 false ->
                     {keep_state,
-                     sync_revision_add_request(HistoryId, Seqno,
+                     sync_revision_add_request(Seqno, Revision,
                                                Timeout, From, Data)}
             end;
-        false ->
-            %% We may hit this case even if we in fact do have the revision
-            %% that the client passed. To handle such cases properly, we'd
-            %% have to not only keep track of the current history id, but also
-            %% of all history ids that we've seen and corresponding ranges of
-            %% sequence numbers where they apply. Since this case is pretty
-            %% rare, for the sake of simplicity we'll just tolerate a
-            %% possibility of sync_revision() call failing unnecessarily.
-            %%
-            %% TODO: This may actually pose more issues that I thought. Post
-            %% quorum failover it will take a non-zero amount of time for all
-            %% rsm-s to catch up with the new history. So during this time
-            %% attempts to sync those rsm-s will be failing. Which is probably
-            %% undesirable.
-            {keep_state_and_data,
-             {reply, From, {error, history_mismatch}}}
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
     end.
 
-sync_revision_add_request(HistoryId, Seqno, Timeout, From,
+check_revision_compatible(Revision, HighSeqno, Config) ->
+    case chronicle_config:is_compatible_revision(Revision, HighSeqno, Config) of
+        true ->
+            ok;
+        {false, Info} ->
+            {error, {history_mismatch, Info}}
+    end.
+
+sync_revision_add_request(Seqno, Revision, Timeout, From,
                           #data{sync_revision_requests = Requests} = Data) ->
     Request = {Seqno, make_ref()},
     TRef = sync_revision_start_timer(Request, Timeout),
-    RequestData = {From, TRef, HistoryId},
+    RequestData = {From, TRef, Revision},
     NewRequests = gb_trees:insert(Request, RequestData, Requests),
     Data#data{sync_revision_requests = NewRequests}.
 
@@ -370,43 +361,48 @@ manage_sync_revision_requests(OldData, NewData) ->
     sync_revision_requests_reply(FinalData).
 
 sync_revision_requests_reply(#data{applied_seqno = Seqno,
-                                   sync_revision_requests = Requests} = Data) ->
-    NewRequests = sync_revision_requests_reply_loop(Seqno, Requests),
+                                   sync_revision_requests = Requests,
+                                   config = Config} = Data) ->
+    NewRequests = sync_revision_requests_reply_loop(Seqno, Config, Requests),
     Data#data{sync_revision_requests = NewRequests}.
 
-sync_revision_requests_reply_loop(Seqno, Requests) ->
+sync_revision_requests_reply_loop(Seqno, Config, Requests) ->
     case gb_trees:is_empty(Requests) of
         true ->
             Requests;
         false ->
-            {{ReqSeqno, _} = Request, RequestData, NewRequests} =
+            {{ReqSeqno, _} = Request,
+             {_, _, Revision} = RequestData, NewRequests} =
                 gb_trees:take_smallest(Requests),
             case ReqSeqno =< Seqno of
                 true ->
-                    sync_revision_request_reply(Request, RequestData, ok),
-                    sync_revision_requests_reply_loop(Seqno, NewRequests);
+                    Reply = check_revision_compatible(Revision, Seqno, Config),
+                    sync_revision_request_reply(Request, RequestData, Reply),
+                    sync_revision_requests_reply_loop(Seqno,
+                                                      Config, NewRequests);
                 false ->
                     Requests
             end
     end.
 
-sync_revision_request_reply(Request, {From, TRef, _HistoryId}, Reply) ->
+sync_revision_request_reply(Request, {From, TRef, _Revision}, Reply) ->
     sync_revision_cancel_timer(Request, TRef),
     gen_statem:reply(From, Reply).
 
-sync_revision_drop_diverged_requests(#data{applied_history_id = HistoryId,
+sync_revision_drop_diverged_requests(#data{applied_seqno = AppliedSeqno,
+                                           config = Config,
                                            sync_revision_requests = Requests} =
                                          Data) ->
     NewRequests =
         chronicle_utils:gb_trees_filter(
-          fun (Request, {_, _, ReqHistoryId} = RequestData) ->
-                  case ReqHistoryId =:= HistoryId of
-                      true ->
+          fun (Request, {_, _, Revision} = RequestData) ->
+                  case check_revision_compatible(Revision,
+                                                 AppliedSeqno, Config) of
+                      ok ->
                           true;
-                      false ->
-                          Reply = {error, history_mismatch},
+                      {error, _} = Error ->
                           sync_revision_request_reply(Request,
-                                                      RequestData, Reply),
+                                                      RequestData, Error),
                           false
                   end
           end, Requests),

@@ -33,6 +33,7 @@
 -export([get_peer_id/2, is_peer/3]).
 -export([get_branch_opaque/1]).
 -export([get_settings/1, set_settings/2]).
+-export([is_compatible_revision/3]).
 
 -export_type([peers/0]).
 
@@ -292,3 +293,60 @@ reset_branch(#config{branch = Branch} = Config) ->
         _ ->
             Config#config{branch = undefined}
     end.
+
+is_compatible_revision({RevHistoryId, RevSeqno} = Revision, HighSeqno,
+                       #config{history_log = HistoryLog}) ->
+    case is_compatible_revision(RevHistoryId,
+                                RevSeqno, HighSeqno, HistoryLog) of
+        true ->
+            true;
+        false ->
+            {false, {Revision, HighSeqno, HistoryLog}}
+    end.
+
+is_compatible_revision(RevHistoryId, RevSeqno, HighSeqno, HistoryLog) ->
+    case RevSeqno > HighSeqno of
+        true ->
+            [{CurrentHistoryId, _} | RestHistoryLog] = HistoryLog,
+            case CurrentHistoryId =:= RevHistoryId of
+                true ->
+                    %% Most common case.
+                    true;
+                false ->
+                    %% If RevHistoryId is one of "sealed" history ids, then
+                    %% the revision is incompatible.
+                    not lists:keymember(RevHistoryId, 1, RestHistoryLog)
+            end;
+        false ->
+            MatchingLog =
+                lists:dropwhile(
+                  fun ({_, LogSeqno}) ->
+                          LogSeqno > RevSeqno
+                  end, HistoryLog),
+
+            case MatchingLog of
+                [] ->
+                    false;
+                [{LogHistoryId, _}|_] ->
+                    LogHistoryId =:= RevHistoryId
+            end
+    end.
+
+-ifdef(TEST).
+is_compatible_revision_test() ->
+    HistoryLog = [{b, 15}, {a, 10}],
+    HighSeqno = 20,
+
+    true = is_compatible_revision(b, 25, HighSeqno, HistoryLog),
+    true = is_compatible_revision(c, 25, HighSeqno, HistoryLog),
+    false = is_compatible_revision(a, 25, HighSeqno, HistoryLog),
+    true = is_compatible_revision(b, 17, HighSeqno, HistoryLog),
+    true = is_compatible_revision(b, 15, HighSeqno, HistoryLog),
+    false = is_compatible_revision(b, 14, HighSeqno, HistoryLog),
+    false = is_compatible_revision(a, 15, HighSeqno, HistoryLog),
+    true = is_compatible_revision(a, 13, HighSeqno, HistoryLog),
+    true = is_compatible_revision(a, 10, HighSeqno, HistoryLog),
+    false = is_compatible_revision(a, 9, HighSeqno, HistoryLog),
+    false = is_compatible_revision(b, 9, HighSeqno, HistoryLog),
+    false = is_compatible_revision(c, 9, HighSeqno, HistoryLog).
+-endif.
