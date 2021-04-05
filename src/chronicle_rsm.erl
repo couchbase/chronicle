@@ -768,29 +768,21 @@ handle_seqno_committed_next_state(Effects, State,
             {keep_state, Data, Effects}
     end.
 
-apply_entries(HighSeqno, Entries, State, #data{applied_history_id = HistoryId,
-                                               applied_seqno = AppliedSeqno,
-                                               mod_state = ModState,
-                                               mod_data = ModData,
-                                               config = Config} = Data) ->
-    {NewHistoryId, NewAppliedSeqno,
-     NewModState, NewModData, NewConfig, Replies} =
+apply_entries(HighSeqno, Entries, State, Data) ->
+    {NewData, Replies} =
         lists:foldl(
           fun (Entry, Acc) ->
-                  apply_entry(Entry, Acc, Data)
-          end,
-          {HistoryId, AppliedSeqno, ModState, ModData, Config, []}, Entries),
+                  apply_entry(Entry, Acc)
+          end, {Data#data{read_seqno = HighSeqno}, []}, Entries),
 
-    NewData = Data#data{mod_state = NewModState,
-                        mod_data = NewModData,
-                        config = NewConfig,
-                        applied_history_id = NewHistoryId,
-                        applied_seqno = NewAppliedSeqno,
-                        read_seqno = HighSeqno},
     pending_commands_reply(Replies, State, NewData).
 
-apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Config, Replies},
-            #data{mod = Mod} = Data) ->
+apply_entry(Entry, {Data, Replies}) ->
+    #data{mod = Mod,
+          applied_history_id = HistoryId,
+          applied_seqno = Seqno,
+          mod_state = ModState,
+          mod_data = ModData} = Data,
     #log_entry{value = Value,
                history_id = EntryHistoryId,
                seqno = EntrySeqno} = Entry,
@@ -808,15 +800,23 @@ apply_entry(Entry, {HistoryId, Seqno, ModState, ModData, Config, Replies},
 
             EntryTerm = Entry#log_entry.term,
             NewReplies = [{EntryTerm, EntrySeqno, Reply} | Replies],
-            {HistoryId, EntrySeqno,
-             NewModState, NewModData, Config, NewReplies};
+            NewData = Data#data{applied_seqno = EntrySeqno,
+                                mod_state = NewModState,
+                                mod_data = NewModData},
+
+            {NewData, NewReplies};
         #config{} = NewConfig ->
             {ok, NewModState, NewModData} =
                 Mod:handle_config(NewConfig,
                                   Revision, AppliedRevision,
                                   ModState, ModData),
-            {EntryHistoryId, EntrySeqno,
-             NewModState, NewModData, NewConfig, Replies}
+
+            NewData = Data#data{applied_seqno = EntrySeqno,
+                                applied_history_id = EntryHistoryId,
+                                config = NewConfig,
+                                mod_state = NewModState,
+                                mod_data = NewModData},
+            {NewData, Replies}
     end.
 
 pending_commands_reply(Replies,
