@@ -26,6 +26,9 @@
 -define(MAX_BACKOFF, chronicle_settings:get({rsm, max_backoff}, 4)).
 -define(DOWN_INTERVAL, chronicle_settings:get({rsm, down_interval}, 10000)).
 
+-define(MAX_REPLIES_PER_PEER,
+        chronicle_settings:get({rsm, max_replies_per_peer}, 500)).
+
 -include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, call/4,
@@ -50,9 +53,16 @@
 -record(leader, { history_id :: chronicle:history_id(),
                   term :: chronicle:leader_term() }).
 
+-record(peer_state, { incarnation :: chronicle:incarnation(),
+                      min_serial :: chronicle:serial(),
+                      replies :: #{chronicle:serial() => any()} }).
+
+-type peer_states() :: #{chronicle:peer_id() => #peer_state{}}.
+
 -record(snapshot, { applied_history_id :: chronicle:history_id(),
                     applied_seqno :: chronicle:seqno(),
-                    mod_state :: any() }).
+                    mod_state :: any(),
+                    peer_states :: peer_states() }).
 
 -record(request, { ref,
                    tref,
@@ -83,6 +93,10 @@
                 accepted_commands,
 
                 config :: undefined | #config{},
+                config_peers :: sets:set(chronicle:peer_id()),
+                peer_states :: peer_states(),
+
+                max_replies_per_peer = ?MAX_REPLIES_PER_PEER,
 
                 mod :: atom(),
                 mod_state :: any(),
@@ -232,6 +246,11 @@ init([Name, PeerId, Mod, ModArgs]) ->
                           leader_requests = #{},
                           local_requests = #{},
                           accepted_commands = #{},
+
+                          config = undefined,
+                          config_peers = sets:new(),
+                          peer_states = #{},
+
                           mod = Mod,
                           mod_state = ModState,
                           mod_data = ModData},
@@ -471,7 +490,7 @@ handle_leader_request_result(Ref, Result, _State, Data) ->
         {#request{reply_to = ReplyTo} = Request, NewData} ->
             cancel_request_timer(Request),
             {from, From} = ReplyTo,
-            {keep_state, NewData, {reply, From, {ok, Result}}};
+            {keep_state, NewData, {reply, From, Result}};
         no_request ->
             keep_state_and_data
     end.
@@ -576,15 +595,120 @@ do_leader_request(Request, ReplyTo, State, Data) ->
 handle_command(PeerId, Incarnation, Serial, Command, ReplyTo,
                #leader{history_id = HistoryId, term = Term},
                #data{name = Name} = Data) ->
-    {Request, NewData} = add_local_request(command, ReplyTo, Data),
-    Tag = {?RSM_TAG, command, Request#request.ref},
-    RSMCommand = #rsm_command{rsm_name = Name,
-                              peer_id = PeerId,
-                              peer_incarnation = Incarnation,
-                              serial = Serial,
-                              command = Command},
-    chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
-    {keep_state, NewData}.
+    case dedup_command(PeerId, Incarnation, Serial, Data) of
+        accept ->
+            {Request, NewData} = add_local_request(command, ReplyTo, Data),
+            Tag = {?RSM_TAG, command, Request#request.ref},
+            RSMCommand = #rsm_command{rsm_name = Name,
+                                      peer_id = PeerId,
+                                      peer_incarnation = Incarnation,
+                                      serial = Serial,
+                                      command = Command},
+            chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
+            {keep_state, NewData};
+        {reply, Reply} ->
+            {keep_state_and_data, reply_leader_request(ReplyTo, Reply)}
+    end.
+
+dedup_command(PeerId, Incarnation, Serial, Data) ->
+    dedup_command(PeerId, Incarnation, Serial, undefined, Data).
+
+dedup_command(PeerId, Incarnation, Serial, Peers,
+              #data{peer_states = PeerStates}) ->
+    case maps:find(PeerId, PeerStates) of
+        {ok, #peer_state{min_serial = MinSerial,
+                         incarnation = SeenIncarnation,
+                         replies = Replies}} ->
+            if
+                Incarnation =:= SeenIncarnation ->
+                    case Serial >= MinSerial of
+                        true ->
+                            case maps:find(Serial, Replies) of
+                                {ok, Reply} ->
+                                    {reply, {ok, Reply}};
+                                error ->
+                                    accept
+                            end;
+                        false ->
+                            {reply, {error, ambiguous_write}}
+                    end;
+                Incarnation > SeenIncarnation ->
+                    accept;
+                true ->
+                    {reply, {error, ambiguous_write}}
+            end;
+        error ->
+            case Peers of
+                undefined ->
+                    accept;
+                _ ->
+                    case sets:is_element(PeerId, Peers) of
+                        true ->
+                            accept;
+                        false ->
+                            {reply, {error, not_peer}}
+                    end
+            end
+    end.
+
+record_command(PeerId, Incarnation, Serial, Reply,
+               #data{peer_states = PeerStates} = Data) ->
+    NewPeerState =
+        case find_peer_state(PeerId, Incarnation, Data) of
+            {ok, PeerState} ->
+                peer_state_add_reply(Serial, Reply, PeerState, Data);
+            error ->
+                peer_state_init(Incarnation, Serial, Reply, Data)
+        end,
+
+    NewPeerStates = PeerStates#{PeerId => NewPeerState},
+    Data#data{peer_states = NewPeerStates}.
+
+peer_state_add_reply(Serial, Reply,
+                     #peer_state{min_serial = MinSerial,
+                                 replies = Replies} = PeerState,
+                     #data{max_replies_per_peer = MaxRepliesPerPeer}) ->
+    true = (Serial >= MinSerial),
+    NewReplies = Replies#{Serial => Reply},
+    case Serial > MinSerial + MaxRepliesPerPeer of
+        true ->
+            NewMinSerial = Serial - MaxRepliesPerPeer,
+            PeerState#peer_state{
+              min_serial = NewMinSerial,
+              replies = prune_replies(NewReplies, MinSerial, NewMinSerial)};
+        false ->
+            PeerState#peer_state{replies = NewReplies}
+    end.
+
+prune_replies(Replies, OldMinSerial, NewMinSerial) ->
+    case OldMinSerial >= NewMinSerial of
+        true ->
+            Replies;
+        false ->
+            prune_replies(maps:remove(OldMinSerial, Replies),
+                          OldMinSerial + 1, NewMinSerial)
+    end.
+
+peer_state_init(Incarnation, Serial, Reply,
+                #data{max_replies_per_peer = MaxRepliesPerPeer}) ->
+    MinSerial = max(0, Serial - MaxRepliesPerPeer),
+    #peer_state{incarnation = Incarnation,
+                min_serial = MinSerial,
+                replies = #{Serial => Reply}}.
+
+find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
+    case maps:find(PeerId, PeerStates) of
+        {ok, #peer_state{incarnation = SeenIncarnation} = PeerState} ->
+            case SeenIncarnation =:= Incarnation of
+                true ->
+                    {ok, PeerState};
+                false ->
+                    true = (Incarnation > SeenIncarnation),
+                    error
+            end;
+        error ->
+            error
+    end.
 
 handle_command_result(Ref, Result, _State, Data) ->
     case take_local_request(Ref, Data) of
@@ -790,19 +914,14 @@ apply_entry(Entry, {Data, Replies}) ->
     Revision = {HistoryId, EntrySeqno},
 
     case Value of
-        #rsm_command{rsm_name = Name, command = Command} ->
-            true = (Name =:= Data#data.name),
+        #rsm_command{} ->
             true = (HistoryId =:= EntryHistoryId),
-
-            {reply, Reply, NewModState, NewModData} =
-                Mod:apply_command(unpack_command(Command),
-                                  Revision, AppliedRevision, ModState, ModData),
+            {NewData0, Reply} =
+                apply_command(Value, AppliedRevision, Revision, Data),
 
             EntryTerm = Entry#log_entry.term,
             NewReplies = [{EntryTerm, EntrySeqno, Reply} | Replies],
-            NewData = Data#data{applied_seqno = EntrySeqno,
-                                mod_state = NewModState,
-                                mod_data = NewModData},
+            NewData = NewData0#data{applied_seqno = EntrySeqno},
 
             {NewData, NewReplies};
         #config{} = NewConfig ->
@@ -814,10 +933,46 @@ apply_entry(Entry, {Data, Replies}) ->
             NewData = Data#data{applied_seqno = EntrySeqno,
                                 applied_history_id = EntryHistoryId,
                                 config = NewConfig,
+                                config_peers = peer_ids(NewConfig),
                                 mod_state = NewModState,
                                 mod_data = NewModData},
-            {NewData, Replies}
+            {prune_peer_states(NewData), Replies}
     end.
+
+apply_command(RSMCommand, AppliedRevision, Revision,
+              #data{config_peers = Peers,
+                    mod = Mod,
+                    mod_state = ModState,
+                    mod_data = ModData} = Data) ->
+    #rsm_command{rsm_name = Name,
+                 peer_id = PeerId,
+                 peer_incarnation = Incarnation,
+                 serial = Serial,
+                 command = Command} = RSMCommand,
+    true = (Name =:= Data#data.name),
+
+    case dedup_command(PeerId, Incarnation, Serial, Peers, Data) of
+        accept ->
+            {reply, Reply, NewModState, NewModData} =
+                Mod:apply_command(unpack_command(Command),
+                                  Revision, AppliedRevision, ModState, ModData),
+            NewData0 = Data#data{mod_state = NewModState,
+                                 mod_data = NewModData},
+            NewData = record_command(PeerId, Incarnation,
+                                     Serial, Reply, NewData0),
+            {NewData, {ok, Reply}};
+        {reply, Reply} ->
+            {Data, Reply}
+    end.
+
+prune_peer_states(#data{peer_states = PeerStates,
+                        config_peers = Peers} = Data) ->
+    NewPeerStates =
+        maps:filter(
+          fun (Peer, _) ->
+                  sets:is_element(Peer, Peers)
+          end, PeerStates),
+    Data#data{peer_states = NewPeerStates}.
 
 pending_commands_reply(Replies,
                        #leader{term = OurTerm},
@@ -957,12 +1112,14 @@ save_snapshot(Seqno, #data{name = Name,
                            applied_history_id = AppliedHistoryId,
                            applied_seqno = AppliedSeqno,
                            read_seqno = ReadSeqno,
-                           mod_state = ModState}) ->
+                           mod_state = ModState,
+                           peer_states = PeerStates}) ->
     true = (Seqno =:= ReadSeqno),
 
     Snapshot = #snapshot{applied_history_id = AppliedHistoryId,
                          applied_seqno = AppliedSeqno,
-                         mod_state = ModState},
+                         mod_state = ModState,
+                         peer_states = PeerStates},
     chronicle_agent:save_rsm_snapshot(Name, Seqno, Snapshot).
 
 read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
@@ -1062,15 +1219,22 @@ maybe_restore_snapshot(Data) ->
 apply_snapshot(Seqno, Config, Snapshot, Data) ->
     #snapshot{applied_history_id = AppliedHistoryId,
               applied_seqno = AppliedSeqno,
-              mod_state = ModState} = Snapshot,
+              mod_state = ModState,
+              peer_states = PeerStates} = Snapshot,
     Revision = {AppliedHistoryId, AppliedSeqno},
     {ok, ModData} = call_callback(apply_snapshot, [Revision, ModState], Data),
+
     Data#data{applied_history_id = AppliedHistoryId,
               applied_seqno = AppliedSeqno,
               read_seqno = Seqno,
               mod_state = ModState,
               mod_data = ModData,
-              config = Config}.
+              config = Config,
+              config_peers = peer_ids(Config),
+              peer_states = PeerStates}.
+
+peer_ids(Config) ->
+    sets:from_list(chronicle_config:get_peer_ids(Config)).
 
 pack_command(Command) ->
     {binary, term_to_binary(Command, [{compressed, 1}])}.
