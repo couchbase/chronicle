@@ -30,6 +30,7 @@
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
 -export([add_peers/2, remove_peers/2, set_peer_roles/2]).
+-export([get_peer_ids/1]).
 -export([get_peer_id/2, is_peer/3]).
 -export([get_branch_opaque/1]).
 -export([get_settings/1, set_settings/2]).
@@ -128,6 +129,21 @@ get_peers(#config{peers = Peers, old_peers = OldPeers}) ->
         false ->
             lists:usort(maps:keys(Peers) ++ maps:keys(OldPeers))
     end.
+
+get_peer_ids(#config{peers = Peers, old_peers = OldPeers}) ->
+    case OldPeers =:= undefined of
+        true ->
+            get_peer_ids(#{}, Peers);
+        false ->
+            get_peer_ids(OldPeers, Peers)
+    end.
+
+get_peer_ids(OldPeers, Peers) ->
+    Ids = maps:fold(
+            fun (_, #{id := Id}, Acc) ->
+                    [Id | Acc]
+            end, [], maps:merge(OldPeers, Peers)),
+    lists:usort(Ids).
 
 get_replicas(#config{peers = Peers}) ->
     lists:sort(peers_replicas(Peers)).
