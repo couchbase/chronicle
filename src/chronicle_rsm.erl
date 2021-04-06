@@ -169,12 +169,8 @@ sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
 
 sync(Name, Timeout) ->
     TRef = start_timeout(Timeout),
-    case get_quorum_revision(Name, TRef) of
-        {ok, Revision} ->
-            sync_revision(Name, Revision, TRef);
-        {error, Error} ->
-            exit({Error, {sync, Name}})
-    end.
+    Revision = get_quorum_revision(Name, TRef),
+    sync_revision(Name, Revision, TRef).
 
 %% A temporary version to prevent ns_server from breaking.
 sync(Name, quorum, Timeout) ->
