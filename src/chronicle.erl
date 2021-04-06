@@ -47,7 +47,9 @@
 -export_type([uuid/0, peer/0, peer_id/0,
               history_id/0, history_log/0,
               leader_term/0, seqno/0, peer_position/0,
-              revision/0, cluster_info/0]).
+              revision/0,
+              serial/0, incarnation/0,
+              cluster_info/0]).
 
 -define(DEFAULT_TIMEOUT, 15000).
 
@@ -63,6 +65,9 @@
 -type seqno() :: non_neg_integer().
 -type peer_position() :: {TermVoted :: leader_term(), HighSeqno :: seqno()}.
 -type revision() :: {history_id(), seqno()}.
+
+-type serial() :: non_neg_integer().
+-type incarnation() :: non_neg_integer().
 
 -type cluster_info() :: #{history_id := history_id(),
                           committed_seqno := seqno(),

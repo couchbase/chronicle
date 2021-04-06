@@ -43,8 +43,8 @@
 -record(rsm_command,
         { rsm_name :: atom(),
           peer_id :: chronicle:peer_id(),
-          peer_incarnation :: non_neg_integer(),
-          serial :: non_neg_integer(),
+          peer_incarnation :: chronicle:incarnation(),
+          serial :: chronicle:serial(),
           command :: term() }).
 
 -record(branch, {history_id,
