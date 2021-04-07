@@ -700,7 +700,7 @@ simple_test__(Nodes) ->
                                         {commit, [{set, a, A+1},
                                                   {delete, c}], blah}
                                 end,
-                                #{read_consistency => leader}),
+                                #{read_consistency => quorum}),
 
                           {ok, _} =
                               chronicle_kv:txn(
@@ -955,7 +955,7 @@ partition_test__(Nodes) ->
 
     ok = rpc_node(a,
                   fun () ->
-                          ok = chronicle_rsm:sync(kv, quorum, 10000),
+                          ok = chronicle_kv:sync(kv, 10000),
                           {ok, {42, _}} = chronicle_kv:get(kv, a),
                           {error, not_found} = chronicle_kv:get(kv, b),
                           {ok, {44, _}} = chronicle_kv:get(kv, c),

@@ -33,7 +33,7 @@
 -export([get_snapshot/2, get_snapshot/3]).
 -export([get_full_snapshot/1, get_full_snapshot/2]).
 -export([get_revision/1]).
--export([sync/2, sync/3]).
+-export([sync/1, sync/2]).
 
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
 -export([txn_get/2, txn_get_many/2]).
@@ -56,7 +56,7 @@
 -type revision() :: chronicle:revision().
 -type revisionreq() :: any | revision().
 
--type read_consistency() :: local | leader | quorum.
+-type read_consistency() :: local | quorum.
 -type options() :: #{timeout => timeout(),
                      read_consistency => read_consistency(),
                      read_own_writes => boolean()}.
@@ -469,17 +469,21 @@ get_snapshot_fast_path_loop(Table, TableSeqno, [Key | RestKeys], Snapshot) ->
 get_revision(Name) ->
     chronicle_rsm:get_local_revision(Name).
 
--spec sync(name(), read_consistency()) -> ok.
-sync(Name, Type) ->
-    sync(Name, Type, ?DEFAULT_TIMEOUT).
+-spec sync(name()) -> ok.
+sync(Name) ->
+    sync(Name, ?DEFAULT_TIMEOUT).
+
+-spec sync(name(), timeout()) -> ok.
+sync(Name, Timeout) ->
+    chronicle_rsm:sync(Name, Timeout).
 
 -spec sync(name(), read_consistency(), timeout()) -> ok.
 sync(Name, Type, Timeout) ->
     case Type of
         local ->
             ok;
-        _ ->
-            chronicle_rsm:sync(Name, Type, Timeout)
+        quorum ->
+            chronicle_rsm:sync(Name, Timeout)
     end.
 
 %% callbacks

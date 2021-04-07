@@ -100,18 +100,14 @@ query(Name, Query) ->
 query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, query, Timeout).
 
-get_applied_revision(Name, Type, Timeout)
-  when Type =:= leader;
-       Type =:= quorum ->
+get_applied_revision(Name, Timeout) ->
     with_leader(Timeout,
                 fun (TRef, Leader, {HistoryId, _Term}) ->
-                        get_applied_revision(Leader, Name,
-                                             HistoryId, Type, TRef)
+                        get_applied_revision(Leader, Name, HistoryId, TRef)
                 end).
 
-get_applied_revision(Leader, Name, HistoryId, Type, Timeout) ->
-    call(?SERVER(Leader, Name),
-         {get_applied_revision, HistoryId, Type}, Timeout).
+get_applied_revision(Leader, Name, HistoryId, Timeout) ->
+    call(?SERVER(Leader, Name), {get_applied_revision, HistoryId}, Timeout).
 
 get_local_revision(Name) ->
     case get_local_revision_fast(Name) of
@@ -154,14 +150,18 @@ sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
             use_slow_path
     end.
 
-sync(Name, Type, Timeout) ->
+sync(Name, Timeout) ->
     TRef = start_timeout(Timeout),
-    case get_applied_revision(Name, Type, TRef) of
+    case get_applied_revision(Name, TRef) of
         {ok, Revision} ->
             sync_revision(Name, Revision, TRef);
         {error, Error} ->
-            exit({Error, {sync, Name, Type, Timeout}})
+            exit({Error, {sync, Name, Timeout}})
     end.
+
+%% A temporary version to prevent ns_server from breaking.
+sync(Name, quorum, Timeout) ->
+    sync(Name, Timeout).
 
 note_leader_status(Pid, LeaderStatus) ->
     gen_statem:cast(Pid, {leader_status, LeaderStatus}).
@@ -284,8 +284,8 @@ handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
 handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
     handle_sync_revision(Revision, Timeout, From, State, Data);
-handle_call({get_applied_revision, HistoryId, Type}, From, State, Data) ->
-    handle_get_applied_revision(HistoryId, Type, From, State, Data);
+handle_call({get_applied_revision, HistoryId}, From, State, Data) ->
+    handle_get_applied_revision(HistoryId, From, State, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
@@ -533,13 +533,13 @@ pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
             Clients
     end.
 
-handle_get_applied_revision(HistoryId, Type, From,
+handle_get_applied_revision(HistoryId, From,
                             #leader{history_id = OurHistoryId,
                                     status = Status} = State, Data)
   when HistoryId =:= OurHistoryId ->
     case Status of
         established ->
-            handle_get_applied_revision_leader(Type, From, State, Data);
+            handle_get_applied_revision_leader(From, State, Data);
         {wait_for_seqno, _} ->
             %% When we've just become the leader, we are guaranteed to have
             %% all mutations that might have been committed by the old leader,
@@ -555,20 +555,15 @@ handle_get_applied_revision(HistoryId, Type, From,
             %% until we know that TermSeqno is committed.
             {keep_state_and_data, postpone}
     end;
-handle_get_applied_revision(_HistoryId, _Type, From, _State, _Data) ->
+handle_get_applied_revision(_HistoryId, From, _State, _Data) ->
     {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}}.
 
-handle_get_applied_revision_leader(Type, From, State, Data) ->
+handle_get_applied_revision_leader(From, State, Data) ->
     established = State#leader.status,
     #data{applied_seqno = AppliedSeqno,
           applied_history_id = AppliedHistoryId} = Data,
     Revision = {AppliedHistoryId, AppliedSeqno},
-    case Type of
-        leader ->
-            {keep_state_and_data, {reply, From, {ok, Revision}}};
-        quorum ->
-            {keep_state, sync_quorum(Revision, From, State, Data)}
-    end.
+    {keep_state, sync_quorum(Revision, From, State, Data)}.
 
 sync_quorum(Revision, From,
             #leader{history_id = HistoryId, term = Term}, Data) ->

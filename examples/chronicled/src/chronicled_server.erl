@@ -230,15 +230,13 @@ consistency_constraint(forward, Value) ->
     case Value of
         <<"local">> ->
             {ok, local};
-        <<"leader">> ->
-            {ok, leader};
         <<"quorum">> ->
             {ok, quorum};
         _ ->
             {error, bad_consistency}
     end;
 consistency_constraint(format_error, _Error) ->
-    "consistency must be one of 'local', 'leader' or 'quorum'".
+    "consistency must be one of 'local' or 'quorum'".
 
 do_get_value(Key, Consistency) ->
     ?LOG_DEBUG("key: ~p", [Key]),
