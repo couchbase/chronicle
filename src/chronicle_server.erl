@@ -63,8 +63,11 @@ cas_config(Leader, NewConfig, CasRevision, Timeout) ->
     call(?SERVER(Leader), {cas_config, NewConfig, CasRevision}, Timeout).
 
 check_quorum(Leader, Timeout) ->
-    try
-        call(?SERVER(Leader), check_quorum, Timeout)
+    try call(?SERVER(Leader), check_quorum, Timeout) of
+        {ok, _Revision} ->
+            ok;
+        Other ->
+            Other
     catch
         exit:{timeout, _} ->
             {error, timeout}

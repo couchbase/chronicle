@@ -38,7 +38,7 @@
         {From :: any(),
          Type :: command
                | command_accepted
-               | {sync, chronicle:revision()}}.
+               | sync_quorum}.
 -type pending_clients() :: #{reference() => pending_client()}.
 
 -type sync_revision_requests() ::
@@ -100,31 +100,26 @@ query(Name, Query) ->
 query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, query, Timeout).
 
-get_applied_revision(Name, Timeout) ->
+get_quorum_revision(Name, Timeout) ->
     with_leader(Timeout,
                 fun (TRef, Leader, {HistoryId, _Term}) ->
-                        get_applied_revision(Leader, Name, HistoryId, TRef)
+                        get_quorum_revision(Leader, Name, HistoryId, TRef)
                 end).
 
-get_applied_revision(Leader, Name, HistoryId, Timeout) ->
-    call(?SERVER(Leader, Name), {get_applied_revision, HistoryId}, Timeout).
+get_quorum_revision(Leader, Name, HistoryId, Timeout) ->
+    call(?SERVER(Leader, Name), {get_quorum_revision, HistoryId}, Timeout).
 
 get_local_revision(Name) ->
-    case get_local_revision_fast(Name) of
-        {ok, Revision} ->
-            Revision;
-        use_slow_path ->
+    case get_published_revision(Name) of
+        {ok, {HistoryId, Seqno, _}} ->
+            {HistoryId, Seqno};
+        not_found ->
             %% The process might still be initializing. So fall back to a call.
             call(?SERVER(Name), get_local_revision)
     end.
 
-get_local_revision_fast(Name) ->
-    case chronicle_ets:get(?LOCAL_REVISION_KEY(Name)) of
-        {ok, _Revision} = Ok->
-            Ok;
-        not_found ->
-            use_slow_path
-    end.
+get_published_revision(Name) ->
+    chronicle_ets:get(?LOCAL_REVISION_KEY(Name)).
 
 sync_revision(Name, Revision, Timeout0) ->
     case sync_revision_fast(Name, Revision) of
@@ -142,8 +137,8 @@ sync_revision(Name, Revision, Timeout0) ->
     end.
 
 sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
-    case get_local_revision_fast(Name) of
-        {ok, {LocalHistoryId, LocalSeqno}}
+    case get_published_revision(Name) of
+        {ok, {LocalHistoryId, _, LocalSeqno}}
           when LocalHistoryId =:= RevHistoryId andalso LocalSeqno >= RevSeqno ->
             ok;
         _ ->
@@ -152,7 +147,7 @@ sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
 
 sync(Name, Timeout) ->
     TRef = start_timeout(Timeout),
-    case get_applied_revision(Name, TRef) of
+    case get_quorum_revision(Name, TRef) of
         {ok, Revision} ->
             sync_revision(Name, Revision, TRef);
         {error, Error} ->
@@ -284,8 +279,8 @@ handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
 handle_call({sync_revision, Revision, Timeout}, From, State, Data) ->
     handle_sync_revision(Revision, Timeout, From, State, Data);
-handle_call({get_applied_revision, HistoryId}, From, State, Data) ->
-    handle_get_applied_revision(HistoryId, From, State, Data);
+handle_call({get_quorum_revision, HistoryId}, From, State, Data) ->
+    handle_get_quorum_revision(HistoryId, From, State, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
@@ -305,17 +300,18 @@ handle_query(Query, From, _State, Data) ->
     {reply, Reply, NewModData} = call_callback(handle_query, [Query], Data),
     {keep_state, set_mod_data(NewModData, Data), {reply, From, Reply}}.
 
-handle_get_local_revision(From, _State, Data) ->
-    {keep_state_and_data,
-     {reply, From, local_revision(Data)}}.
+handle_get_local_revision(From, _State,
+                          #data{applied_history_id = HistoryId,
+                                applied_seqno = Seqno}) ->
+    {keep_state_and_data, {reply, From, {HistoryId, Seqno}}}.
 
 handle_sync_revision({_, Seqno} = Revision, Timeout, From,
                      _State,
-                     #data{applied_seqno = AppliedSeqno,
+                     #data{read_seqno = ReadSeqno,
                            config = Config} = Data) ->
-    case check_revision_compatible(Revision, AppliedSeqno, Config) of
+    case check_revision_compatible(Revision, ReadSeqno, Config) of
         ok ->
-            case Seqno =< AppliedSeqno of
+            case Seqno =< ReadSeqno of
                 true ->
                     {keep_state_and_data, {reply, From, ok}};
                 false ->
@@ -360,7 +356,7 @@ manage_sync_revision_requests(OldData, NewData) ->
 
     sync_revision_requests_reply(FinalData).
 
-sync_revision_requests_reply(#data{applied_seqno = Seqno,
+sync_revision_requests_reply(#data{read_seqno = Seqno,
                                    sync_revision_requests = Requests,
                                    config = Config} = Data) ->
     NewRequests = sync_revision_requests_reply_loop(Seqno, Config, Requests),
@@ -389,7 +385,7 @@ sync_revision_request_reply(Request, {From, TRef, _Revision}, Reply) ->
     sync_revision_cancel_timer(Request, TRef),
     gen_statem:reply(From, Reply).
 
-sync_revision_drop_diverged_requests(#data{applied_seqno = AppliedSeqno,
+sync_revision_drop_diverged_requests(#data{read_seqno = ReadSeqno,
                                            config = Config,
                                            sync_revision_requests = Requests} =
                                          Data) ->
@@ -397,7 +393,7 @@ sync_revision_drop_diverged_requests(#data{applied_seqno = AppliedSeqno,
         chronicle_utils:gb_trees_filter(
           fun (Request, {_, _, Revision} = RequestData) ->
                   case check_revision_compatible(Revision,
-                                                 AppliedSeqno, Config) of
+                                                 ReadSeqno, Config) of
                       ok ->
                           true;
                       {error, _} = Error ->
@@ -533,13 +529,14 @@ pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
             Clients
     end.
 
-handle_get_applied_revision(HistoryId, From,
-                            #leader{history_id = OurHistoryId,
-                                    status = Status} = State, Data)
+handle_get_quorum_revision(HistoryId, From,
+                           #leader{history_id = OurHistoryId,
+                                   status = Status} = State,
+                           Data)
   when HistoryId =:= OurHistoryId ->
     case Status of
         established ->
-            handle_get_applied_revision_leader(From, State, Data);
+            handle_get_quorum_revision_leader(From, State, Data);
         {wait_for_seqno, _} ->
             %% When we've just become the leader, we are guaranteed to have
             %% all mutations that might have been committed by the old leader,
@@ -555,32 +552,28 @@ handle_get_applied_revision(HistoryId, From,
             %% until we know that TermSeqno is committed.
             {keep_state_and_data, postpone}
     end;
-handle_get_applied_revision(_HistoryId, From, _State, _Data) ->
+handle_get_quorum_revision(_HistoryId, From, _State, _Data) ->
     {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}}.
 
-handle_get_applied_revision_leader(From, State, Data) ->
+handle_get_quorum_revision_leader(From, State, Data) ->
     established = State#leader.status,
-    #data{applied_seqno = AppliedSeqno,
-          applied_history_id = AppliedHistoryId} = Data,
-    Revision = {AppliedHistoryId, AppliedSeqno},
-    {keep_state, sync_quorum(Revision, From, State, Data)}.
+    {keep_state, sync_quorum(From, State, Data)}.
 
-sync_quorum(Revision, From,
-            #leader{history_id = HistoryId, term = Term}, Data) ->
+sync_quorum(From, #leader{history_id = HistoryId, term = Term}, Data) ->
     Ref = make_ref(),
     Tag = {?RSM_TAG, sync_quorum, Ref},
     chronicle_server:sync_quorum(Tag, HistoryId, Term),
-    add_pending_client(Ref, From, {sync, Revision}, Data).
+    add_pending_client(Ref, From, sync_quorum, Data).
 
 handle_sync_quorum_result(Ref, Result, State,
                           #data{pending_clients = Requests} = Data) ->
-    {{From, {sync, Revision}}, NewRequests} = maps:take(Ref, Requests),
+    {{From, sync_quorum}, NewRequests} = maps:take(Ref, Requests),
 
     Reply =
         case Result of
-            ok ->
+            {ok, _Revision} = Ok ->
                 #leader{} = State,
-                {ok, Revision};
+                Ok;
             {error, _} ->
                 Result
         end,
@@ -785,12 +778,12 @@ maybe_publish_local_revision(#init{}, _Data) ->
 maybe_publish_local_revision(_, Data) ->
     publish_local_revision(Data).
 
-publish_local_revision(#data{name = Name} = Data) ->
-    chronicle_ets:put(?LOCAL_REVISION_KEY(Name), local_revision(Data)).
-
-local_revision(#data{applied_history_id = AppliedHistoryId,
-                     applied_seqno = AppliedSeqno}) ->
-    {AppliedHistoryId, AppliedSeqno}.
+publish_local_revision(#data{name = Name,
+                             applied_history_id = AppliedHistoryId,
+                             applied_seqno = AppliedSeqno,
+                             read_seqno = ReadSeqno}) ->
+    chronicle_ets:put(?LOCAL_REVISION_KEY(Name),
+                      {AppliedHistoryId, AppliedSeqno, ReadSeqno}).
 
 init_from_agent(#data{name = Name} = Data) ->
     %% TODO: deal with {error, no_rsm}

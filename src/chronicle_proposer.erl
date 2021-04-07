@@ -1181,8 +1181,11 @@ reply_commands_not_leader(Commands) ->
 handle_sync_quorum(ReplyTo, {stopped, _}, _Data) ->
     reply_not_leader(ReplyTo),
     keep_state_and_data;
-handle_sync_quorum(ReplyTo, proposing, Data) ->
-    start_sync_quorum(ReplyTo, ok, Data).
+handle_sync_quorum(ReplyTo, proposing,
+                   #data{history_id = HistoryId,
+                         committed_seqno = CommittedSeqno} = Data) ->
+    Revision = {HistoryId, CommittedSeqno},
+    start_sync_quorum(ReplyTo, {ok, Revision}, Data).
 
 start_sync_quorum(ReplyTo, OkReply,
                   #data{sync_round = Round,
