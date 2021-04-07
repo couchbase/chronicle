@@ -564,7 +564,7 @@ handle_command_result(Ref, Result, State,
 
 handle_leader_status(Status, State, Data) ->
     case Status of
-        {leader, HistoryId, Term, _Seqno} ->
+        {leader, HistoryId, Term} ->
             handle_became_leader(HistoryId, Term, State, Data);
         {follower, Leader, HistoryId, Term} ->
             NewState = #follower{leader = Leader,

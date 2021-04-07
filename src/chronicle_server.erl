@@ -35,7 +35,7 @@
 
 -record(no_leader, {}).
 -record(follower, { leader, history_id, term }).
--record(leader, { history_id, term, status, seqno }).
+-record(leader, { history_id, term, status }).
 
 %% TODO: reconsider the decision to have proposer run in a separate process
 %% TOOD: this record contains fields only used when the state is leader
@@ -82,8 +82,8 @@ rsm_command(Tag, HistoryId, Term, RSMName, Command) ->
                               self(), Tag, HistoryId, Term, RSMName, Command}).
 
 %% Meant to only be used by chronicle_proposer.
-proposer_ready(Pid, HistoryId, Term, HighSeqno) ->
-    Pid ! {proposer_msg, {proposer_ready, HistoryId, Term, HighSeqno}},
+proposer_ready(Pid, HistoryId, Term) ->
+    Pid ! {proposer_msg, {proposer_ready, HistoryId, Term}},
     ok.
 
 proposer_stopping(Pid, Reason) ->
@@ -309,18 +309,17 @@ handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
             {stop, proposer_terminated, NewData}
     end.
 
-handle_proposer_msg({proposer_ready, HistoryId, Term, HighSeqno},
-                    State, Data) ->
-    handle_proposer_ready(HistoryId, Term, HighSeqno, State, Data);
+handle_proposer_msg({proposer_ready, HistoryId, Term}, State, Data) ->
+    handle_proposer_ready(HistoryId, Term, State, Data);
 handle_proposer_msg({proposer_stopping, Reason}, State, Data) ->
     handle_proposer_stopping(Reason, State, Data).
 
-handle_proposer_ready(HistoryId, Term, HighSeqno,
+handle_proposer_ready(HistoryId, Term,
                       #leader{history_id = HistoryId,
                               term = Term,
                               status = not_ready} = State,
                       Data) ->
-    NewState = State#leader{status = ready, seqno = HighSeqno},
+    NewState = State#leader{status = ready},
     {next_state, NewState, Data}.
 
 handle_proposer_stopping(Reason,
@@ -451,11 +450,10 @@ leader_status(#no_leader{}) ->
 leader_status(#follower{leader = Leader,
                         history_id = HistoryId, term = Term}) ->
     {follower, Leader, HistoryId, Term};
-leader_status(#leader{history_id = HistoryId, term = Term,
-                      seqno = Seqno, status = Status}) ->
+leader_status(#leader{history_id = HistoryId, term = Term, status = Status}) ->
     case Status of
         ready ->
-            {leader, HistoryId, Term, Seqno};
+            {leader, HistoryId, Term};
         not_ready ->
             no_leader
     end.

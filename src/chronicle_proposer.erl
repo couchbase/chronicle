@@ -361,9 +361,8 @@ propose_noop(Data) ->
 
 announce_proposer_ready(#data{parent = Parent,
                               history_id = HistoryId,
-                              term = Term,
-                              high_seqno = HighSeqno}) ->
-    chronicle_server:proposer_ready(Parent, HistoryId, Term, HighSeqno).
+                              term = Term}) ->
+    chronicle_server:proposer_ready(Parent, HistoryId, Term).
 
 establish_term_init(Metadata,
                     #data{peer = Self,
