@@ -85,7 +85,7 @@
                 branch,
                 position,
 
-                %% Used when the state is 'proposing'.
+                %% Used when the state is 'recovery' or 'proposing'.
                 pending_entries,
                 catchup_pid,
 
@@ -187,7 +187,8 @@ handle_event(state_timeout, establish_term_timeout, State, Data) ->
     handle_establish_term_timeout(State, Data);
 handle_event(info, check_peers, State, Data) ->
     case State of
-        proposing ->
+        _ when State =:= recovery;
+               State =:= proposing ->
             {keep_state, check_peers(Data)};
         {stopped, _} ->
             keep_state_and_data
@@ -286,15 +287,23 @@ handle_state_enter(establish_term,
                    [HistoryId, Term, Error]),
             {stop, {local_establish_term_failed, HistoryId, Term, Error}}
     end;
-handle_state_enter(proposing, Data) ->
+handle_state_enter(recovery,
+                   #data{history_id = HistoryId, term = Term} = Data) ->
+    ?DEBUG("Starting recovery for term ~w in history ~p", [Term, HistoryId]),
     NewData0 = start_catchup_process(Data),
     NewData1 = maybe_resolve_branch(NewData0),
     NewData2 = maybe_complete_config_transition(NewData1),
     NewData = propose_noop(NewData2),
 
-    announce_proposer_ready(NewData),
-
     {keep_state, schedule_check_quorum(check_peers(NewData))};
+handle_state_enter(proposing,
+                   #data{history_id = HistoryId,
+                         term = Term,
+                         committed_seqno = CommittedSeqno} = Data) ->
+    ?DEBUG("Proposer for term ~w in history ~p is ready. Committed seqno: ~b",
+           [Term, HistoryId, CommittedSeqno]),
+    announce_proposer_ready(Data),
+    keep_state_and_data;
 handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
@@ -596,7 +605,9 @@ handle_common_error(Peer, Error,
             ignored
     end.
 
-establish_term_handle_vote(Peer, Status, proposing = State, Data) ->
+establish_term_handle_vote(Peer, Status, State, Data)
+  when State =:= proposing;
+       State =:= recovery ->
     case Status of
         {ok, _} ->
             %% Though not very likely, it's possible that this peer knew that
@@ -659,7 +670,7 @@ establish_term_maybe_transition(establish_term = State,
                    "Votes: ~w",
                    [Term, HistoryId, Votes]),
 
-            {next_state, proposing, Data};
+            {next_state, recovery, Data};
         false ->
             case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
                 true ->
@@ -720,7 +731,9 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
 
     force_propose_config(NewConfig, NewData).
 
-handle_append_result(Peer, Request, Result, proposing = State, Data) ->
+handle_append_result(Peer, Request, Result, State, Data)
+  when State =:= proposing;
+       State =:= recovery ->
     {append, CommittedSeqno, HighSeqno} = Request,
 
     case Result of
@@ -757,7 +770,9 @@ handle_replication_error(Peer, Error, Op, State, Data) ->
                              State, Data).
 
 handle_replication_error(Peer, Error, Op, ErrorPred,
-                         proposing = State, #data{peer = Self} = Data) ->
+                         State, #data{peer = Self} = Data)
+  when State =:= proposing;
+       State =:= recovery ->
     case handle_common_error(Peer, Error, Data) of
         {stop, Reason} ->
             stop(Reason, State, Data);
@@ -804,8 +819,9 @@ handle_replication_error(Peer, Error, Op, ErrorPred,
             end
     end.
 
-handle_append_ok(Peer, PeerHighSeqno,
-                 PeerCommittedSeqno, proposing = State, Data) ->
+handle_append_ok(Peer, PeerHighSeqno, PeerCommittedSeqno, State, Data)
+  when State =:= proposing;
+       State =:= recovery ->
     set_peer_acked_seqnos(Peer, PeerHighSeqno, PeerCommittedSeqno, Data),
     check_committed_seqno_advanced(
       %% Always check the peer we got the response from. So if we didn't
@@ -825,7 +841,7 @@ check_committed_seqno_advanced(Options, State, Data) ->
 
             case handle_config_post_append(Data, NewData0) of
                 {ok, NewData, Effects} ->
-                    {keep_state, replicate(NewData), Effects};
+                    {next_state, proposing, replicate(NewData), Effects};
                 {stop, Reason, NewData} ->
                     stop(Reason, State, replicate(NewData))
             end;
@@ -854,7 +870,9 @@ check_committed_seqno_advanced(Options, State, Data) ->
             {keep_state, NewData}
     end.
 
-handle_heartbeat_result(Peer, Round, Result, proposing = State, Data) ->
+handle_heartbeat_result(Peer, Round, Result, State, Data)
+  when State =:= proposing;
+       State =:= recovery ->
     case Result of
         {ok, Metadata} ->
             maybe_set_peer_active(Peer, Metadata, Data),
@@ -913,7 +931,9 @@ sync_quorum_reply_not_leader(#data{sync_requests = SyncRequests} = Data) ->
 
     Data#data{sync_requests = queue:new()}.
 
-handle_catchup_result(Peer, Result, proposing = State, Data) ->
+handle_catchup_result(Peer, Result, State, Data)
+  when State =:= proposing;
+       State =:= recovery ->
     case Result of
         {ok, SentCommittedSeqno} ->
             ?DEBUG("Caught up peer ~w to seqno ~b", [Peer, SentCommittedSeqno]),
@@ -1070,7 +1090,8 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
             keep_state_and_data;
         {stopped, _} ->
             keep_state_and_data;
-        proposing ->
+        _ when State =:= proposing;
+               State =:= recovery ->
             case lists:member(Peer, Peers) of
                 true ->
                     case get_peer_status(Peer, Data) of
@@ -1114,7 +1135,8 @@ handle_down(MRef, Pid, Reason, State, #data{peer = Self} = Data) ->
             case State of
                 establish_term ->
                     handle_down_establish_term(Peer, State, NewData);
-                proposing ->
+                _ when State =:= proposing;
+                       State =:= recovery ->
                     {keep_state, NewData}
             end
     end.
@@ -1139,14 +1161,18 @@ handle_append_commands(Commands, {stopped, _}, _Data) ->
     %% Proposer has stopped. Reject any incoming commands.
     reply_commands_not_leader(Commands),
     keep_state_and_data;
-handle_append_commands(Commands, proposing, #data{being_removed = true}) ->
+handle_append_commands(Commands, State, #data{being_removed = true})
+  when State =:= proposing;
+       State =:= recovery ->
     %% Node is being removed. Don't accept new commands.
     reply_commands_not_leader(Commands),
     keep_state_and_data;
 handle_append_commands(Commands,
-                       proposing,
+                       State,
                        #data{high_seqno = HighSeqno,
-                             pending_entries = PendingEntries} = Data) ->
+                             pending_entries = PendingEntries} = Data)
+  when State =:= proposing;
+       State =:= recovery ->
     {NewHighSeqno, NewPendingEntries, NewData0} =
         lists:foldl(
           fun ({ReplyTo, Command}, {PrevSeqno, AccEntries, AccData} = Acc) ->
@@ -2020,7 +2046,8 @@ stop(Reason, ExtraEffects, State,
            peers = Peers,
            config_change_reply_to = ConfigReplyTo} = Data)
   when State =:= establish_term;
-       State =:= proposing ->
+       State =:= proposing;
+       State =:= recovery ->
     {NewData0, Effects} = unpostpone_config_requests(Data),
 
     %% Demonitor all agents so we don't process any more requests from them.
@@ -2037,7 +2064,7 @@ stop(Reason, ExtraEffects, State,
     end,
 
     NewData3 =
-        case State =:= proposing of
+        case State =/= establish_term of
             true ->
                 %% Make an attempt to notify local agent about the latest
                 %% committed seqno, so chronicle_rsm-s can reply to clients
