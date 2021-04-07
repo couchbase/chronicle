@@ -221,26 +221,32 @@ handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
 handle_event(cast, {sync_quorum, ReplyTo}, State, Data) ->
     handle_sync_quorum(ReplyTo, State, Data);
-handle_event(cast, {query, ReplyTo, Query} = Request, proposing, Data) ->
-    maybe_postpone_config_request(
-      Request, Data,
-      fun () ->
-              handle_query(ReplyTo, Query, Data)
-      end);
-handle_event(cast, {query, ReplyTo, _}, {stopped, _}, _Data) ->
-    reply_not_leader(ReplyTo),
-    keep_state_and_data;
+handle_event(cast, {query, ReplyTo, Query} = Request, State, Data) ->
+    case State of
+        proposing ->
+            maybe_postpone_config_request(
+              Request, Data,
+              fun () ->
+                      handle_query(ReplyTo, Query, Data)
+              end);
+        {stopped, _} ->
+            reply_not_leader(ReplyTo),
+            keep_state_and_data
+    end;
 handle_event(cast,
              {cas_config, ReplyTo, NewConfig, Revision} = Request,
-             proposing, Data) ->
-    maybe_postpone_config_request(
-      Request, Data,
-      fun () ->
-              handle_cas_config(ReplyTo, NewConfig, Revision, Data)
-      end);
-handle_event(cast, {cas_config, ReplyTo, _, _}, {stopped, _}, _Data) ->
-    reply_not_leader(ReplyTo),
-    keep_state_and_data;
+             State, Data) ->
+    case State of
+        proposing ->
+            maybe_postpone_config_request(
+              Request, Data,
+              fun () ->
+                      handle_cas_config(ReplyTo, NewConfig, Revision, Data)
+              end);
+        {stopped, _} ->
+            reply_not_leader(ReplyTo),
+            keep_state_and_data
+    end;
 handle_event(cast, {append_commands, Commands}, State, Data) ->
     handle_append_commands(Commands, State, Data);
 handle_event({call, From}, stop, State, Data) ->
