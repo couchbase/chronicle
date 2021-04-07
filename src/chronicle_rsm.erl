@@ -46,16 +46,13 @@
           {chronicle:seqno(), reference()},
           {From :: any(), Timer :: reference(), chronicle:history_id()}).
 
--type leader_status() :: {wait_for_seqno, chronicle:seqno()} | established.
-
 -record(init, { wait_for_seqno }).
 -record(no_leader, {}).
 -record(follower, { leader :: chronicle:peer(),
                     history_id :: chronicle:history_id(),
                     term :: chronicle:leader_term() }).
 -record(leader, { history_id :: chronicle:history_id(),
-                  term :: chronicle:leader_term(),
-                  status :: leader_status() }).
+                  term :: chronicle:leader_term() }).
 
 -record(snapshot, { applied_history_id :: chronicle:history_id(),
                     applied_seqno :: chronicle:seqno(),
@@ -429,15 +426,6 @@ handle_seqno_committed_next_state(State,
                 false ->
                     {keep_state, Data}
             end;
-        #leader{status = {wait_for_seqno, Seqno}} ->
-            %% Mark the leader established when applied seqno catches up with
-            %% the high seqno as of when the term was established.
-            case ReadSeqno >= Seqno of
-                true ->
-                    {next_state, State#leader{status = established}, Data};
-                false ->
-                    {keep_state, Data}
-            end;
         _ ->
             {keep_state, Data}
     end.
@@ -530,34 +518,12 @@ pending_command_reply(Term, Seqno, Reply, OurTerm, Clients) ->
     end.
 
 handle_get_quorum_revision(HistoryId, From,
-                           #leader{history_id = OurHistoryId,
-                                   status = Status} = State,
+                           #leader{history_id = OurHistoryId} = State,
                            Data)
   when HistoryId =:= OurHistoryId ->
-    case Status of
-        established ->
-            handle_get_quorum_revision_leader(From, State, Data);
-        {wait_for_seqno, _} ->
-            %% When we've just become the leader, we are guaranteed to have
-            %% all mutations that might have been committed by the old leader,
-            %% but there's no way to know what was and what wasn't
-            %% committed. So we need to wait until all uncommitted entries
-            %% that we have get committed.
-            %%
-            %% Note, that we can't simply return TermSeqno to the caller. That
-            %% is because the log entry at TermSeqno might not have been
-            %% committed. And if another leader immediately takes over, it may
-            %% not have that entry and may never commit it. So the caller will
-            %% essentially get stuck. So we need to postpone handling the call
-            %% until we know that TermSeqno is committed.
-            {keep_state_and_data, postpone}
-    end;
+    {keep_state, sync_quorum(From, State, Data)};
 handle_get_quorum_revision(_HistoryId, From, _State, _Data) ->
     {keep_state_and_data, {reply, From, {error, {leader_error, not_leader}}}}.
-
-handle_get_quorum_revision_leader(From, State, Data) ->
-    established = State#leader.status,
-    {keep_state, sync_quorum(From, State, Data)}.
 
 sync_quorum(From, #leader{history_id = HistoryId, term = Term}, Data) ->
     Ref = make_ref(),
@@ -598,8 +564,8 @@ handle_command_result(Ref, Result, State,
 
 handle_leader_status(Status, State, Data) ->
     case Status of
-        {leader, HistoryId, Term, Seqno} ->
-            handle_became_leader(HistoryId, Term, Seqno, State, Data);
+        {leader, HistoryId, Term, _Seqno} ->
+            handle_became_leader(HistoryId, Term, State, Data);
         {follower, Leader, HistoryId, Term} ->
             NewState = #follower{leader = Leader,
                                  history_id = HistoryId,
@@ -609,26 +575,11 @@ handle_leader_status(Status, State, Data) ->
             handle_not_leader(State, #no_leader{}, Data)
     end.
 
-handle_became_leader(HistoryId, Term, Seqno, State, Data) ->
+handle_became_leader(HistoryId, Term, State, Data) ->
     true = is_record(State, no_leader) orelse is_record(State, follower),
 
-    Status =
-        case Data#data.read_seqno >= Seqno of
-            true ->
-                established;
-            false ->
-                %% Some of the entries before and including Seqno may or may
-                %% not be committed. So we need to wait till their status
-                %% resolves (that is, till they get committed), before we can
-                %% respond to certain operations (get_applied_revision
-                %% specifically).
-                {wait_for_seqno, Seqno}
-        end,
-
     {next_state,
-     #leader{history_id = HistoryId,
-             term = Term,
-             status = Status},
+     #leader{history_id = HistoryId, term = Term},
      Data}.
 
 handle_not_leader(OldState, NewState, Data) ->
