@@ -73,8 +73,14 @@
 -record(data, { name :: atom(),
 
                 peer_id :: chronicle:peer_id(),
-                incarnation :: non_neg_integer(),
-                serial :: non_neg_integer(),
+                incarnation :: chronicle:incarnation(),
+
+                serial :: chronicle:serial(),
+
+                min_serial_in_use :: chronicle:serial(),
+                max_serial_to_forward :: chronicle:serial(),
+                serials_in_use :: gb_trees:tree(chronicle:serial(),
+                                                reference()),
 
                 applied_history_id :: chronicle:history_id(),
                 applied_seqno :: chronicle:seqno(),
@@ -96,7 +102,7 @@
                 config_peers :: sets:set(chronicle:peer_id()),
                 peer_states :: peer_states(),
 
-                max_replies_per_peer = ?MAX_REPLIES_PER_PEER,
+                max_replies_per_peer,
 
                 mod :: atom(),
                 mod_state :: any(),
@@ -226,11 +232,19 @@ init([Name, PeerId, Mod, ModArgs]) ->
         {ok, ModState, ModData} ->
             ok = chronicle_ets:register_writer([?LOCAL_REVISION_KEY(Name)]),
 
+            MaxRepliesPerPeer = ?MAX_REPLIES_PER_PEER,
+
             Data0 = #data{name = Name,
 
                           peer_id = PeerId,
                           incarnation = 0,
                           serial = 0,
+
+                          min_serial_in_use = 0,
+                          max_serial_to_forward = MaxRepliesPerPeer,
+                          serials_in_use = gb_trees:empty(),
+
+                          max_replies_per_peer = MaxRepliesPerPeer,
 
                           applied_history_id = ?NO_HISTORY,
                           applied_seqno = ?NO_SEQNO,
@@ -384,8 +398,75 @@ cancel_request_timer(#request{ref = Ref, tref = TRef}) ->
 add_leader_request(Request, Deadline, From, Data) ->
     add_request(Request, Deadline, {from, From}, #data.leader_requests, Data).
 
-get_leader_requests(#data{leader_requests = LeaderRequests}) ->
-    maps:values(LeaderRequests).
+get_requests_to_forward(#data{leader_requests = LeaderRequests,
+                              max_serial_to_forward = MaxSerial}) ->
+    maps:fold(
+      fun (_, #request{request = RawRequest} = Request, Acc) ->
+              case RawRequest of
+                  {command, _, _, Serial, _} ->
+                      case Serial =< MaxSerial of
+                          true ->
+                              [Request | Acc];
+                          false ->
+                              Acc
+                      end;
+                  _ ->
+                      [Request | Acc]
+              end
+      end, [], LeaderRequests).
+
+get_requests_by_serials(From, To, #data{serials_in_use = Serials,
+                                        leader_requests = Requests}) ->
+    Iter = gb_trees:iterator_from(From, Serials),
+    get_requests_by_serials_loop(Iter, To, Requests, []).
+
+get_requests_by_serials_loop(Iter, To, Requests, Acc) ->
+    case gb_trees:next(Iter) of
+        none ->
+            Acc;
+        {Serial, Ref, NewIter} ->
+            case Serial =< To of
+                true ->
+                    NewAcc = [maps:get(Ref, Requests) | Acc],
+                    get_requests_by_serials_loop(NewIter, To, Requests, NewAcc);
+                false ->
+                    Acc
+            end
+    end.
+
+maybe_update_serials(#request{request = Request},
+                     State,
+                     #data{serial = NextSerial,
+                           min_serial_in_use = MinSerial,
+                           max_serial_to_forward = MaxSerial,
+                           serials_in_use = Serials,
+                           max_replies_per_peer = MaxRepliesPerPeer} = Data) ->
+    case Request of
+        {command, _, _, Serial, _} ->
+            {_, NewSerials} = gb_trees:take(Serial, Serials),
+            NewMinSerial =
+                case gb_trees:is_empty(NewSerials) of
+                    true ->
+                        NextSerial;
+                    false ->
+                        {S, _} = gb_trees:smallest(NewSerials),
+                        S
+                end,
+            NewData = Data#data{serials_in_use = NewSerials},
+            case MinSerial =:= NewMinSerial of
+                true ->
+                    {NewData, []};
+                false ->
+                    NewMaxSerial = NewMinSerial + MaxRepliesPerPeer,
+                    Requests = get_requests_by_serials(
+                                 MaxSerial + 1, NewMaxSerial, NewData),
+                    {NewData#data{min_serial_in_use = NewMinSerial,
+                                  max_serial_to_forward = NewMaxSerial},
+                     maybe_forward_requests(Requests, State, NewData)}
+            end;
+        _ ->
+            {Data, []}
+    end.
 
 add_local_request(Request, ReplyTo, Data) ->
     add_request(Request, infinity, ReplyTo, #data.local_requests, Data).
@@ -405,10 +486,39 @@ take_leader_request(Ref, Data) ->
 take_local_request(Ref, Data) ->
     take_request(Ref, #data.local_requests, Data).
 
-handle_leader_request_call(RawRequest0, Deadline, From, State, Data) ->
-    {RawRequest, NewData0} = prepare_leader_request(RawRequest0, Data),
-    {Request, NewData} =
-        add_leader_request(RawRequest, Deadline, From, NewData0),
+handle_leader_request_call(RawRequest, Deadline, From, State, Data) ->
+    case RawRequest of
+        {command, _} ->
+            handle_leader_request_command(RawRequest,
+                                          Deadline, From, State, Data);
+        _ ->
+            handle_leader_request_other(RawRequest, Deadline, From, State, Data)
+    end.
+
+handle_leader_request_command({command, Command}, Deadline, From, State,
+                              #data{peer_id = PeerId,
+                                    incarnation = Incarnation,
+                                    serial = Serial,
+                                    max_serial_to_forward = MaxSerialToForward,
+                                    serials_in_use = Serials} = Data) ->
+    RawRequest = {command, PeerId, Incarnation, Serial, Command},
+    {Request, NewData0} = add_leader_request(RawRequest, Deadline, From, Data),
+
+    NewSerials = gb_trees:insert(Serial, Request#request.ref, Serials),
+    NewSerial = Serial + 1,
+
+    NewData = NewData0#data{serial = NewSerial,
+                            serials_in_use = NewSerials},
+
+    case Serial =< MaxSerialToForward of
+        true ->
+            maybe_forward_leader_request(Request, State, NewData);
+        false ->
+            {keep_state, NewData}
+    end.
+
+handle_leader_request_other(RawRequest, Deadline, From, State, Data) ->
+    {Request, NewData} = add_leader_request(RawRequest, Deadline, From, Data),
     maybe_forward_leader_request(Request, State, NewData).
 
 prepare_leader_request(Request, Data) ->
@@ -456,34 +566,38 @@ maybe_forward_pending_leader_requests(State, Data) ->
     maybe_forward_pending_leader_requests([], State, Data).
 
 maybe_forward_pending_leader_requests(Effects, State, Data) ->
+    Requests = get_requests_to_forward(Data),
+    ForwardEffects = maybe_forward_requests(Requests, State, Data),
+    {next_state, State, Data, ForwardEffects ++ Effects}.
+
+maybe_forward_requests(Requests, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            ExtraEffects = [leader_request_next_event(Request) ||
-                               Request <- get_leader_requests(Data)],
-            {next_state, State, Data, ExtraEffects ++ Effects};
+            [leader_request_next_event(Request) || Request <- Requests];
         remote ->
             Sender = Data#data.leader_sender,
-            Requests = get_leader_requests(Data),
             lists:foreach(
               fun (Request) ->
                       leader_sender_forward(Sender, Request)
               end, Requests),
-            {next_state, State, Data, Effects};
+            [];
         none ->
-            {next_state, State, Data, Effects}
+            []
     end.
 
-handle_request_timeout(Ref, _State, Data) ->
-    {Request, NewData} = take_leader_request(Ref, Data),
+handle_request_timeout(Ref, State, Data) ->
+    {Request, NewData0} = take_leader_request(Ref, Data),
+    {NewData, Effects} = maybe_update_serials(Request, State, NewData0),
     {from, From} = Request#request.reply_to,
-    {keep_state, NewData, {reply, From, {error, timeout}}}.
+    {keep_state, NewData, [{reply, From, {error, timeout}} | Effects]}.
 
-handle_leader_request_result(Ref, Result, _State, Data) ->
+handle_leader_request_result(Ref, Result, State, Data) ->
     case take_leader_request(Ref, Data) of
-        {#request{reply_to = ReplyTo} = Request, NewData} ->
+        {#request{reply_to = ReplyTo} = Request, NewData0} ->
             cancel_request_timer(Request),
+            {NewData, Effects} = maybe_update_serials(Request, State, NewData0),
             {from, From} = ReplyTo,
-            {keep_state, NewData, {reply, From, Result}};
+            {keep_state, NewData, [{reply, From, Result} | Effects]};
         no_request ->
             keep_state_and_data
     end.
