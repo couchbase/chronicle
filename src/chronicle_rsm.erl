@@ -172,10 +172,6 @@ sync(Name, Timeout) ->
     Revision = get_quorum_revision(Name, TRef),
     sync_revision(Name, Revision, TRef).
 
-%% A temporary version to prevent ns_server from breaking.
-sync(Name, quorum, Timeout) ->
-    sync(Name, Timeout).
-
 note_leader_status(Pid, LeaderStatus) ->
     gen_statem:cast(Pid, {leader_status, LeaderStatus}).
 
