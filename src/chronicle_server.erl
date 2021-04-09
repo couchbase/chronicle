@@ -77,6 +77,9 @@ sync_quorum(Tag, HistoryId, Term) ->
     gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
 
 %% Used locally by corresponding chronicle_rsm instance.
+rsm_command(HistoryId, Term, Command) ->
+    gen_statem:cast(?SERVER, {rsm_command, HistoryId, Term, Command}).
+
 rsm_command(Tag, HistoryId, Term, Command) ->
     gen_statem:cast(?SERVER,
                     {rsm_command, self(), Tag, HistoryId, Term, Command}).
@@ -158,13 +161,13 @@ handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
 handle_event({call, From}, check_quorum, State, Data) ->
     handle_check_quorum(From, State, Data);
+handle_event(cast, {rsm_command, HistoryId, Term, RSMCommand}, State, Data) ->
+    handle_rsm_command(HistoryId, Term, RSMCommand, noreply, State, Data);
 handle_event(cast,
              {rsm_command, Pid, Tag, HistoryId, Term, RSMCommand},
              State, Data) ->
     ReplyTo = {send, Pid, Tag},
-    Command = {rsm_command, RSMCommand},
-    batch_leader_request(Command, {HistoryId, Term}, ReplyTo,
-                         #data.commands_batch, State, Data);
+    handle_rsm_command(HistoryId, Term, RSMCommand, ReplyTo, State, Data);
 handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
     ReplyTo = {send, Pid, Tag},
     batch_leader_request(sync_quorum, {HistoryId, Term},
@@ -477,6 +480,11 @@ handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
             ?DEBUG("RSM ~w~w terminated", [Name, RSMPid]),
             {keep_state, Data#data{rsms = NewRSMs}}
     end.
+
+handle_rsm_command(HistoryId, Term, RSMCommand, ReplyTo, State, Data) ->
+    Command = {rsm_command, RSMCommand},
+    batch_leader_request(Command, {HistoryId, Term}, ReplyTo,
+                         #data.commands_batch, State, Data).
 
 terminate_proposer(#data{proposer = Proposer} = Data) ->
     case Proposer =:= undefined of
