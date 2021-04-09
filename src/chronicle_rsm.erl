@@ -720,31 +720,21 @@ handle_command(PeerId, Incarnation, Serial, Command, ReplyTo,
 dedup_command(PeerId, Incarnation, Serial, Data) ->
     dedup_command(PeerId, Incarnation, Serial, undefined, Data).
 
-dedup_command(PeerId, Incarnation, Serial, Peers,
-              #data{peer_states = PeerStates}) ->
-    case maps:find(PeerId, PeerStates) of
-        {ok, #peer_state{min_serial = MinSerial,
-                         incarnation = SeenIncarnation,
-                         replies = Replies}} ->
-            if
-                Incarnation =:= SeenIncarnation ->
-                    case Serial >= MinSerial of
-                        true ->
-                            case maps:find(Serial, Replies) of
-                                {ok, Reply} ->
-                                    {reply, {ok, Reply}};
-                                error ->
-                                    accept
-                            end;
-                        false ->
-                            {reply, {error, ambiguous_write}}
-                    end;
-                Incarnation > SeenIncarnation ->
-                    accept;
+dedup_command(PeerId, Incarnation, Serial, Peers, Data) ->
+    case find_peer_state(PeerId, Incarnation, Data) of
+        {ok, #peer_state{min_serial = MinSerial, replies = Replies}} ->
+            case Serial >= MinSerial of
                 true ->
+                    case maps:find(Serial, Replies) of
+                        {ok, Reply} ->
+                            {reply, {ok, Reply}};
+                        error ->
+                            accept
+                    end;
+                false ->
                     {reply, {error, ambiguous_write}}
             end;
-        error ->
+        not_found ->
             case Peers of
                 undefined ->
                     accept;
@@ -755,7 +745,9 @@ dedup_command(PeerId, Incarnation, Serial, Peers,
                         false ->
                             {reply, {error, not_peer}}
                     end
-            end
+            end;
+        stale ->
+            {reply, {error, ambiguous_write}}
     end.
 
 record_command(PeerId, Incarnation, Serial, Reply,
@@ -764,7 +756,7 @@ record_command(PeerId, Incarnation, Serial, Reply,
         case find_peer_state(PeerId, Incarnation, Data) of
             {ok, PeerState} ->
                 peer_state_add_reply(Serial, Reply, PeerState, Data);
-            error ->
+            not_found ->
                 peer_state_init(Incarnation, Serial, Reply, Data)
         end,
 
@@ -806,15 +798,16 @@ peer_state_init(Incarnation, Serial, Reply,
 find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
     case maps:find(PeerId, PeerStates) of
         {ok, #peer_state{incarnation = SeenIncarnation} = PeerState} ->
-            case SeenIncarnation =:= Incarnation of
-                true ->
+            if
+                SeenIncarnation =:= Incarnation ->
                     {ok, PeerState};
-                false ->
-                    true = (Incarnation > SeenIncarnation),
-                    error
+                Incarnation > SeenIncarnation ->
+                    not_found;
+                true ->
+                    stale
             end;
         error ->
-            error
+            not_found
     end.
 
 handle_command_result(Ref, Result, _State, Data) ->
