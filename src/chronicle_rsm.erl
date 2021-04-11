@@ -216,8 +216,8 @@ sanitize_event({call, _} = Type,
         _ ->
             {Type, LeaderRequest}
     end;
-sanitize_event(cast, {leader_request, ReplyTo, HistoryId, _}) ->
-    {cast, {leader_request, ReplyTo, HistoryId, '...'}};
+sanitize_event(cast, {leader_request, ReplyTo, _}) ->
+    {cast, {leader_request, ReplyTo, '...'}};
 sanitize_event(cast, {leader_request_result, Ref, _}) ->
     {cast, {leader_request_result, Ref, '...'}};
 sanitize_event({call, _} = Type, {query, _}) ->
@@ -307,9 +307,8 @@ handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
     handle_seqno_committed(Seqno, State, Data);
 handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
     handle_take_snapshot(Seqno, State, Data);
-handle_event(cast,
-             {leader_request, ReplyTo, HistoryId, Request}, State, Data) ->
-    handle_leader_request(HistoryId, ReplyTo, Request, State, Data);
+handle_event(cast, {leader_request, ReplyTo, Request}, State, Data) ->
+    handle_leader_request(ReplyTo, Request, State, Data);
 handle_event(cast, {leader_request_result, Ref, Result}, State, Data) ->
     handle_leader_request_result(Ref, Result, State, Data);
 handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
@@ -545,7 +544,7 @@ get_forward_mode(State, Data) ->
 maybe_forward_leader_request(Request, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            {keep_state, Data, leader_request_next_event(Request, State)};
+            {keep_state, Data, leader_request_next_event(Request)};
         remote ->
             leader_sender_forward(Data#data.leader_sender, Request),
             {keep_state, Data};
@@ -553,10 +552,9 @@ maybe_forward_leader_request(Request, State, Data) ->
             {keep_state, Data}
     end.
 
-leader_request_next_event(#request{ref = Ref, request = Request},
-                          #leader{history_id = HistoryId}) ->
+leader_request_next_event(#request{ref = Ref, request = Request}) ->
     ReplyTo = {internal, Ref},
-    {next_event, cast, {leader_request, ReplyTo, HistoryId, Request}}.
+    {next_event, cast, {leader_request, ReplyTo, Request}}.
 
 maybe_forward_pending_leader_requests(State, Data) ->
     maybe_forward_pending_leader_requests([], State, Data).
@@ -569,7 +567,7 @@ maybe_forward_pending_leader_requests(Effects, State, Data) ->
 maybe_forward_requests(Requests, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            [leader_request_next_event(Request, State) || Request <- Requests];
+            [leader_request_next_event(Request) || Request <- Requests];
         remote ->
             Sender = Data#data.leader_sender,
             lists:foreach(
@@ -637,34 +635,29 @@ leader_sender_forward(Sender, Request) ->
     Sender ! {forward_request, Request},
     ok.
 
-leader_sender(Leader, Parent, HistoryId, #data{name = Name}) ->
+leader_sender(Leader, Parent, #data{name = Name}) ->
     ServerRef = ?SERVER(Leader, Name),
     MRef = chronicle_utils:monitor_process(ServerRef),
-    leader_sender_loop(ServerRef, Parent, HistoryId, MRef).
+    leader_sender_loop(ServerRef, Parent, MRef).
 
-leader_sender_loop(ServerRef, Parent, HistoryId, MRef) ->
+leader_sender_loop(ServerRef, Parent, MRef) ->
     receive
         {'DOWN', MRef, _, _, _} ->
             Parent ! {?RSM_TAG, leader_down};
         {forward_request, Request} ->
-            send_leader_request(ServerRef, Parent, HistoryId, Request),
-            leader_sender_loop(ServerRef, Parent, HistoryId, MRef)
+            send_leader_request(ServerRef, Parent, Request),
+            leader_sender_loop(ServerRef, Parent, MRef)
     end.
 
-send_leader_request(ServerRef, Parent, HistoryId,
+send_leader_request(ServerRef, Parent,
                     #request{ref = RequestRef, request = Request}) ->
     ReplyTo = {cast, Parent, RequestRef},
-    gen_statem:cast(ServerRef, {leader_request, ReplyTo, HistoryId, Request}).
+    gen_statem:cast(ServerRef, {leader_request, ReplyTo, Request}).
 
-handle_leader_request(HistoryId, ReplyTo, Request, State, Data) ->
+handle_leader_request(ReplyTo, Request, State, Data) ->
     case State of
-        #leader{history_id = OurHistoryId} ->
-            case HistoryId =:= OurHistoryId of
-                true ->
-                    do_leader_request(Request, ReplyTo, State, Data);
-                false ->
-                    keep_state_and_data
-            end;
+        #leader{} ->
+            do_leader_request(Request, ReplyTo, State, Data);
         _ ->
             keep_state_and_data
     end.
@@ -1136,13 +1129,13 @@ handle_became_follower(State, Data) ->
     maybe_forward_pending_leader_requests(State, NewData).
 
 spawn_leader_sender(State, Data) ->
-    #follower{leader = Leader, history_id = HistoryId} = State,
+    #follower{leader = Leader} = State,
     undefined = Data#data.leader_sender,
 
     Self = self(),
     Sender = proc_lib:spawn_link(
                fun () ->
-                       leader_sender(Leader, Self, HistoryId, Data)
+                       leader_sender(Leader, Self, Data)
                end),
 
     Data#data{leader_sender = Sender}.
