@@ -44,8 +44,9 @@
         { rsm_name :: atom(),
           peer_id :: chronicle:peer_id(),
           peer_incarnation :: chronicle:incarnation(),
-          serial :: chronicle:serial(),
-          command :: term() }).
+          serial :: undefined | chronicle:serial(),
+          seen_serial :: chronicle:serial(),
+          payload :: {command, binary()} }).
 
 -record(branch, {history_id,
                  old_history_id,

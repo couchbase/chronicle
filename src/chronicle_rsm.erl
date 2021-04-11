@@ -391,14 +391,16 @@ add_leader_request(Request, Deadline, From, Data) ->
     add_request(Request, Deadline, {from, From}, #data.leader_requests, Data).
 
 get_requests_to_forward(#data{leader_requests = LeaderRequests,
+                              min_serial_in_use = MinSerial,
                               max_serial_to_forward = MaxSerial}) ->
+    SeenSerial = MinSerial - 1,
     maps:fold(
       fun (_, #request{request = RawRequest} = Request, Acc) ->
               case RawRequest of
-                  {command, _, _, Serial, _} ->
+                  {command, _, _, Serial, _, _} ->
                       case Serial =< MaxSerial of
                           true ->
-                              [Request | Acc];
+                              [update_seen_serial(Request, SeenSerial) | Acc];
                           false ->
                               Acc
                       end;
@@ -407,20 +409,30 @@ get_requests_to_forward(#data{leader_requests = LeaderRequests,
               end
       end, [], LeaderRequests).
 
-get_requests_by_serials(From, To, #data{serials_in_use = Serials,
-                                        leader_requests = Requests}) ->
-    Iter = gb_trees:iterator_from(From, Serials),
-    get_requests_by_serials_loop(Iter, To, Requests, []).
+update_seen_serial(#request{request = RawRequest} = Request, SeenSerial) ->
+    {command, PeerId, Incarnation, Serial, _, Command} = RawRequest,
+    NewRawRequest = {command, PeerId, Incarnation, Serial, SeenSerial, Command},
+    Request#request{request = NewRawRequest}.
 
-get_requests_by_serials_loop(Iter, To, Requests, Acc) ->
+get_requests_by_serials(From, To, #data{serials_in_use = Serials,
+                                        min_serial_in_use = MinSerial,
+                                        leader_requests = Requests}) ->
+    SeenSerial = MinSerial - 1,
+    Iter = gb_trees:iterator_from(From, Serials),
+    get_requests_by_serials_loop(Iter, To, Requests, SeenSerial, []).
+
+get_requests_by_serials_loop(Iter, To, Requests, SeenSerial, Acc) ->
     case gb_trees:next(Iter) of
         none ->
             Acc;
         {Serial, Ref, NewIter} ->
             case Serial =< To of
                 true ->
-                    NewAcc = [maps:get(Ref, Requests) | Acc],
-                    get_requests_by_serials_loop(NewIter, To, Requests, NewAcc);
+                    Request0 = maps:get(Ref, Requests),
+                    Request = update_seen_serial(Request0, SeenSerial),
+                    NewAcc = [Request | Acc],
+                    get_requests_by_serials_loop(NewIter, To,
+                                                 Requests, SeenSerial, NewAcc);
                 false ->
                     Acc
             end
@@ -434,7 +446,7 @@ maybe_update_serials(#request{request = Request},
                            serials_in_use = Serials,
                            max_replies_per_peer = MaxRepliesPerPeer} = Data) ->
     case Request of
-        {command, _, _, Serial, _} ->
+        {command, _, _, Serial, _, _} ->
             {_, NewSerials} = gb_trees:take(Serial, Serials),
             NewMinSerial =
                 case gb_trees:is_empty(NewSerials) of
@@ -491,9 +503,11 @@ handle_leader_request_command({command, Command}, Deadline, From, State,
                               #data{peer_id = PeerId,
                                     incarnation = Incarnation,
                                     serial = Serial,
+                                    min_serial_in_use = MinSerialInUse,
                                     max_serial_to_forward = MaxSerialToForward,
                                     serials_in_use = Serials} = Data) ->
-    RawRequest = {command, PeerId, Incarnation, Serial, Command},
+    SeenSerial = MinSerialInUse - 1,
+    RawRequest = {command, PeerId, Incarnation, Serial, SeenSerial, Command},
     {Request, NewData0} = add_leader_request(RawRequest, Deadline, From, Data),
 
     NewSerials = gb_trees:insert(Serial, Request#request.ref, Serials),
@@ -512,18 +526,6 @@ handle_leader_request_command({command, Command}, Deadline, From, State,
 handle_leader_request_other(RawRequest, Deadline, From, State, Data) ->
     {Request, NewData} = add_leader_request(RawRequest, Deadline, From, Data),
     maybe_forward_leader_request(Request, State, NewData).
-
-prepare_leader_request(Request, Data) ->
-    case Request of
-        {command, Command} ->
-            #data{peer_id = PeerId,
-                  incarnation = Incarnation,
-                  serial = Serial} = Data,
-            FinalRequest = {command, PeerId, Incarnation, Serial, Command},
-            {FinalRequest, Data#data{serial = Serial + 1}};
-        get_quorum_revision ->
-            {Request, Data}
-    end.
 
 get_forward_mode(State, Data) ->
     case State of
@@ -681,14 +683,14 @@ reply_leader_request(ReplyTo, Reply, Effects) ->
 
 do_leader_request(Request, ReplyTo, State, Data) ->
     case Request of
-        {command, PeerId, Incarnation, Serial, Command} ->
-            handle_command(PeerId, Incarnation, Serial, Command,
-                           ReplyTo, State, Data);
+        {command, PeerId, Incarnation, Serial, SeenSerial, Command} ->
+            handle_command(PeerId, Incarnation,
+                           Serial, SeenSerial, Command, ReplyTo, State, Data);
         get_quorum_revision ->
             handle_get_quorum_revision(ReplyTo, State, Data)
     end.
 
-handle_command(PeerId, Incarnation, Serial, Command, ReplyTo,
+handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
                #leader{history_id = HistoryId, term = Term},
                #data{name = Name} = Data) ->
     case dedup_command(PeerId, Incarnation, Serial, Data) of
@@ -699,7 +701,8 @@ handle_command(PeerId, Incarnation, Serial, Command, ReplyTo,
                                       peer_id = PeerId,
                                       peer_incarnation = Incarnation,
                                       serial = Serial,
-                                      command = Command},
+                                      seen_serial = SeenSerial,
+                                      payload = {command, Command}},
             chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
             {keep_state, NewData};
         {reply, Reply} ->
@@ -739,12 +742,13 @@ dedup_command(PeerId, Incarnation, Serial, Peers, Data) ->
             {reply, {error, ambiguous_write}}
     end.
 
-record_command(PeerId, Incarnation, Serial, Reply,
+record_command(PeerId, Incarnation, Serial, SeenSerial, Reply,
                #data{peer_states = PeerStates} = Data) ->
     NewPeerState =
         case find_peer_state(PeerId, Incarnation, Data) of
             {ok, PeerState} ->
-                peer_state_add_reply(Serial, Reply, PeerState, Data);
+                peer_state_add_reply(Serial, SeenSerial,
+                                     Reply, PeerState, Data);
             not_found ->
                 peer_state_init(Incarnation, Serial, Reply, Data)
         end,
@@ -752,15 +756,16 @@ record_command(PeerId, Incarnation, Serial, Reply,
     NewPeerStates = PeerStates#{PeerId => NewPeerState},
     Data#data{peer_states = NewPeerStates}.
 
-peer_state_add_reply(Serial, Reply,
+peer_state_add_reply(Serial, SeenSerial, Reply,
                      #peer_state{min_serial = MinSerial,
                                  replies = Replies} = PeerState,
                      #data{max_replies_per_peer = MaxRepliesPerPeer}) ->
     true = (Serial >= MinSerial),
     NewReplies = Replies#{Serial => Reply},
-    case Serial > MinSerial + MaxRepliesPerPeer of
+    case SeenSerial >= MinSerial orelse
+        Serial > MinSerial + MaxRepliesPerPeer of
         true ->
-            NewMinSerial = Serial - MaxRepliesPerPeer,
+            NewMinSerial = max(SeenSerial + 1, Serial - MaxRepliesPerPeer),
             PeerState#peer_state{
               min_serial = NewMinSerial,
               replies = prune_replies(NewReplies, MinSerial, NewMinSerial)};
@@ -1003,7 +1008,7 @@ apply_entry(Entry, {Data, Replies}) ->
     Revision = {HistoryId, EntrySeqno},
 
     case Value of
-        #rsm_command{} ->
+        #rsm_command{payload = {command, _}} ->
             true = (HistoryId =:= EntryHistoryId),
             {NewData0, Reply} =
                 apply_command(Value, AppliedRevision, Revision, Data),
@@ -1037,7 +1042,8 @@ apply_command(RSMCommand, AppliedRevision, Revision,
                  peer_id = PeerId,
                  peer_incarnation = Incarnation,
                  serial = Serial,
-                 command = Command} = RSMCommand,
+                 seen_serial = SeenSerial,
+                 payload = {command, Command}} = RSMCommand,
     true = (Name =:= Data#data.name),
 
     case dedup_command(PeerId, Incarnation, Serial, Peers, Data) of
@@ -1048,7 +1054,7 @@ apply_command(RSMCommand, AppliedRevision, Revision,
             NewData0 = Data#data{mod_state = NewModState,
                                  mod_data = NewModData},
             NewData = record_command(PeerId, Incarnation,
-                                     Serial, Reply, NewData0),
+                                     Serial, SeenSerial, Reply, NewData0),
             {NewData, {ok, Reply}};
         {reply, Reply} ->
             {Data, Reply}
@@ -1326,8 +1332,7 @@ peer_ids(Config) ->
     sets:from_list(chronicle_config:get_peer_ids(Config)).
 
 pack_command(Command) ->
-    {binary, term_to_binary(Command, [{compressed, 1}])}.
+    term_to_binary(Command, [{compressed, 1}]).
 
 unpack_command(PackedCommand) ->
-    {binary, Binary} = PackedCommand,
-    binary_to_term(Binary).
+    binary_to_term(PackedCommand).

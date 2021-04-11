@@ -882,8 +882,8 @@ log_entry_revision(#log_entry{history_id = HistoryId, seqno = Seqno}) ->
 sanitize_entry(#log_entry{value = Value} = LogEntry) ->
     SanitizedValue =
         case Value of
-            #rsm_command{} = Command ->
-                Command#rsm_command{command = sanitized};
+            #rsm_command{payload = {command, _}} = Command ->
+                Command#rsm_command{payload = {command, '...'}};
             _ ->
                 Value
         end,

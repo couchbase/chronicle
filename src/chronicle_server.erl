@@ -113,7 +113,7 @@ format_status(Opt, [_PDict, State, Data]) ->
     end.
 
 sanitize_event(cast, {rsm_command, Pid, Tag, HistoryId, Term, Command0}) ->
-    Command = Command0#rsm_command{command = '...'},
+    Command = Command0#rsm_command{payload = '...'},
     {cast, {rsm_command, Pid, Tag, HistoryId, Term, Command}};
 sanitize_event(Type, Event) ->
     {Type, Event}.
