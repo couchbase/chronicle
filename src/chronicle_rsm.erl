@@ -216,12 +216,10 @@ sanitize_event({call, _} = Type,
         _ ->
             {Type, LeaderRequest}
     end;
-sanitize_event(cast, {leader_request, Pid, Tag, HistoryId, _}) ->
-    {cast, {leader_request, Pid, Tag, HistoryId, '...'}};
+sanitize_event(cast, {leader_request, ReplyTo, HistoryId, _}) ->
+    {cast, {leader_request, ReplyTo, HistoryId, '...'}};
 sanitize_event(cast, {leader_request_result, Ref, _}) ->
     {cast, {leader_request_result, Ref, '...'}};
-sanitize_event(internal, {leader_request, Tag, _}) ->
-    {internal, {leader_request, Tag, '...'}};
 sanitize_event({call, _} = Type, {query, _}) ->
     {Type, {query, '...'}};
 sanitize_event(Type, Event) ->
@@ -310,12 +308,10 @@ handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
 handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
     handle_take_snapshot(Seqno, State, Data);
 handle_event(cast,
-             {leader_request, Pid, Tag, HistoryId, Request}, State, Data) ->
-    handle_leader_request(HistoryId, Pid, Tag, Request, State, Data);
+             {leader_request, ReplyTo, HistoryId, Request}, State, Data) ->
+    handle_leader_request(HistoryId, ReplyTo, Request, State, Data);
 handle_event(cast, {leader_request_result, Ref, Result}, State, Data) ->
     handle_leader_request_result(Ref, Result, State, Data);
-handle_event(internal, {leader_request, Tag, Request}, State, Data) ->
-    handle_leader_request_internal(Tag, Request, State, Data);
 handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
     handle_request_timeout(Ref, State, Data);
 handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
@@ -547,7 +543,7 @@ get_forward_mode(State, Data) ->
 maybe_forward_leader_request(Request, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            {keep_state, Data, leader_request_next_event(Request)};
+            {keep_state, Data, leader_request_next_event(Request, State)};
         remote ->
             leader_sender_forward(Data#data.leader_sender, Request),
             {keep_state, Data};
@@ -555,8 +551,10 @@ maybe_forward_leader_request(Request, State, Data) ->
             {keep_state, Data}
     end.
 
-leader_request_next_event(#request{ref = Ref, request = Request}) ->
-    {next_event, internal, {leader_request, Ref, Request}}.
+leader_request_next_event(#request{ref = Ref, request = Request},
+                          #leader{history_id = HistoryId}) ->
+    ReplyTo = {internal, Ref},
+    {next_event, cast, {leader_request, ReplyTo, HistoryId, Request}}.
 
 maybe_forward_pending_leader_requests(State, Data) ->
     maybe_forward_pending_leader_requests([], State, Data).
@@ -569,7 +567,7 @@ maybe_forward_pending_leader_requests(Effects, State, Data) ->
 maybe_forward_requests(Requests, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            [leader_request_next_event(Request) || Request <- Requests];
+            [leader_request_next_event(Request, State) || Request <- Requests];
         remote ->
             Sender = Data#data.leader_sender,
             lists:foreach(
@@ -653,11 +651,10 @@ leader_sender_loop(ServerRef, Parent, HistoryId, MRef) ->
 
 send_leader_request(ServerRef, Parent, HistoryId,
                     #request{ref = RequestRef, request = Request}) ->
-    gen_statem:cast(ServerRef,
-                    {leader_request, Parent, RequestRef, HistoryId, Request}).
+    ReplyTo = {cast, Parent, RequestRef},
+    gen_statem:cast(ServerRef, {leader_request, ReplyTo, HistoryId, Request}).
 
-handle_leader_request(HistoryId, Pid, Tag, Request, State, Data) ->
-    ReplyTo = {cast, Pid, Tag},
+handle_leader_request(HistoryId, ReplyTo, Request, State, Data) ->
     case State of
         #leader{history_id = OurHistoryId} ->
             case HistoryId =:= OurHistoryId of
@@ -669,10 +666,6 @@ handle_leader_request(HistoryId, Pid, Tag, Request, State, Data) ->
         _ ->
             keep_state_and_data
     end.
-
-handle_leader_request_internal(Tag, Request, State, Data) ->
-    #leader{} = State,
-    do_leader_request(Request, {internal, Tag}, State, Data).
 
 reply_leader_request(ReplyTo, Reply) ->
     reply_leader_request(ReplyTo, Reply, []).
