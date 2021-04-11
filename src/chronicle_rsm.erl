@@ -318,10 +318,6 @@ handle_event(internal, {leader_request, Tag, Request}, State, Data) ->
     handle_leader_request_internal(Tag, Request, State, Data);
 handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
     handle_request_timeout(Ref, State, Data);
-handle_event(info,
-             {?RSM_TAG, leader_request, Pid, Tag, HistoryId, Request},
-             State, Data) ->
-    handle_leader_request(HistoryId, Pid, Tag, Request, State, Data);
 handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
     handle_leader_down(State, Data);
 handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
