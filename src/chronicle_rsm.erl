@@ -241,10 +241,13 @@ init([Name, PeerId, Mod, ModArgs]) ->
 
             MaxRepliesPerPeer = ?MAX_REPLIES_PER_PEER,
 
+            RSMDir = chronicle_storage:ensure_rsm_dir(Name),
+            Incarnation = get_incarnation(RSMDir),
+
             Data0 = #data{name = Name,
 
                           peer_id = PeerId,
-                          incarnation = 0,
+                          incarnation = Incarnation,
                           serial = 0,
 
                           min_serial_in_use = 0,
@@ -1462,3 +1465,22 @@ pack_command(Command) ->
 
 unpack_command(PackedCommand) ->
     binary_to_term(PackedCommand).
+
+get_incarnation(RSMDir) ->
+    Path = filename:join(RSMDir, "incarnation"),
+    Incarnation =
+        case file:read_file(Path) of
+            {ok, Contents} ->
+                binary_to_integer(string:trim(Contents)) + 1;
+            {error, enoent} ->
+                ?INFO("No incarnation file found at '~s'", [Path]),
+                0
+        end,
+
+    ok = chronicle_utils:atomic_write_file(
+           Path,
+           fun (Fd) ->
+                   file:write(Fd, [integer_to_binary(Incarnation), $\n])
+           end),
+
+    Incarnation.

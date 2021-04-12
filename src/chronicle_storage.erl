@@ -30,7 +30,8 @@
          get_and_hold_latest_snapshot/1, release_snapshot/2,
          get_latest_snapshot_seqno/1,
          get_term_for_seqno/2,
-         get_log/0, get_log/2, get_log_committed/2, get_log_entry/2]).
+         get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
+         ensure_rsm_dir/1]).
 
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
@@ -286,6 +287,7 @@ publish(#storage{log_info_tab = LogInfoTab,
 ensure_dirs(DataDir) ->
     ok = chronicle_utils:mkdir_p(logs_dir(DataDir)),
     ok = chronicle_utils:mkdir_p(snapshots_dir(DataDir)),
+    ok = chronicle_utils:mkdir_p(rsms_dir(DataDir)),
 
     sync_dir(chronicle_dir(DataDir)),
     sync_dir(DataDir).
@@ -298,6 +300,9 @@ logs_dir(DataDir) ->
 
 snapshots_dir(DataDir) ->
     filename:join(chronicle_dir(DataDir), "snapshots").
+
+rsms_dir(DataDir) ->
+    filename:join(chronicle_dir(DataDir), "rsms").
 
 snapshot_dir(DataDir, Seqno) ->
     filename:join(snapshots_dir(DataDir), integer_to_list(Seqno)).
@@ -1266,3 +1271,9 @@ classify_logs_test() ->
     ?assertEqual({[Log1, Log2, Log3, Log4], [Log5]}, classify_logs(145, Logs)),
     ?assertEqual({Logs, []}, classify_logs(125, Logs)).
 -endif.
+
+ensure_rsm_dir(Name) ->
+    RSMsDir = rsms_dir(chronicle_env:data_dir()),
+    Dir = filename:join(RSMsDir, Name),
+    ok = chronicle_utils:mkdir_p(Dir),
+    Dir.
