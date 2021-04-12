@@ -15,13 +15,22 @@
 %%
 -module(chronicle_storage).
 
--compile(export_all).
-
 -include("chronicle.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+-export([open/0, wipe/0,
+         get_meta/1, get_high_seqno/1, get_high_term/1,
+         get_config/1, get_committed_config/1,
+         store_meta/2, append/5, sync/1, close/1, publish/1,
+         install_snapshot/6, record_snapshot/5, delete_snapshot/2,
+         read_rsm_snapshot/2, save_rsm_snapshot/3,
+         get_and_hold_latest_snapshot/1, release_snapshot/2,
+         get_latest_snapshot_seqno/1,
+         get_term_for_seqno/2,
+         get_log/0, get_log/2, get_log_committed/2, get_log_entry/2]).
 
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
