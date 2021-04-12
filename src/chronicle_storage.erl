@@ -1243,13 +1243,14 @@ classify_logs_loop(SnapshotSeqno, [{_, LogStartSeqno} = Log | RestLogs], Acc) ->
     end.
 
 -ifdef(TEST).
-classify_logs_loop() ->
-    Logs = [{log1, 200}, {log2, 150}, {log3, 200}, {log4, 150}, {log5, 100}],
-    ?assertEqual({[], Logs}, classify_logs(250, Logs)),
-    ?assertEqual({[], Logs}, classify_logs(200, Logs)),
-    ?assertEqual({Logs, []}, classify_logs(50, Logs)),
-
+classify_logs_test() ->
+    Logs = [{log1, 200}, {log2, 150}, {log3, 200}, {log4, 140}, {log5, 100}],
     [Log1, Log2, Log3, Log4, Log5] = Logs,
+
+    ?assertEqual({[Log1], [Log2, Log3, Log4, Log5]}, classify_logs(250, Logs)),
+    ?assertEqual({[Log1], [Log2, Log3, Log4, Log5]}, classify_logs(200, Logs)),
+    ?assertEqual({Logs, []}, classify_logs(50, Logs)),
     ?assertEqual({[Log1, Log2], [Log3, Log4, Log5]}, classify_logs(175, Logs)),
-    ?assertEqual({[Log1, Log2, Log3, Log4], [Log5]}, classify_logs(125, Logs)).
+    ?assertEqual({[Log1, Log2, Log3, Log4], [Log5]}, classify_logs(145, Logs)),
+    ?assertEqual({Logs, []}, classify_logs(125, Logs)).
 -endif.
