@@ -2078,14 +2078,6 @@ pass_snapshot_to_mgr(Data) ->
             Data
     end.
 
-get_state_path() ->
-    case application:get_env(chronicle, data_dir) of
-        {ok, Dir} ->
-            {ok, filename:join(Dir, "agent_state")};
-        undefined ->
-            undefined
-    end.
-
 assert_valid_history_id(HistoryId) ->
     true = is_binary(HistoryId).
 
@@ -2168,9 +2160,6 @@ announce_committed_seqno(CommittedSeqno, Data) ->
       fun (Name) ->
               chronicle_rsm:note_seqno_committed(Name, CommittedSeqno)
       end, Data).
-
-announce_system_state(SystemState) ->
-    announce_system_state(SystemState, no_extra).
 
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}),
