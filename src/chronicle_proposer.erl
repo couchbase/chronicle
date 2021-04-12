@@ -16,13 +16,19 @@
 -module(chronicle_proposer).
 
 -behavior(gen_statem).
--compile(export_all).
 
 -include("chronicle.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+-export([start_link/2, stop/1]).
+-export([sync_quorum/2, query/3, cas_config/4, append_commands/2]).
+
+-export([callback_mode/0,
+         format_status/2, sanitize_event/2,
+         init/1, handle_event/4]).
 
 -import(chronicle_utils, [get_all_peers/1,
                           get_establish_quorum/1,
@@ -1578,7 +1584,7 @@ send_requests(Peers, Data, Fun) ->
         maybe_send_requests(
           Peers, Data,
           fun (Peer, PeerRef, ServerRef) ->
-                  Fun(Peer, PeerRef, ServerRef),
+                  _ = Fun(Peer, PeerRef, ServerRef),
                   true
           end),
     NewData.
