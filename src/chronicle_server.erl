@@ -15,15 +15,25 @@
 %%
 -module(chronicle_server).
 
--compile(export_all).
 -behavior(gen_statem).
 
 -include("chronicle.hrl").
+
+-export([start_link/0]).
+-export([register_rsm/2,
+         get_config/2, get_cluster_info/2, cas_config/4, check_quorum/2,
+         sync_quorum/3, rsm_command/3, rsm_command/4,
+         proposer_ready/3, proposer_stopping/2, reply_request/2]).
+
+-export([callback_mode/0,
+         format_status/2, sanitize_event/2,
+         init/1, handle_event/4, terminate/3]).
 
 -import(chronicle_utils, [call/3, sanitize_reason/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-export([debug_log/4]).
 -endif.
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
@@ -92,6 +102,22 @@ proposer_ready(Pid, HistoryId, Term) ->
 proposer_stopping(Pid, Reason) ->
     Pid ! {proposer_msg, {proposer_stopping, Reason}},
     ok.
+
+reply_request(ReplyTo, Reply) ->
+    case ReplyTo of
+        noreply ->
+            ok;
+        {from, From} ->
+            gen_statem:reply(From, Reply);
+        {send, Pid, Tag} ->
+            Pid ! {Tag, Reply},
+            ok;
+        {many, ReplyTos} ->
+            lists:foreach(
+              fun (To) ->
+                      reply_request(To, Reply)
+              end, ReplyTos)
+    end.
 
 %% gen_server callbacks
 callback_mode() ->
@@ -333,22 +359,6 @@ handle_proposer_stopping(Reason,
     ?INFO("Proposer ~w for term ~w in history ~p is terminating:~n~p",
           [Proposer, Term, HistoryId, sanitize_reason(Reason)]),
     {next_state, #no_leader{}, Data}.
-
-reply_request(ReplyTo, Reply) ->
-    case ReplyTo of
-        noreply ->
-            ok;
-        {from, From} ->
-            gen_statem:reply(From, Reply);
-        {send, Pid, Tag} ->
-            Pid ! {Tag, Reply},
-            ok;
-        {many, ReplyTos} ->
-            lists:foreach(
-              fun (To) ->
-                      reply_request(To, Reply)
-              end, ReplyTos)
-    end.
 
 reply_not_leader(ReplyTo) ->
     reply_request(ReplyTo, {error, {leader_error, not_leader}}).
