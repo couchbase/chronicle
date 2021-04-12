@@ -16,13 +16,34 @@
 %% TODO: check more state invariants
 -module(chronicle_agent).
 
--compile(export_all).
+-behavior(gen_statem).
+-include("chronicle.hrl").
+
+-export([start_link/0]).
+-export([server_ref/2, monitor/1,
+         get_system_state/0, get_metadata/0,
+         check_grant_vote/2,
+         get_info_for_rsm/1, save_rsm_snapshot/3, get_rsm_snapshot/1,
+         get_full_snapshot/1, release_snapshot/1,
+         snapshot_ok/1, snapshot_failed/1,
+         get_log/0, get_log/4,
+         get_log_committed/1, get_log_committed/2, get_log_for_rsm/3,
+         get_term_for_seqno/1, get_history_id/1,
+         provision/1, reprovision/0,
+         wipe/0, is_wipe_requested/0,
+         prepare_join/1, join_cluster/1,
+         establish_local_term/2, establish_term/6, ensure_term/5,
+         append/7, append/9,
+         install_snapshot/8,
+         local_mark_committed/3,
+         local_store_branch/2, store_branch/3, undo_branch/3,
+         mark_removed/2, check_member/4]).
+
+-export([callback_mode/0, sanitize_event/2,
+         init/1, handle_event/4, terminate/3]).
 
 -export_type([provision_result/0, reprovision_result/0, wipe_result/0,
               prepare_join_result/0, join_cluster_result/0]).
-
--behavior(gen_statem).
--include("chronicle.hrl").
 
 -import(chronicle_utils, [call/2, call/3, call/4,
                           call_async/4,
