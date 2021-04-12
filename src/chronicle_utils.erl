@@ -22,7 +22,37 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--compile(export_all).
+-export([groupby_map/2,
+         terminate/2, wait_for_process/2,
+         terminate_and_wait/2, terminate_linked_process/2,
+         next_term/2,
+         call_async/4, send/3,
+         call/2, call/3, call/4, multi_call/4, multi_call/5,
+         start_timeout/1, read_timeout/1, read_deadline/1,
+         term_number/1, term_leader/1,
+         get_position/1, compare_positions/2, max_position/2,
+         monitor_process/1,
+         make_batch/2, batch_enq/2, batch_flush/1, batch_map/2,
+         gb_trees_filter/2,
+         random_uuid/0,
+         with_leader/2,
+         get_config/1, get_all_peers/1,
+         get_establish_quorum/1, get_establish_peers/1, get_quorum_peers/1,
+         have_quorum/2, is_quorum_feasible/3,
+         sync_dir/1,
+         atomic_write_file/2,
+         create_marker/1, create_marker/2, delete_marker/1,
+         mkdir_p/1, check_file_exists/2, delete_recursive/1,
+         read_full/2,
+         maps_foreach/2,
+         queue_foreach/2, queue_takefold/3,
+         queue_takewhile/2, queue_dropwhile/2,
+         log_entry_revision/1,
+         sanitize_entry/1, sanitize_entries/1,
+         sanitize_stacktrace/1, sanitize_reason/1,
+         shuffle/1,
+         announce_important_change/1]).
+
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
 -ifdef(HAVE_SYNC_DIR).
