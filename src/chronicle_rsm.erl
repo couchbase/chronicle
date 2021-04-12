@@ -14,9 +14,22 @@
 %% limitations under the License.
 %%
 -module(chronicle_rsm).
--compile(export_all).
 
 -behavior(gen_statem).
+
+-include("chronicle.hrl").
+
+-export([start_link/4]).
+-export([command/2, command/3, query/2, query/3,
+         get_local_revision/1, sync_revision/3, sync/2,
+         note_leader_status/2, note_seqno_committed/2, take_snapshot/2]).
+
+-export([callback_mode/0,
+         format_status/2, sanitize_event/2,
+         init/1, handle_event/4, terminate/3]).
+
+-import(chronicle_utils, [call/2, call/3, call/4,
+                          read_deadline/1, start_timeout/1]).
 
 %% If it takes longer than this time to initialize, then we probably hit some
 %% bug.
@@ -29,11 +42,6 @@
 
 -define(MAX_REPLIES_PER_PEER,
         chronicle_settings:get({rsm, max_replies_per_peer}, 500)).
-
--include("chronicle.hrl").
-
--import(chronicle_utils, [call/2, call/3, call/4,
-                          read_deadline/1, start_timeout/1]).
 
 -define(RSM_TAG, '$rsm').
 -define(SERVER(Name), ?SERVER_NAME(Name)).
