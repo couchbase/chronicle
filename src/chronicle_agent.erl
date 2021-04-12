@@ -762,7 +762,7 @@ handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
 
-terminate(_Reason, Data) ->
+terminate(_Reason, _State, Data) ->
     maybe_cancel_snapshot(Data).
 
 %% internal
