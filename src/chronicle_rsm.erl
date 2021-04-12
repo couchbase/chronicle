@@ -201,7 +201,7 @@ format_status(Opt, [_PDict, State, Data]) ->
                  #data{} ->
                      Data#data{mod_state = omitted,
                                leader_requests = omitted,
-                               peer_states = omitted};
+                               peer_states = #{}};
                  _ ->
                      %% During gen_statem initialization Data may be undefined.
                      Data
