@@ -18,7 +18,15 @@
 -include("chronicle.hrl").
 
 -behavior(gen_statem).
--compile(export_all).
+
+-export([start_link/0]).
+-export([get_leader/0,
+         wait_for_leader/0, wait_for_leader/1, wait_for_leader/2,
+         announce_leader_status/0,
+         note_term_finished/2, note_term_established/2, sync/0]).
+
+-export([callback_mode/0,
+         init/1, handle_event/4, terminate/3]).
 
 -import(chronicle_utils, [get_establish_peers/1,
                           get_establish_quorum/1,
