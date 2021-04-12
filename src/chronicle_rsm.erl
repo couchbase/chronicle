@@ -25,6 +25,7 @@
 -define(RETRY_AFTER, chronicle_settings:get({rsm, retry_after}, 2000)).
 -define(MAX_BACKOFF, chronicle_settings:get({rsm, max_backoff}, 4)).
 -define(DOWN_INTERVAL, chronicle_settings:get({rsm, down_interval}, 10000)).
+-define(NOOP_INTERVAL, chronicle_settings:get({rsm, noop_interval}, 10000)).
 
 -define(MAX_REPLIES_PER_PEER,
         chronicle_settings:get({rsm, max_replies_per_peer}, 500)).
@@ -294,6 +295,8 @@ handle_event(state_timeout, init_timeout,
     {stop, init_timeout};
 handle_event(state_timeout, retry_leader, State, Data) ->
     handle_retry_leader(State, Data);
+handle_event(state_timeout, maybe_send_noop, State, Data) ->
+    handle_maybe_send_noop(State, Data);
 handle_event({call, From}, Call, State, Data) ->
     case State of
         #init{} ->
@@ -307,6 +310,8 @@ handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
     handle_seqno_committed(Seqno, State, Data);
 handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
     handle_take_snapshot(Seqno, State, Data);
+handle_event(cast, {noop, PeerId, Incarnation, SeenSerial}, State, Data) ->
+    handle_noop(PeerId, Incarnation, SeenSerial, State, Data);
 handle_event(cast, {leader_request, ReplyTo, Request}, State, Data) ->
     handle_leader_request(ReplyTo, Request, State, Data);
 handle_event(cast, {leader_request_result, Ref, Result}, State, Data) ->
@@ -631,8 +636,59 @@ handle_retry_leader(State, Data) ->
     NewData = spawn_leader_sender(State, NewData0),
     maybe_forward_pending_leader_requests(State, NewData).
 
+handle_maybe_send_noop(State, #data{peer_id = PeerId,
+                                    incarnation = Incarnation,
+                                    min_serial_in_use = MinSerialInUse,
+                                    leader_requests = LeaderRequests} = Data) ->
+    true = is_record(State, leader) orelse is_record(State, follower),
+
+    SendNoop =
+        case maps:size(LeaderRequests) =:= 0 of
+            true ->
+                case find_peer_state(PeerId, Incarnation, Data) of
+                    {ok, #peer_state{min_serial = MinSerial}} ->
+                        MinSerialInUse > MinSerial;
+                    not_found ->
+                        false
+                end;
+            false ->
+                false
+        end,
+
+    Effects = schedule_maybe_send_noop(),
+    case SendNoop of
+        true ->
+            {keep_state_and_data, send_noop(Effects, State, Data)};
+        false ->
+            {keep_state_and_data, Effects}
+    end.
+
+schedule_maybe_send_noop() ->
+    [{state_timeout, ?NOOP_INTERVAL, maybe_send_noop}].
+
+send_noop(Effects, State,
+          #data{peer_id = PeerId,
+                incarnation = Incarnation,
+                min_serial_in_use = MinSerialInUse} = Data) ->
+    SeenSerial = MinSerialInUse - 1,
+    case get_forward_mode(State, Data) of
+        local ->
+            [{next_event, cast,
+              {noop, PeerId, Incarnation, SeenSerial}} | Effects];
+        remote ->
+            Sender = Data#data.leader_sender,
+            leader_sender_cast(Sender, {noop, PeerId, Incarnation, SeenSerial}),
+            Effects;
+        none ->
+            Effects
+    end.
+
 leader_sender_forward(Sender, Request) ->
-    Sender ! {forward_request, Request},
+    Sender ! {request, Request},
+    ok.
+
+leader_sender_cast(Sender, Cast) ->
+    Sender ! {cast, Cast},
     ok.
 
 leader_sender(Leader, Parent, #data{name = Name}) ->
@@ -644,8 +700,11 @@ leader_sender_loop(ServerRef, Parent, MRef) ->
     receive
         {'DOWN', MRef, _, _, _} ->
             Parent ! {?RSM_TAG, leader_down};
-        {forward_request, Request} ->
+        {request, Request} ->
             send_leader_request(ServerRef, Parent, Request),
+            leader_sender_loop(ServerRef, Parent, MRef);
+        {cast, Cast} ->
+            gen_statem:cast(ServerRef, Cast),
             leader_sender_loop(ServerRef, Parent, MRef)
     end.
 
@@ -701,6 +760,37 @@ handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
         {reply, Reply} ->
             {keep_state_and_data, reply_leader_request(ReplyTo, Reply)}
     end.
+
+handle_noop(PeerId, Incarnation, SeenSerial,
+            #leader{history_id = HistoryId, term = Term},
+            #data{name = Name} = Data) ->
+    Submit =
+        case find_peer_state(PeerId, Incarnation, Data) of
+            {ok, #peer_state{min_serial = MinSerial}} ->
+                SeenSerial >= MinSerial;
+            not_found ->
+                true;
+            stale ->
+                false
+        end,
+
+    case Submit of
+        true ->
+            RSMCommand = #rsm_command{rsm_name = Name,
+                                      peer_id = PeerId,
+                                      peer_incarnation = Incarnation,
+                                      serial = undefined,
+                                      seen_serial = SeenSerial,
+                                      payload = noop},
+            chronicle_server:rsm_command(HistoryId, Term, RSMCommand);
+        false ->
+            ok
+    end,
+
+    keep_state_and_data;
+handle_noop(_, _, _, _, _) ->
+    %% not leader
+    keep_state_and_data.
 
 dedup_command(PeerId, Incarnation, Serial, Data) ->
     dedup_command(PeerId, Incarnation, Serial, undefined, Data).
@@ -1011,6 +1101,9 @@ apply_entry(Entry, {Data, Replies}) ->
             NewData = NewData0#data{applied_seqno = EntrySeqno},
 
             {NewData, NewReplies};
+        #rsm_command{payload = noop} ->
+            true = (HistoryId =:= EntryHistoryId),
+            {apply_noop(Value, Data), Replies};
         #config{} = NewConfig ->
             {ok, NewModState, NewModData} =
                 Mod:handle_config(NewConfig,
@@ -1051,6 +1144,37 @@ apply_command(RSMCommand, AppliedRevision, Revision,
             {NewData, {ok, Reply}};
         {reply, Reply} ->
             {Data, Reply}
+    end.
+
+apply_noop(RSMCommand,
+           #data{peer_states = PeerStates} = Data) ->
+    #rsm_command{rsm_name = Name,
+                 peer_id = PeerId,
+                 peer_incarnation = Incarnation,
+                 seen_serial = SeenSerial,
+                 payload = noop} = RSMCommand,
+    true = (Name =:= Data#data.name),
+
+    case find_peer_state(PeerId, Incarnation, Data) of
+        {ok, #peer_state{min_serial = MinSerial,
+                         replies = Replies} = PeerState} ->
+            case SeenSerial >= MinSerial of
+                true ->
+                    NewMinSerial = SeenSerial + 1,
+                    NewReplies = prune_replies(Replies,
+                                               MinSerial, NewMinSerial),
+                    NewPeerState = PeerState#peer_state{
+                                     min_serial = NewMinSerial,
+                                     replies = NewReplies},
+                    NewPeerStates = PeerStates#{PeerId => NewPeerState},
+                    Data#data{peer_states = NewPeerStates};
+                false ->
+                    Data
+            end;
+        stale ->
+            Data;
+        not_found ->
+            Data
     end.
 
 prune_peer_states(#data{peer_states = PeerStates,
@@ -1118,15 +1242,16 @@ handle_became_leader(HistoryId, Term, State, Data) ->
 
     NewState = #leader{history_id = HistoryId, term = Term},
     NewData = Data#data{leader_status = active},
-    maybe_forward_pending_leader_requests(NewState, NewData).
+    maybe_forward_pending_leader_requests(schedule_maybe_send_noop(),
+                                          NewState, NewData).
 
 handle_became_follower(State, Data) ->
     NewData0 = Data#data{leader_status = active,
                          leader_backoff = 1,
                          leader_last_retry = undefined},
     NewData = spawn_leader_sender(State, NewData0),
-
-    maybe_forward_pending_leader_requests(State, NewData).
+    maybe_forward_pending_leader_requests(schedule_maybe_send_noop(),
+                                          State, NewData).
 
 spawn_leader_sender(State, Data) ->
     #follower{leader = Leader} = State,

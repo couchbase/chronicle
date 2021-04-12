@@ -46,7 +46,7 @@
           peer_incarnation :: chronicle:incarnation(),
           serial :: undefined | chronicle:serial(),
           seen_serial :: chronicle:serial(),
-          payload :: {command, any()} }).
+          payload :: noop | {command, any()} }).
 
 -record(branch, {history_id,
                  old_history_id,
