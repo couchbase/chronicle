@@ -285,7 +285,10 @@ publish(#storage{log_info_tab = LogInfoTab,
 
 ensure_dirs(DataDir) ->
     ok = chronicle_utils:mkdir_p(logs_dir(DataDir)),
-    ok = chronicle_utils:mkdir_p(snapshots_dir(DataDir)).
+    ok = chronicle_utils:mkdir_p(snapshots_dir(DataDir)),
+
+    sync_dir(chronicle_dir(DataDir)),
+    sync_dir(DataDir).
 
 chronicle_dir(DataDir) ->
     filename:join(DataDir, "chronicle").
