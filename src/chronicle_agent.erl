@@ -31,9 +31,7 @@
                           compare_positions/2,
                           max_position/2,
                           sanitize_entry/1,
-                          sanitize_entries/1,
-                          sanitize_reason/1,
-                          sanitize_stacktrace/1]).
+                          sanitize_entries/1]).
 
 -define(NAME, ?MODULE).
 -define(SERVER, ?SERVER_NAME(?NAME)).
