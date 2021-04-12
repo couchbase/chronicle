@@ -738,30 +738,6 @@ compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
             end
     end.
 
-delete_ordered_table_range(Table, FromKey, ToKey) ->
-    StartKey =
-        case ets:member(Table, FromKey) of
-            true ->
-                FromKey;
-            false ->
-                ets:next(Table, FromKey)
-        end,
-
-    delete_ordered_table_range_loop(Table, StartKey, ToKey).
-
-delete_ordered_table_range_loop(Table, Key, ToKey) ->
-    case Key of
-        '$end_of_table' ->
-            ok;
-        _ when Key =< ToKey ->
-            NextKey = ets:next(Table, Key),
-            ets:delete(Table, Key),
-            delete_ordered_table_range_loop(Table, NextKey, ToKey);
-        _ ->
-            true = (Key > ToKey),
-            ok
-    end.
-
 mem_log_append(EndSeqno, Entries,
                #storage{log_tab = LogTab} = Storage) ->
     ets:insert(LogTab, Entries),
