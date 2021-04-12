@@ -15,9 +15,9 @@
 %%
 -module(chronicle_log).
 
--compile(export_all).
-
 -include("chronicle.hrl").
+
+-export([open/4, read_log/4, sync/1, close/1, create/2, append/2, data_size/1]).
 
 -define(MAGIC, <<"chronicle">>).
 -define(MAGIC_BYTES, 9).
