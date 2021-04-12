@@ -476,7 +476,7 @@ store_meta(Updates, Storage) ->
         true ->
             NewStorage0 = add_meta(Meta, Storage),
             NewStorage = compact_configs(NewStorage0),
-            maybe_rollover(log_append([{meta, Meta}], NewStorage));
+            maybe_rollover(log_append({meta, Meta}, NewStorage));
         false ->
             Storage
     end.
@@ -496,7 +496,7 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
     Meta = append_handle_meta(Opts, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
-    NewStorage0 = log_append([LogEntry], Storage),
+    NewStorage0 = log_append(LogEntry, Storage),
     NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
                             Truncate, Entries, NewStorage0),
     maybe_rollover(NewStorage1).
@@ -680,9 +680,9 @@ find_orphan_logs_test() ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Records, #storage{current_log = Log,
-                             current_log_data_size = LogDataSize} = Storage) ->
-    case chronicle_log:append(Log, Records) of
+log_append(Record, #storage{current_log = Log,
+                            current_log_data_size = LogDataSize} = Storage) ->
+    case chronicle_log:append(Log, Record) of
         {ok, BytesWritten} ->
             NewLogDataSize = LogDataSize + BytesWritten,
             Storage#storage{current_log_data_size = NewLogDataSize};
@@ -905,7 +905,7 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
-    NewStorage0 = log_append([LogRecord], Storage),
+    NewStorage0 = log_append(LogRecord, Storage),
 
     NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
     NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
