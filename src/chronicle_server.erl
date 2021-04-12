@@ -612,20 +612,22 @@ simple_test_() ->
 
 setup_vnet(Nodes) ->
     {ok, _} = vnet:start_link(Nodes),
-    lists:foreach(
+    lists:map(
       fun (N) ->
-              ok = rpc_node(
-                     N, fun () ->
-                                prepare_vnode_dir(),
-                                chronicle_env:set_env(logger_function,
-                                                      {?MODULE, debug_log}),
-                                _ = application:load(chronicle),
-                                ok = chronicle_env:setup(),
+              {ok, Sup} =
+                  rpc_node(
+                    N, fun () ->
+                               prepare_vnode_dir(),
+                               chronicle_env:set_env(logger_function,
+                                                     {?MODULE, debug_log}),
+                               _ = application:load(chronicle),
+                               ok = chronicle_env:setup(),
 
-                                {ok, P} = chronicle_sup:start_link(),
-                                unlink(P),
-                                ok
-                        end)
+                               {ok, P} = chronicle_sup:start_link(),
+                               unlink(P),
+                               {ok, P}
+                       end),
+              Sup
       end, Nodes).
 
 get_tmp_dir() ->
@@ -642,7 +644,14 @@ prepare_vnode_dir() ->
     ok = chronicle_utils:mkdir_p(Dir),
     chronicle_env:set_env(data_dir, Dir).
 
-teardown_vnet(_) ->
+teardown_vnet(Sups) ->
+    lists:foreach(
+      fun (Sup) ->
+              %% Supervisors are gen_server-s under the hood, hence the
+              %% following works. Can't simply an exit signal, because it'll
+              %% get ignored.
+              gen_server:stop(Sup)
+      end, Sups),
     vnet:stop().
 
 add_voters(ViaNode, Voters) ->
