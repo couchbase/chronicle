@@ -105,7 +105,6 @@
                 leader_last_retry,
 
                 local_requests,
-                accepted_commands,
 
                 config :: undefined | #config{},
                 config_peers :: sets:set(chronicle:peer_id()),
@@ -262,7 +261,6 @@ init([Name, PeerId, Mod, ModArgs]) ->
                           sync_revision_requests = gb_trees:empty(),
                           leader_requests = #{},
                           local_requests = #{},
-                          accepted_commands = #{},
 
                           config = undefined,
                           config_peers = sets:new(),
@@ -331,8 +329,6 @@ handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
     handle_request_timeout(Ref, State, Data);
 handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
     handle_leader_down(State, Data);
-handle_event(info, {{?RSM_TAG, command, Ref}, Result}, State, Data) ->
-    handle_command_result(Ref, Result, State, Data);
 handle_event(info, {{?RSM_TAG, sync_quorum, ReplyTo}, Result}, State, Data) ->
     handle_sync_quorum_result(ReplyTo, Result, State, Data);
 handle_event(info, {?RSM_TAG, sync_revision_timeout, Request}, State, Data) ->
@@ -371,7 +367,9 @@ handle_call(Call, From, _State, _Data) ->
     {keep_state_and_data, [{reply, From, nack}]}.
 
 add_request(RawRequest, Deadline, ReplyTo, Field, Data) ->
-    Ref = make_ref(),
+    add_request(make_ref(), RawRequest, Deadline, ReplyTo, Field, Data).
+
+add_request(Ref, RawRequest, Deadline, ReplyTo, Field, Data) ->
     TRef =
         case Deadline of
             infinity ->
@@ -488,7 +486,10 @@ maybe_update_serials(#request{request = Request},
     end.
 
 add_local_request(Request, ReplyTo, Data) ->
-    add_request(Request, infinity, ReplyTo, #data.local_requests, Data).
+    add_local_request(make_ref(), Request, ReplyTo, Data).
+
+add_local_request(Id, Request, ReplyTo, Data) ->
+    add_request(Id, Request, infinity, ReplyTo, #data.local_requests, Data).
 
 take_request(Ref, Field, Data) ->
     Requests = element(Field, Data),
@@ -758,15 +759,19 @@ handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
                #data{name = Name} = Data) ->
     case dedup_command(PeerId, Incarnation, Serial, Data) of
         accept ->
-            {Request, NewData} = add_local_request(command, ReplyTo, Data),
-            Tag = {?RSM_TAG, command, Request#request.ref},
+            Id = {PeerId, Incarnation, Serial},
+
+            %% We may be overriding an existing request. But that might only
+            %% happen if the client retransmits the request.
+            {_, NewData} = add_local_request(Id, command, ReplyTo, Data),
+
             RSMCommand = #rsm_command{rsm_name = Name,
                                       peer_id = PeerId,
                                       peer_incarnation = Incarnation,
                                       serial = Serial,
                                       seen_serial = SeenSerial,
                                       payload = {command, Command}},
-            chronicle_server:rsm_command(Tag, HistoryId, Term, RSMCommand),
+            chronicle_server:rsm_command(HistoryId, Term, RSMCommand),
             {keep_state, NewData};
         {reply, Reply} ->
             {keep_state_and_data, reply_leader_request(ReplyTo, Reply)}
@@ -897,25 +902,6 @@ find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
         error ->
             not_found
     end.
-
-handle_command_result(Ref, Result, _State, Data) ->
-    case take_local_request(Ref, Data) of
-        {#request{reply_to = ReplyTo}, NewData} ->
-            case Result of
-                {accepted, Seqno} ->
-                    {keep_state, add_accepted_command(Seqno, ReplyTo, NewData)};
-                {error, {leader_error, _}} ->
-                    %% TODO
-                    {keep_state, NewData}
-            end;
-        no_request ->
-            keep_state_and_data
-    end.
-
-add_accepted_command(Seqno, ReplyTo,
-                     #data{accepted_commands = Commands} = Data) ->
-    NewCommands = maps:put(Seqno, ReplyTo, Commands),
-    Data#data{accepted_commands = NewCommands}.
 
 handle_get_quorum_revision(ReplyTo, State, Data) ->
     {keep_state, sync_quorum(ReplyTo, State, Data)}.
@@ -1104,11 +1090,10 @@ apply_entry(Entry, {Data, Replies}) ->
     case Value of
         #rsm_command{payload = {command, _}} ->
             true = (HistoryId =:= EntryHistoryId),
-            {NewData0, Reply} =
+            {NewData0, Id, Reply} =
                 apply_command(Value, AppliedRevision, Revision, Data),
 
-            EntryTerm = Entry#log_entry.term,
-            NewReplies = [{EntryTerm, EntrySeqno, Reply} | Replies],
+            NewReplies = [{Id, Reply} | Replies],
             NewData = NewData0#data{applied_seqno = EntrySeqno},
 
             {NewData, NewReplies};
@@ -1148,6 +1133,7 @@ apply_command(RSMCommand, AppliedRevision, Revision,
                  payload = {command, Command}} = RSMCommand,
     true = (Name =:= Data#data.name),
 
+    Id = {PeerId, Incarnation, Serial},
     case dedup_command(PeerId, Incarnation, Serial, Peers, Data) of
         accept ->
             {reply, Reply, NewModState, NewModData} =
@@ -1157,9 +1143,9 @@ apply_command(RSMCommand, AppliedRevision, Revision,
                                  mod_data = NewModData},
             NewData = record_command(PeerId, Incarnation,
                                      Serial, SeenSerial, Reply, NewData0),
-            {NewData, {ok, Reply}};
+            {NewData, Id, {ok, Reply}};
         {reply, Reply} ->
-            {Data, Reply}
+            {Data, Id, Reply}
     end.
 
 apply_noop(RSMCommand,
@@ -1202,39 +1188,20 @@ prune_peer_states(#data{peer_states = PeerStates,
           end, PeerStates),
     Data#data{peer_states = NewPeerStates}.
 
-pending_commands_reply(Replies,
-                       #leader{term = OurTerm},
-                       #data{accepted_commands = Commands} = Data) ->
-    {NewCommands, Effects} =
-        lists:foldl(
-          fun ({Term, Seqno, Reply}, Acc) ->
-                  pending_command_reply(Term, Seqno, Reply, OurTerm, Acc)
-          end, {Commands, []}, Replies),
-
-    {Data#data{accepted_commands = NewCommands}, Effects};
+pending_commands_reply(Replies, #leader{}, Data) ->
+    lists:foldr(
+      fun ({Id, Reply}, Acc) ->
+              pending_command_reply(Id, Reply, Acc)
+      end, {Data, []}, Replies);
 pending_commands_reply(_Replies, _State, Data) ->
     {Data, []}.
 
-pending_command_reply(Term, Seqno, Reply, OurTerm, {Commands, Effects} = Acc) ->
-    %% Since chronicle_agent doesn't terminate all leader activities in a lock
-    %% step, when some other nodes establishes a term, there's a short window
-    %% of time when chronicle_rsm will continue to believe it's still in a
-    %% leader state. So theoretically it's possible the new leader committs
-    %% something a one of the seqnos we are waiting for. So we need to check
-    %% that entry's term matches our term.
-    %%
-    %% TODO: consider making sure that chronicle_agent terminates everything
-    %% synchronously.
-    case Term =:= OurTerm of
-        true ->
-            case maps:take(Seqno, Commands) of
-                {ReplyTo, NewCommands} ->
-                    NewEffects = reply_leader_request(ReplyTo, Reply, Effects),
-                    {NewCommands, NewEffects};
-                error ->
-                    Acc
-            end;
-        false ->
+pending_command_reply(Id, Reply, {Data, Effects} = Acc) ->
+    case take_local_request(Id, Data) of
+        {#request{reply_to = ReplyTo, request = command}, NewData} ->
+            NewEffects = reply_leader_request(ReplyTo, Reply, Effects),
+            {NewData, NewEffects};
+        no_request ->
             Acc
     end.
 
@@ -1294,7 +1261,7 @@ cleanup_after_leader(State, Data) ->
             %% For simplicity, we don't respond to inflight commands. This is
             %% because eventually all other nodes should realize that this
             %% node is not the leader anymore and will retry the requests.
-            Data#data{accepted_commands = #{}, local_requests = #{}};
+            Data#data{local_requests = #{}};
         #follower{} ->
             Sender = Data#data.leader_sender,
 

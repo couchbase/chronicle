@@ -22,7 +22,7 @@
 -export([start_link/0]).
 -export([register_rsm/2,
          get_config/2, get_cluster_info/2, cas_config/4, check_quorum/2,
-         sync_quorum/3, rsm_command/3, rsm_command/4,
+         sync_quorum/3, rsm_command/3,
          proposer_ready/3, proposer_stopping/2, reply_request/2]).
 
 -export([callback_mode/0,
@@ -90,10 +90,6 @@ sync_quorum(Tag, HistoryId, Term) ->
 rsm_command(HistoryId, Term, Command) ->
     gen_statem:cast(?SERVER, {rsm_command, HistoryId, Term, Command}).
 
-rsm_command(Tag, HistoryId, Term, Command) ->
-    gen_statem:cast(?SERVER,
-                    {rsm_command, self(), Tag, HistoryId, Term, Command}).
-
 %% Meant to only be used by chronicle_proposer.
 proposer_ready(Pid, HistoryId, Term) ->
     Pid ! {proposer_msg, {proposer_ready, HistoryId, Term}},
@@ -138,9 +134,9 @@ format_status(Opt, [_PDict, State, Data]) ->
              end}
     end.
 
-sanitize_event(cast, {rsm_command, Pid, Tag, HistoryId, Term,
+sanitize_event(cast, {rsm_command, HistoryId, Term,
                       #rsm_command{payload = {command, _}} = Command}) ->
-    {cast, {rsm_command, Pid, Tag, HistoryId, Term,
+    {cast, {rsm_command, HistoryId, Term,
             Command#rsm_command{payload = {command, '...'}}}};
 sanitize_event(Type, Event) ->
     {Type, Event}.
@@ -189,12 +185,7 @@ handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
 handle_event({call, From}, check_quorum, State, Data) ->
     handle_check_quorum(From, State, Data);
 handle_event(cast, {rsm_command, HistoryId, Term, RSMCommand}, State, Data) ->
-    handle_rsm_command(HistoryId, Term, RSMCommand, noreply, State, Data);
-handle_event(cast,
-             {rsm_command, Pid, Tag, HistoryId, Term, RSMCommand},
-             State, Data) ->
-    ReplyTo = {send, Pid, Tag},
-    handle_rsm_command(HistoryId, Term, RSMCommand, ReplyTo, State, Data);
+    handle_rsm_command(HistoryId, Term, RSMCommand, State, Data);
 handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
     ReplyTo = {send, Pid, Tag},
     batch_leader_request(sync_quorum, {HistoryId, Term},
@@ -492,9 +483,9 @@ handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
             {keep_state, Data#data{rsms = NewRSMs}}
     end.
 
-handle_rsm_command(HistoryId, Term, RSMCommand, ReplyTo, State, Data) ->
+handle_rsm_command(HistoryId, Term, RSMCommand, State, Data) ->
     Command = {rsm_command, RSMCommand},
-    batch_leader_request(Command, {HistoryId, Term}, ReplyTo,
+    batch_leader_request(Command, {HistoryId, Term}, noreply,
                          #data.commands_batch, State, Data).
 
 terminate_proposer(#data{proposer = Proposer} = Data) ->
