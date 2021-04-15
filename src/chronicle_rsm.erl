@@ -1116,18 +1116,23 @@ apply_entry(Entry, {Data, Replies}) ->
             true = (HistoryId =:= EntryHistoryId),
             {apply_noop(Value, Data), Replies};
         #config{} = NewConfig ->
-            {ok, NewModState, NewModData} =
-                Mod:handle_config(NewConfig,
-                                  Revision, AppliedRevision,
-                                  ModState, ModData),
+            case chronicle_config:is_stable(NewConfig) of
+                true ->
+                    {ok, NewModState, NewModData} =
+                        Mod:handle_config(NewConfig,
+                                          Revision, AppliedRevision,
+                                          ModState, ModData),
 
-            NewData = Data#data{applied_seqno = EntrySeqno,
-                                applied_history_id = EntryHistoryId,
-                                config = NewConfig,
-                                config_peers = peer_ids(NewConfig),
-                                mod_state = NewModState,
-                                mod_data = NewModData},
-            {prune_peer_states(NewData), Replies}
+                    NewData = Data#data{applied_seqno = EntrySeqno,
+                                        applied_history_id = EntryHistoryId,
+                                        config = NewConfig,
+                                        config_peers = peer_ids(NewConfig),
+                                        mod_state = NewModState,
+                                        mod_data = NewModData},
+                    {prune_peer_states(NewData), Replies};
+                false ->
+                    {Data, Replies}
+            end
     end.
 
 apply_command(RSMCommand, AppliedRevision, Revision,
