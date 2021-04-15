@@ -1217,14 +1217,14 @@ handle_leader_status(Status, State, Data) ->
                                  term = Term},
             handle_became_follower(NewState, NewData);
         no_leader ->
-            {next_state, #no_leader{}, NewData}
+            {next_state, #no_leader{}, call_state_enter(no_leader, NewData)}
     end.
 
 handle_became_leader(HistoryId, Term, State, Data) ->
     true = is_record(State, no_leader) orelse is_record(State, follower),
 
     NewState = #leader{history_id = HistoryId, term = Term},
-    NewData = Data#data{leader_status = active},
+    NewData = call_state_enter(leader, Data#data{leader_status = active}),
     maybe_forward_pending_leader_requests(schedule_maybe_send_noop(),
                                           NewState, NewData).
 
@@ -1232,7 +1232,8 @@ handle_became_follower(State, Data) ->
     NewData0 = Data#data{leader_status = active,
                          leader_backoff = 1,
                          leader_last_retry = undefined},
-    NewData = spawn_leader_sender(State, NewData0),
+    NewData1 = spawn_leader_sender(State, NewData0),
+    NewData = call_state_enter(follower, NewData1),
     maybe_forward_pending_leader_requests(schedule_maybe_send_noop(),
                                           State, NewData).
 
@@ -1366,6 +1367,10 @@ call_callback(Callback, Args, #data{mod = Mod,
                                     applied_seqno = AppliedSeqno}) ->
     AppliedRevision = {AppliedHistoryId, AppliedSeqno},
     erlang:apply(Mod, Callback, Args ++ [AppliedRevision, ModState, ModData]).
+
+call_state_enter(State, Data) ->
+    {ok, NewModData} = call_callback(state_enter, [State], Data),
+    set_mod_data(NewModData, Data).
 
 maybe_publish_local_revision(#init{}, _Data) ->
     %% Don't expose the revision while we're still initializing

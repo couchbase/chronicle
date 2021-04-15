@@ -40,7 +40,7 @@
 
 %% callbacks
 -export([specs/2,
-         init/2, post_init/3,
+         init/2, post_init/3, state_enter/4,
          apply_snapshot/5, apply_command/5,
          handle_query/4, handle_info/4,
          handle_config/5,
@@ -513,6 +513,9 @@ init(Name, []) ->
 post_init(_Revision, _State, #data{kv_table = KvTable} = Data) ->
     publish_kv_table(KvTable, Data),
     {ok, Data#data{initialized = true}}.
+
+state_enter(_, _, _, Data) ->
+    {ok, Data}.
 
 apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
                #data{name = Name,
