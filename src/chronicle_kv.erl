@@ -565,7 +565,8 @@ apply_command({transaction, Conditions, Updates}, Revision,
     apply_transaction(Conditions, Updates,
                       Revision, StateRevision, State, Data).
 
-handle_config(Config, Revision, _StateRevision, State, Data) ->
+handle_config(ConfigEntry, Revision, _StateRevision, State, Data) ->
+    #log_entry{value = Config} = ConfigEntry,
     case chronicle_config:get_branch_opaque(Config) of
         {ok, Opaque} ->
             NewState = handle_update('$failover_opaque',

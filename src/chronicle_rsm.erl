@@ -1104,7 +1104,7 @@ apply_entry(Entry, {Data, Replies}) ->
             case chronicle_config:is_stable(NewConfig) of
                 true ->
                     {ok, NewModState, NewModData} =
-                        Mod:handle_config(NewConfig,
+                        Mod:handle_config(Entry,
                                           Revision, AppliedRevision,
                                           ModState, ModData),
 
