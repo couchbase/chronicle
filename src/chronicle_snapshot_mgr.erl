@@ -281,12 +281,14 @@ handle_snapshot_result(RSM, Pid, Result, State) ->
     end.
 
 handle_snapshot_ok(RSM, Pid, #state{pending_snapshot = Snapshot} = State) ->
-    #pending_snapshot{seqno = Seqno, savers = Savers} = Snapshot,
+    #pending_snapshot{seqno = Seqno,
+                      savers = Savers,
+                      remaining_rsms = Remaining} = Snapshot,
 
     ?DEBUG("Saved snapshot for RSM ~p at seqno ~p", [RSM, Seqno]),
 
     NewSavers = maps:remove(Pid, Savers),
-    case maps:size(NewSavers) =:= 0 of
+    case maps:size(NewSavers) =:= 0 andalso sets:is_empty(Remaining) of
         true ->
             ?DEBUG("All RSM snapshots at seqno ~p saved.", [Seqno]),
 
