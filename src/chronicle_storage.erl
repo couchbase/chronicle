@@ -729,7 +729,9 @@ append_configs(Entries, Storage) ->
         _ ->
             PendingConfigs = Storage#storage.pending_configs,
             NewPendingConfigs = lists:reverse(ConfigEntries) ++ PendingConfigs,
-            NewStorage = Storage#storage{pending_configs = NewPendingConfigs},
+            [NewConfig|_] = NewPendingConfigs,
+            NewStorage = Storage#storage{config = NewConfig,
+                                         pending_configs = NewPendingConfigs},
             compact_configs(NewStorage)
     end.
 
@@ -744,13 +746,8 @@ compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
                                  end, PendingConfigs) of
                 {[_|_], []} ->
                     Storage;
-                {[], [NewCommittedConfig|_]}->
-                    Storage#storage{pending_configs = [],
-                                    config = NewCommittedConfig,
-                                    committed_config = NewCommittedConfig};
-                {[NewConfig|_] = NewPendingConfigs, [NewCommittedConfig|_]} ->
+                {NewPendingConfigs, [NewCommittedConfig|_]} ->
                     Storage#storage{pending_configs = NewPendingConfigs,
-                                    config = NewConfig,
                                     committed_config = NewCommittedConfig}
             end
     end.
