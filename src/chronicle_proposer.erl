@@ -42,7 +42,6 @@
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
-%% TODO: move these to the config
 -define(STOP_TIMEOUT,
         chronicle_settings:get({proposer, stop_timeout}, 10000)).
 -define(ESTABLISH_TERM_TIMEOUT,
