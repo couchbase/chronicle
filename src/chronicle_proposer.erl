@@ -44,8 +44,10 @@
 
 -define(STOP_TIMEOUT,
         chronicle_settings:get({proposer, stop_timeout}, 10000)).
--define(ESTABLISH_TERM_TIMEOUT,
-        chronicle_settings:get({proposer, establish_term_timeout}, 10000)).
+-define(ESTABLISH_TERM_LONG_TIMEOUT,
+        chronicle_settings:get({proposer, establish_term_long_timeout}, 10000)).
+-define(ESTABLISH_TERM_SHORT_TIMEOUT,
+        chronicle_settings:get({proposer, establish_term_short_timeout}, 1000)).
 -define(NO_QUORUM_TIMEOUT,
         chronicle_settings:get({proposer, no_quorum_timeout}, 15000)).
 -define(CHECK_PEERS_INTERVAL,
@@ -87,6 +89,8 @@
                 %% Used only when the state is 'establish_term'.
                 votes,
                 failed_votes,
+                soft_failed_votes,
+                soft_failed_have_quorum,
                 branch,
                 position,
 
@@ -410,6 +414,8 @@ establish_term_init(Metadata,
                                     machines = get_machines(ConfigEntry),
                                     votes = [],
                                     failed_votes = BusyPeers,
+                                    soft_failed_votes = [],
+                                    soft_failed_have_quorum = false,
                                     position = Position,
                                     config = ConfigEntry,
                                     high_seqno = HighSeqno,
@@ -419,8 +425,7 @@ establish_term_init(Metadata,
                                     being_removed = false},
             {keep_state,
              preload_pending_entries(NewData),
-             {state_timeout,
-              ?ESTABLISH_TERM_TIMEOUT, establish_term_timeout}};
+             establish_term_timeout(?ESTABLISH_TERM_LONG_TIMEOUT)};
         false ->
             %% This should be a rare situation. That's because to be
             %% elected a leader we need to get a quorum of votes. So
@@ -434,9 +439,11 @@ establish_term_init(Metadata,
             {stop, {error, no_quorum}}
     end.
 
+establish_term_timeout(Timeout) ->
+    {state_timeout, Timeout, establish_term_timeout}.
+
 handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
-    ?ERROR("Failed to establish term ~w after ~bms",
-           [Term, ?ESTABLISH_TERM_TIMEOUT]),
+    ?ERROR("Failed to establish term ~w", [Term]),
     {stop, establish_term_timeout}.
 
 check_peers(#data{peers = Peers,
@@ -532,31 +539,31 @@ handle_establish_term_result(Peer, Result, State, Data) ->
                              "on peer ~w: ~w",
                              [Term, HistoryId, Position, Peer, Error]),
 
-                    Ignore =
+                    Status =
                         case Error of
                             {behind, _} ->
                                 %% We keep going despite the fact we're behind
                                 %% this peer because we still might be able to
                                 %% get a majority of votes.
-                                true;
+                                failed;
                             {conflicting_term, _} ->
                                 %% Some conflicting_term errors are ignored by
                                 %% handle_common_error. If we hit one, we
                                 %% record a failed vote, but keep going.
-                                true;
+                                soft_failed;
                             {bad_state, _} ->
-                                true;
+                                failed;
                             _ ->
-                                false
+                                fatal
                         end,
 
-                    case Ignore of
-                        true ->
+                    case Status of
+                        fatal ->
+                            stop({unexpected_error, Peer, Error}, State, Data);
+                        _ ->
                             remove_peer_status(Peer, Data),
                             establish_term_handle_vote(Peer,
-                                                       failed, State, Data);
-                        false ->
-                            stop({unexpected_error, Peer, Error}, State, Data)
+                                                       Status, State, Data)
                     end
             end
     end.
@@ -623,7 +630,8 @@ establish_term_handle_vote(Peer, Status, State, Data)
             %% seqno here instead of simply replicating to the peer.
             check_committed_seqno_advanced(
               #{must_replicate_to => Peer}, State, Data);
-        failed ->
+        _ when Status =:= failed;
+               Status =:= soft_failed ->
             %% This is not exactly clean. But the intention is the
             %% following. We got some error that we chose to ignore. But since
             %% we are already proposing, we need to know this peer's
@@ -634,9 +642,11 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                            #data{high_seqno = HighSeqno,
                                  committed_seqno = OurCommittedSeqno,
                                  votes = Votes,
-                                 failed_votes = FailedVotes} = Data) ->
+                                 failed_votes = FailedVotes,
+                                 soft_failed_votes = SoftFailedVotes} = Data) ->
     false = lists:member(Peer, Votes),
     false = lists:member(Peer, FailedVotes),
+    false = lists:member(Peer, SoftFailedVotes),
 
     NewData =
         case Status of
@@ -656,7 +666,10 @@ establish_term_handle_vote(Peer, Status, establish_term = State,
                 Data#data{votes = [Peer | Votes],
                           committed_seqno = NewCommittedSeqno};
             failed ->
-                Data#data{failed_votes = [Peer | FailedVotes]}
+                Data#data{failed_votes = [Peer | FailedVotes]};
+            soft_failed ->
+                Data#data{failed_votes = [Peer | FailedVotes],
+                          soft_failed_votes = [Peer | SoftFailedVotes]}
         end,
 
     establish_term_maybe_transition(State, NewData).
@@ -678,7 +691,29 @@ establish_term_maybe_transition(establish_term = State,
         false ->
             case is_quorum_feasible(QuorumPeers, FailedVotes, Quorum) of
                 true ->
-                    {keep_state, Data};
+                    #data{
+                       soft_failed_votes = SoftFailedVotes,
+                       soft_failed_have_quorum = SoftFailedHaveQuorum} = Data,
+
+                    NewSoftFailedHaveQuorum =
+                        have_quorum(SoftFailedVotes ++ Votes, Quorum),
+
+                    case {SoftFailedHaveQuorum, NewSoftFailedHaveQuorum} of
+                        {false, true} ->
+                            ?INFO("Have heard from a quorum of nodes "
+                                  "(including nodes with a competing leader). "
+                                  "Shortening the timeout to ~bms~n"
+                                  "Votes: ~w~n"
+                                  "Competing leader votes: ~w",
+                                  [?ESTABLISH_TERM_SHORT_TIMEOUT,
+                                   Votes, SoftFailedVotes]),
+                            {keep_state,
+                             Data#data{soft_failed_have_quorum = true},
+                             establish_term_timeout(
+                               ?ESTABLISH_TERM_SHORT_TIMEOUT)};
+                        _ ->
+                            {keep_state, Data}
+                    end;
                 false ->
                     ?WARNING("Couldn't establish term ~w, history id ~p.~n"
                              "Votes received: ~w~n"
