@@ -268,7 +268,7 @@ handle_event(Type, Event, _State, _Data) ->
     keep_state_and_data.
 
 %% internal
-handle_state_enter(establish_term,
+handle_state_enter(establish_term = State,
                    #data{history_id = HistoryId, term = Term} = Data) ->
     %% Establish term locally first. This ensures that the metadata we're
     %% going to be using won't change (unless another node starts a higher
@@ -280,13 +280,13 @@ handle_state_enter(establish_term,
             case lists:member(Self, get_quorum_peers(Quorum)) of
                 true ->
                     NewData = Data#data{peer = Self},
-                    establish_term_init(Metadata, NewData);
+                    establish_term_init(Metadata, State, NewData);
                 false ->
                     ?INFO("Refusing to start a term ~w in history id ~p. "
                           "We're not a voting member anymore.~n"
                           "Peers: ~w",
                           [Term, HistoryId, Peers]),
-                    {stop, {not_voter, Peers}}
+                    stop_now({not_voter, Peers}, State)
             end;
         {error, Error} ->
             ?DEBUG("Error trying to establish local term. Stepping down.~n"
@@ -294,7 +294,8 @@ handle_state_enter(establish_term,
                    "Term: ~w~n"
                    "Error: ~w",
                    [HistoryId, Term, Error]),
-            {stop, {local_establish_term_failed, HistoryId, Term, Error}}
+            stop_now({local_establish_term_failed,
+                      HistoryId, Term, Error}, State)
     end;
 handle_state_enter(recovery,
                    #data{history_id = HistoryId, term = Term} = Data) ->
@@ -373,7 +374,7 @@ announce_proposer_ready(#data{parent = Parent,
                               term = Term}) ->
     chronicle_server:proposer_ready(Parent, HistoryId, Term).
 
-establish_term_init(Metadata,
+establish_term_init(Metadata, State,
                     #data{peer = Self,
                           history_id = HistoryId, term = Term} = Data) ->
     Quorum = require_self_quorum(get_establish_quorum(Metadata), Data),
@@ -436,15 +437,15 @@ establish_term_init(Metadata,
                      "Busy peers: ~w~n"
                      "Quorum: ~w",
                      [Term, HistoryId, QuorumPeers, BusyPeers, Quorum]),
-            {stop, {error, no_quorum}}
+            stop_now(no_quorum, State)
     end.
 
 establish_term_timeout(Timeout) ->
     {state_timeout, Timeout, establish_term_timeout}.
 
-handle_establish_term_timeout(establish_term = _State, #data{term = Term}) ->
+handle_establish_term_timeout(establish_term = State, #data{term = Term}) ->
     ?ERROR("Failed to establish term ~w", [Term]),
-    {stop, establish_term_timeout}.
+    stop_now(establish_term_timeout, State).
 
 check_peers(#data{peers = Peers,
                   sync_round = SyncRound,
@@ -2075,6 +2076,10 @@ deduce_quorum_value_test() ->
     ?assertEqual(2, Deduce([{a, 2}, {b, 2}, {c, 1},
                             {d, 3}, {e, 1}], JointQuorum)).
 -endif.
+
+stop_now(Reason, State) ->
+    establish_term = State,
+    {stop, {shutdown, Reason}}.
 
 stop(Reason, State, Data) ->
     stop(Reason, [], State, Data).
