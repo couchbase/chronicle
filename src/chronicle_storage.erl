@@ -26,6 +26,7 @@
          get_config/1, get_committed_config/1,
          store_meta/2, append/5, sync/1, close/1, publish/1,
          install_snapshot/6, record_snapshot/5, delete_snapshot/2,
+         prepare_snapshot/1,
          read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_and_hold_latest_snapshot/1, release_snapshot/2,
          get_latest_snapshot_seqno/1,
@@ -920,9 +921,12 @@ install_snapshot(Seqno, HistoryId, Term, Config, Meta,
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
 
+prepare_snapshot(Seqno) ->
+    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
+    chronicle_utils:mkdir_p(SnapshotDir).
+
 save_rsm_snapshot(Seqno, RSM, RSMState) ->
     SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
-    ok = chronicle_utils:mkdir_p(SnapshotDir),
 
     Path = rsm_snapshot_path(SnapshotDir, RSM),
     Data = term_to_binary(RSMState, [{compressed, 9}]),

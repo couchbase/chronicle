@@ -2263,6 +2263,7 @@ record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
 
 install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                  RSMSnapshots, Metadata, #data{storage = Storage} = Data) ->
+    ok = chronicle_storage:prepare_snapshot(SnapshotSeqno),
     lists:foreach(
       fun ({RSM, RSMSnapshotBinary}) ->
               RSMSnapshot = binary_to_term(RSMSnapshotBinary),

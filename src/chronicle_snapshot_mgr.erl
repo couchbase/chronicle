@@ -167,7 +167,7 @@ handle_release_snapshot(MRef, State) ->
 
 handle_pending_snapshot(Seqno, RSMs, State) ->
     undefined = State#state.pending_snapshot,
-
+    ok = chronicle_storage:prepare_snapshot(Seqno),
     Snapshot = #pending_snapshot{
                   seqno = Seqno,
                   savers = #{},
