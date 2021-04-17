@@ -231,14 +231,8 @@ handle_state_leave(OldState, State, Data) ->
             Data
     end.
 
-handle_leader_leave(#leader{status = Status} = State, Data) ->
-    case Status of
-        ready ->
-            announce_term_finished(State);
-        not_ready ->
-            ok
-    end,
-
+handle_leader_leave(#leader{} = State, Data) ->
+    announce_term_finished(State),
     cleanup_after_proposer(terminate_proposer(Data)).
 
 handle_state_enter(_OldState, State, Data) ->
