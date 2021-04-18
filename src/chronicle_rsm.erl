@@ -774,7 +774,13 @@ handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
             chronicle_server:rsm_command(HistoryId, Term, RSMCommand),
             {keep_state, NewData};
         {reply, Reply} ->
-            {keep_state_and_data, reply_leader_request(ReplyTo, Reply)}
+            {keep_state_and_data, reply_leader_request(ReplyTo, Reply)};
+        noreply ->
+            %% This is a retransmit of a command that is still pending
+            %% response.
+            Id = {PeerId, Incarnation, Serial},
+            {_, NewData} = add_local_request(Id, command, ReplyTo, Data),
+            {keep_state, NewData}
     end.
 
 handle_noop(PeerId, Incarnation, SeenSerial,
@@ -818,7 +824,7 @@ dedup_command(PeerId, Incarnation, Serial, Peers, Data) ->
                 true ->
                     case maps:find(Serial, Replies) of
                         {ok, Reply} ->
-                            {reply, {ok, Reply}};
+                            Reply;
                         error ->
                             accept
                     end;
@@ -854,6 +860,29 @@ record_command(PeerId, Incarnation, Serial, SeenSerial, Reply,
 
     NewPeerStates = PeerStates#{PeerId => NewPeerState},
     Data#data{peer_states = NewPeerStates}.
+
+record_delayed_replies(Replies, Data) ->
+    lists:foldl(
+      fun ({Id, Reply}, Acc) ->
+              record_delayed_reply(Id, Reply, Acc)
+      end, Data, Replies).
+
+record_delayed_reply({PeerId, Incarnation, Serial}, Reply,
+                     #data{peer_states = PeerStates} = Data) ->
+    case find_peer_state(PeerId, Incarnation, Data) of
+        {ok, #peer_state{replies = Replies} = PeerState} ->
+            case maps:find(Serial, Replies) of
+                {ok, noreply} ->
+                    NewReplies = Replies#{Serial => {reply, Reply}},
+                    NewPeerState = PeerState#peer_state{replies = NewReplies},
+                    Data#data{peer_states =
+                                  PeerStates#{PeerId => NewPeerState}};
+                _ ->
+                    Data
+            end;
+        stale ->
+            Data
+    end.
 
 peer_state_add_reply(Serial, SeenSerial, Reply,
                      #peer_state{min_serial = MinSerial,
@@ -1090,10 +1119,8 @@ apply_entry(Entry, {Data, Replies}) ->
     case Value of
         #rsm_command{payload = {command, _}} ->
             true = (HistoryId =:= EntryHistoryId),
-            {NewData0, Id, Reply} =
-                apply_command(Value, AppliedRevision, Revision, Data),
-
-            NewReplies = [{Id, Reply} | Replies],
+            {NewData0, NewReplies} =
+                apply_command(Value, AppliedRevision, Revision, Replies, Data),
             NewData = NewData0#data{applied_seqno = EntrySeqno},
 
             {NewData, NewReplies};
@@ -1103,24 +1130,27 @@ apply_entry(Entry, {Data, Replies}) ->
         #config{} = NewConfig ->
             case chronicle_config:is_stable(NewConfig) of
                 true ->
-                    {ok, NewModState, NewModData} =
+                    {ok, NewModState, NewModData, ExtraReplies0} =
                         Mod:handle_config(Entry,
                                           Revision, AppliedRevision,
                                           ModState, ModData),
 
-                    NewData = Data#data{applied_seqno = EntrySeqno,
-                                        applied_history_id = EntryHistoryId,
-                                        config = NewConfig,
-                                        config_peers = peer_ids(NewConfig),
-                                        mod_state = NewModState,
-                                        mod_data = NewModData},
-                    {prune_peer_states(NewData), Replies};
+                    NewData0 = Data#data{applied_seqno = EntrySeqno,
+                                         applied_history_id = EntryHistoryId,
+                                         config = NewConfig,
+                                         config_peers = peer_ids(NewConfig),
+                                         mod_state = NewModState,
+                                         mod_data = NewModData},
+                    ExtraReplies =
+                        [{Id, {ok, Reply}} || {Id, Reply} <- ExtraReplies0],
+                    NewData = record_delayed_replies(ExtraReplies, NewData0),
+                    {prune_peer_states(NewData), ExtraReplies ++ Replies};
                 false ->
                     {Data, Replies}
             end
     end.
 
-apply_command(RSMCommand, AppliedRevision, Revision,
+apply_command(RSMCommand, AppliedRevision, Revision, Replies,
               #data{config_peers = Peers,
                     mod = Mod,
                     mod_state = ModState,
@@ -1136,16 +1166,28 @@ apply_command(RSMCommand, AppliedRevision, Revision,
     Id = {PeerId, Incarnation, Serial},
     case dedup_command(PeerId, Incarnation, Serial, Peers, Data) of
         accept ->
-            {reply, Reply, NewModState, NewModData} =
-                Mod:apply_command(unpack_command(Command),
-                                  Revision, AppliedRevision, ModState, ModData),
+            {Reply, NewReplies, NewModState, NewModData} =
+                case Mod:apply_command(Id, unpack_command(Command),
+                                       Revision, AppliedRevision,
+                                       ModState, ModData) of
+                    {reply, Reply0, NewModState0, NewModData0} ->
+                        Reply1 = {ok, Reply0},
+                        Replies0 = [{Id, Reply1} | Replies],
+                        {{reply, Reply1}, Replies0,
+                         NewModState0, NewModData0};
+                    {noreply, NewModState0, NewModData0} ->
+                        {noreply, Replies, NewModState0, NewModData0}
+                end,
+
             NewData0 = Data#data{mod_state = NewModState,
                                  mod_data = NewModData},
             NewData = record_command(PeerId, Incarnation,
                                      Serial, SeenSerial, Reply, NewData0),
-            {NewData, Id, {ok, Reply}};
+            {NewData, NewReplies};
         {reply, Reply} ->
-            {Data, Id, Reply}
+            {Data, [{Id, Reply} | Replies]};
+        noreply ->
+            {Data, Replies}
     end.
 
 apply_noop(RSMCommand,

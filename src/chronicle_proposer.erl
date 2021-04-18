@@ -24,7 +24,7 @@
 -endif.
 
 -export([start_link/2, stop/1]).
--export([sync_quorum/2, query/3, cas_config/4, append_commands/2]).
+-export([sync_quorum/2, cas_config/4, append_commands/2]).
 
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
@@ -134,9 +134,6 @@ stop(Pid) ->
 sync_quorum(Pid, ReplyTo) ->
     gen_statem:cast(Pid, {sync_quorum, ReplyTo}).
 
-query(Pid, ReplyTo, Query) ->
-    gen_statem:cast(Pid, {query, ReplyTo, Query}).
-
 cas_config(Pid, ReplyTo, NewConfig, Revision) ->
     gen_statem:cast(Pid, {cas_config, ReplyTo, NewConfig, Revision}).
 
@@ -231,18 +228,6 @@ handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
 handle_event(cast, {sync_quorum, ReplyTo}, State, Data) ->
     handle_sync_quorum(ReplyTo, State, Data);
-handle_event(cast, {query, ReplyTo, Query} = Request, State, Data) ->
-    case State of
-        proposing ->
-            maybe_postpone_config_request(
-              Request, Data,
-              fun () ->
-                      handle_query(ReplyTo, Query, Data)
-              end);
-        {stopped, _} ->
-            reply_not_leader(ReplyTo),
-            keep_state_and_data
-    end;
 handle_event(cast,
              {cas_config, ReplyTo, NewConfig, Revision} = Request,
              State, Data) ->
@@ -251,7 +236,8 @@ handle_event(cast,
             maybe_postpone_config_request(
               Request, Data,
               fun () ->
-                      handle_cas_config(ReplyTo, NewConfig, Revision, Data)
+                      handle_cas_config(ReplyTo,
+                                        NewConfig, Revision, State, Data)
               end);
         {stopped, _} ->
             reply_not_leader(ReplyTo),
@@ -1271,37 +1257,7 @@ start_sync_quorum(ReplyTo, OkReply,
 
     {keep_state, send_heartbeat(NewData)}.
 
-handle_query(ReplyTo, Query, Data) ->
-    case Query of
-        get_config ->
-            handle_get_config(ReplyTo, Data);
-        get_cluster_info ->
-            handle_get_cluster_info(ReplyTo, Data);
-        _ ->
-            reply_request(ReplyTo, {error, unknown_query})
-    end.
-
-handle_get_config(ReplyTo, #data{config = ConfigEntry} = Data) ->
-    true = is_config_committed(Data),
-
-    Config = ConfigEntry#log_entry.value,
-    true = chronicle_config:is_stable(Config),
-    ConfigRevision = log_entry_revision(ConfigEntry),
-
-    Reply = {ok, Config, ConfigRevision},
-    start_sync_quorum(ReplyTo, Reply, Data).
-
-handle_get_cluster_info(ReplyTo,
-                        #data{history_id = HistoryId,
-                              config = ConfigEntry,
-                              committed_seqno = CommittedSeqno} = Data) ->
-    true = is_config_committed(Data),
-    Info = #{history_id => HistoryId,
-             committed_seqno => CommittedSeqno,
-             config => ConfigEntry},
-    start_sync_quorum(ReplyTo, Info, Data).
-
-handle_cas_config(ReplyTo, NewConfig, CasRevision, Data) ->
+handle_cas_config(ReplyTo, NewConfig, CasRevision, _State, Data) ->
     case check_cas_config(NewConfig, CasRevision, Data) of
         {ok, OldConfig} ->
             FinalConfig = chronicle_config:transition(NewConfig, OldConfig),

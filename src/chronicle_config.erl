@@ -26,6 +26,7 @@
 -export([is_config/1, is_stable/1]).
 -export([transition/2, next_config/1]).
 -export([init/3, reinit/3, branch/3]).
+-export([get_request_id/1, set_request_id/2]).
 -export([set_lock/2, check_lock/2]).
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
@@ -68,7 +69,8 @@ transition(NewConfig, OldConfig) ->
             NewConfig
     end.
 
-init(HistoryId, Peer, Machines) ->
+init(HistoryId, Peer, Machines0) ->
+    Machines = [{chronicle_config_rsm, chronicle_config_rsm, []} | Machines0],
     MachinesMap =
         maps:from_list(
           [{Name, #rsm_config{module = Module, args = Args}} ||
@@ -80,10 +82,11 @@ init(HistoryId, Peer, Machines) ->
 
 reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
     {ok, PeerId} = get_peer_id(OldPeer, Config),
-    reset_branch(Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}).
+    reset(Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}).
 
 branch(Seqno, #branch{peers = Peers,
-                      history_id = HistoryId} = Branch, Config) ->
+                      history_id = HistoryId} = Branch, Config0) ->
+    Config = reset(Config0),
     #config{history_log = HistoryLog} = Config,
     NewHistoryLog = add_history(HistoryId, Seqno, HistoryLog),
     %% TODO: figure out what to do with replicas
@@ -101,7 +104,7 @@ add_history(HistoryId, Seqno, [{_, PrevSeqno} | _] = HistoryLog) ->
     lists:sublist(NewHistoryLog, ?MAX_HISTORY_LOG_SIZE).
 
 set_lock(Lock, #config{} = Config) ->
-    reset_branch(Config#config{lock = Lock}).
+    reset(Config#config{lock = Lock}).
 
 check_lock(LockReq, #config{lock = Lock}) ->
     case LockReq =:= unlocked orelse LockReq =:= Lock of
@@ -110,6 +113,15 @@ check_lock(LockReq, #config{lock = Lock}) ->
         false ->
             {error, {lock_revoked, LockReq, Lock}}
     end.
+
+get_request_id(#config{request_id = RequestId})->
+    RequestId.
+
+set_request_id(RequestId, #config{} = Config) ->
+    Config#config{request_id = RequestId}.
+
+reset_request_id(Config) ->
+    set_request_id(undefined, Config).
 
 get_rsms(#config{state_machines = RSMs}) ->
     RSMs.
@@ -198,7 +210,7 @@ update_peers(Fun, #config{peers = OldPeers} = Config) ->
                 [] ->
                     {error, no_voters_left};
                 _ ->
-                    {ok, reset_branch(Config#config{peers = NewPeers})}
+                    {ok, reset(Config#config{peers = NewPeers})}
             end;
         {error, _} = Error ->
             Error
@@ -300,7 +312,7 @@ get_settings(#config{settings = Settings}) ->
     Settings.
 
 set_settings(NewSettings, Config) ->
-    reset_branch(Config#config{settings = NewSettings}).
+    reset(Config#config{settings = NewSettings}).
 
 reset_branch(#config{branch = Branch} = Config) ->
     case Branch of
@@ -309,6 +321,9 @@ reset_branch(#config{branch = Branch} = Config) ->
         _ ->
             Config#config{branch = undefined}
     end.
+
+reset(Config) ->
+    reset_request_id(reset_branch(Config)).
 
 is_compatible_revision({RevHistoryId, RevSeqno} = Revision, HighSeqno,
                        #config{history_log = HistoryLog}) ->

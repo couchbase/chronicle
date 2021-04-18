@@ -55,7 +55,8 @@
 
                  opaque :: any()}).
 
--record(config, { lock :: undefined | binary(),
+-record(config, { request_id :: any(),
+                  lock :: undefined | binary(),
                   peers :: chronicle_config:peers(),
                   old_peers :: undefined | chronicle_config:peers(),
                   state_machines :: #{atom() => #rsm_config{}},

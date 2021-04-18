@@ -35,7 +35,6 @@
          make_batch/2, batch_enq/2, batch_flush/1, batch_map/2,
          gb_trees_filter/2,
          random_uuid/0,
-         with_leader/2,
          get_config/1, get_all_peers/1,
          get_establish_quorum/1, get_establish_peers/1, get_quorum_peers/1,
          have_quorum/2, is_quorum_feasible/3,
@@ -503,29 +502,6 @@ hexify_digit(12) -> $c;
 hexify_digit(13) -> $d;
 hexify_digit(14) -> $e;
 hexify_digit(15) -> $f.
-
-%% TODO: Make this configurable
--define(LEADER_RETRIES, 1).
-
-with_leader(Timeout, Fun) ->
-    with_leader(Timeout, ?LEADER_RETRIES, Fun).
-
-with_leader(Timeout, Retries, Fun) ->
-    TRef = start_timeout(Timeout),
-    with_leader_loop(TRef, any, Retries, Fun).
-
-with_leader_loop(TRef, Incarnation, Retries, Fun) ->
-    {Leader, NewIncarnation} =
-        chronicle_leader:wait_for_leader(Incarnation, TRef),
-    Result = Fun(TRef, Leader, NewIncarnation),
-    case Result of
-        {error, {leader_error, not_leader}} when Retries > 0 ->
-            with_leader_loop(TRef, NewIncarnation, Retries - 1, Fun);
-        {error, {leader_error, _} = Error} ->
-            exit({Leader, Error});
-        _ ->
-            Result
-    end.
 
 get_config(#metadata{config = ConfigEntry}) ->
     ConfigEntry#log_entry.value.

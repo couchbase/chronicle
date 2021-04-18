@@ -20,9 +20,7 @@
 -include("chronicle.hrl").
 
 -export([start_link/0]).
--export([register_rsm/2,
-         get_config/2, get_cluster_info/2, cas_config/4, check_quorum/2,
-         sync_quorum/3, rsm_command/3,
+-export([register_rsm/2, cas_config/2, sync_quorum/3, rsm_command/3,
          proposer_ready/3, proposer_stopping/2, reply_request/2]).
 
 -export([callback_mode/0,
@@ -60,28 +58,8 @@ start_link() ->
 register_rsm(Name, Pid) ->
     gen_statem:call(?SERVER, {register_rsm, Name, Pid}, 10000).
 
-get_config(Leader, Timeout) ->
-    leader_query(Leader, get_config, Timeout).
-
-get_cluster_info(Leader, Timeout) ->
-    leader_query(Leader, get_cluster_info, Timeout).
-
-leader_query(Leader, Query, Timeout) ->
-    call(?SERVER(Leader), {leader_query, Query}, Timeout).
-
-cas_config(Leader, NewConfig, CasRevision, Timeout) ->
-    call(?SERVER(Leader), {cas_config, NewConfig, CasRevision}, Timeout).
-
-check_quorum(Leader, Timeout) ->
-    try call(?SERVER(Leader), check_quorum, Timeout) of
-        {ok, _Revision} ->
-            ok;
-        Other ->
-            Other
-    catch
-        exit:{timeout, _} ->
-            {error, timeout}
-    end.
+cas_config(NewConfig, CasRevision) ->
+    gen_statem:cast(?SERVER, {cas_config, NewConfig, CasRevision}).
 
 sync_quorum(Tag, HistoryId, Term) ->
     gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
@@ -176,14 +154,10 @@ handle_event(info, {proposer_msg, Msg}, #leader{} = State, Data) ->
     handle_proposer_msg(Msg, State, Data);
 handle_event(info, {batch_ready, BatchField}, State, Data) ->
     handle_batch_ready(BatchField, State, Data);
-handle_event({call, From}, {leader_query, Query}, State, Data) ->
-    handle_leader_query(Query, From, State, Data);
-handle_event({call, From}, {cas_config, NewConfig, Revision}, State, Data) ->
-    handle_cas_config(NewConfig, Revision, From, State, Data);
 handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
-handle_event({call, From}, check_quorum, State, Data) ->
-    handle_check_quorum(From, State, Data);
+handle_event(cast, {cas_config, Config, Revision}, State, Data) ->
+    handle_cas_config(Config, Revision, State, Data);
 handle_event(cast, {rsm_command, HistoryId, Term, RSMCommand}, State, Data) ->
     handle_rsm_command(HistoryId, Term, RSMCommand, State, Data);
 handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
@@ -407,24 +381,11 @@ deliver_syncs(Syncs, #data{proposer = Proposer}) ->
 deliver_commands(Commands, #data{proposer = Proposer}) ->
     chronicle_proposer:append_commands(Proposer, Commands).
 
-handle_leader_query(Query, From, State, Data) ->
-    ReplyTo = {from, From},
+handle_cas_config(NewConfig, Revision, State, Data) ->
     handle_leader_request(
-      any, ReplyTo, State,
+      any, noreply, State,
       fun () ->
-              deliver_leader_query(Query, ReplyTo, Data),
-              keep_state_and_data
-      end).
-
-deliver_leader_query(Query, ReplyTo, #data{proposer = Proposer}) ->
-    chronicle_proposer:query(Proposer, ReplyTo, Query).
-
-handle_cas_config(NewConfig, Revision, From, State, Data) ->
-    ReplyTo = {from, From},
-    handle_leader_request(
-      any, ReplyTo, State,
-      fun () ->
-              deliver_cas_config(NewConfig, Revision, ReplyTo, Data),
+              deliver_cas_config(NewConfig, Revision, noreply, Data),
               keep_state_and_data
       end).
 
@@ -457,15 +418,6 @@ leader_status(#leader{history_id = HistoryId, term = Term, status = Status}) ->
         not_ready ->
             no_leader
     end.
-
-handle_check_quorum(From, State, #data{proposer = Proposer}) ->
-    ReplyTo = {from, From},
-    handle_leader_request(
-      any, ReplyTo, State,
-      fun () ->
-              chronicle_proposer:sync_quorum(Proposer, ReplyTo),
-              keep_state_and_data
-      end).
 
 handle_process_down(MRef, Pid, Reason, _State, #data{rsms = RSMs} = Data) ->
     case maps:take(MRef, RSMs) of

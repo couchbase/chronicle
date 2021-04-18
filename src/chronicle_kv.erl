@@ -41,7 +41,7 @@
 %% callbacks
 -export([specs/2,
          init/2, post_init/3, state_enter/4,
-         apply_snapshot/5, apply_command/5,
+         apply_snapshot/5, apply_command/6,
          handle_query/4, handle_info/4,
          handle_config/5,
          terminate/4]).
@@ -554,16 +554,16 @@ handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
 handle_query({prepare_txn, Fun}, StateRevision, State, Data) ->
     handle_prepare_txn(Fun, StateRevision, State, Data).
 
-apply_command({add, Key, Value}, Revision, StateRevision, State, Data) ->
+apply_command(_, {add, Key, Value}, Revision, StateRevision, State, Data) ->
     apply_add(Key, Value, Revision, StateRevision, State, Data);
-apply_command({set, Key, Value, ExpectedRevision}, Revision,
+apply_command(_, {set, Key, Value, ExpectedRevision}, Revision,
               StateRevision, State, Data) ->
     apply_set(Key, Value, ExpectedRevision,
               Revision, StateRevision, State, Data);
-apply_command({delete, Key, ExpectedRevision}, Revision,
+apply_command(_, {delete, Key, ExpectedRevision}, Revision,
               StateRevision, State, Data) ->
     apply_delete(Key, ExpectedRevision, Revision, StateRevision, State, Data);
-apply_command({transaction, Conditions, Updates}, Revision,
+apply_command(_, {transaction, Conditions, Updates}, Revision,
               StateRevision, State, Data) ->
     apply_transaction(Conditions, Updates,
                       Revision, StateRevision, State, Data).
@@ -574,9 +574,9 @@ handle_config(ConfigEntry, Revision, _StateRevision, State, Data) ->
         {ok, Opaque} ->
             NewState = handle_update('$failover_opaque',
                                      Opaque, Revision, State, Data),
-            {ok, NewState, Data};
+            {ok, NewState, Data, []};
         no_branch ->
-            {ok, State, Data}
+            {ok, State, Data, []}
     end.
 
 handle_info(Msg, _StateRevision, _State, Data) ->

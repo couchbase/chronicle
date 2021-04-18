@@ -17,8 +17,6 @@
 
 -include("chronicle.hrl").
 
--import(chronicle_utils, [with_leader/2]).
-
 -export([get_system_state/0]).
 -export([check_quorum/0, check_quorum/1]).
 -export([get_peer_statuses/0, get_cluster_status/0]).
@@ -102,20 +100,7 @@ check_quorum() ->
 
 -spec check_quorum(timeout()) -> check_quorum_result().
 check_quorum(Timeout) ->
-    try with_leader(Timeout,
-                    fun (TRef, Leader, _) ->
-                            chronicle_server:check_quorum(Leader, TRef)
-                    end) of
-        ok ->
-            true;
-        {error, timeout} ->
-            {false, timeout};
-        Error ->
-            exit(Error)
-    catch
-        exit:no_leader ->
-            {false, no_leader}
-    end.
+    chronicle_config_rsm:check_quorum(Timeout).
 
 -spec get_peer_statuses() -> chronicle_status:peer_statuses().
 get_peer_statuses() ->
@@ -352,10 +337,7 @@ get_cluster_info() ->
 
 -spec get_cluster_info(timeout()) -> cluster_info().
 get_cluster_info(Timeout) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        chronicle_server:get_cluster_info(Leader, TRef)
-                end).
+    chronicle_config_rsm:get_cluster_info(Timeout).
 
 -spec prepare_join(cluster_info()) -> chronicle_agent:prepare_join_result().
 prepare_join(ClusterInfo) ->
@@ -425,13 +407,7 @@ update_settings(Fun, Timeout) ->
 
 %% internal
 get_config(Timeout, Fun) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        get_config(Leader, TRef, Fun)
-                end).
-
-get_config(Leader, TRef, Fun) ->
-    case chronicle_server:get_config(Leader, TRef) of
+    case chronicle_config_rsm:get_config(Timeout) of
         {ok, Config, ConfigRevision} ->
             Fun(Config, ConfigRevision);
         {error, _} = Error ->
@@ -442,30 +418,24 @@ update_config(Fun, Timeout) ->
     update_config(Fun, unlocked, Timeout).
 
 update_config(Fun, Lock, Timeout) ->
-    with_leader(Timeout,
-                fun (TRef, Leader, _LeaderInfo) ->
-                        update_config_loop(Fun, Lock, Leader, TRef)
-                end).
+    TRef = chronicle_utils:start_timeout(Timeout),
+    update_config_loop(Fun, Lock, TRef).
 
-update_config_loop(Fun, Lock, Leader, TRef) ->
+update_config_loop(Fun, Lock, TRef) ->
     validate_lock(Lock),
     get_config(
-      Leader, TRef,
+      TRef,
       fun (Config, ConfigRevision) ->
               case chronicle_config:check_lock(Lock, Config) of
                   ok ->
                       case Fun(Config) of
-                          {ok, NewConfig}
-                            when Config =:= NewConfig ->
-                              ok;
                           {ok, NewConfig} ->
-                              case cas_config(Leader, NewConfig,
+                              case cas_config(NewConfig,
                                               ConfigRevision, TRef) of
                                   {ok, _} ->
                                       ok;
                                   {error, {cas_failed, _}} ->
-                                      update_config_loop(Fun,
-                                                         Lock, Leader, TRef);
+                                      update_config_loop(Fun, Lock, TRef);
                                   {error, {invalid_config, _} = Error} ->
                                       error(Error);
                                   {error, _} = Error ->
@@ -479,8 +449,8 @@ update_config_loop(Fun, Lock, Leader, TRef) ->
               end
       end).
 
-cas_config(Leader, NewConfig, CasRevision, TRef) ->
-    chronicle_server:cas_config(Leader, NewConfig, CasRevision, TRef).
+cas_config(NewConfig, CasRevision, TRef) ->
+    chronicle_config_rsm:cas_config(NewConfig, CasRevision, TRef).
 
 validate_peers(Peers) ->
     lists:foreach(
