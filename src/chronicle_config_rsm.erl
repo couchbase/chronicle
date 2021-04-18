@@ -25,7 +25,10 @@
 
 -define(NAME, ?MODULE).
 
--record(state, { requests, config }).
+-record(state, { current_request,
+                 pending_requests,
+
+                 config }).
 -record(data, { is_leader = false }).
 
 get_config(Timeout) ->
@@ -56,41 +59,50 @@ specs(_Name, _Args) ->
     [].
 
 init(?NAME, []) ->
-    {ok, #state{requests = []}, #data{}}.
+    {ok, #state{current_request = undefined, pending_requests = []}, #data{}}.
 
 post_init(_, _, Data) ->
     {ok, Data}.
 
 state_enter(leader, _Revision, State, Data) ->
     NewData = Data#data{is_leader = true},
-    submit_requests(State, NewData),
+    maybe_submit_current_request(State, NewData),
     {ok, NewData};
 state_enter(_, _Revision, _State, Data) ->
     {ok, Data#data{is_leader = false}}.
 
 handle_config(ConfigEntry, Revision, _StateRevision,
-              #state{requests = Requests} = State, Data) ->
+              #state{current_request = CurrentRequest,
+                     pending_requests = PendingRequests} = State, Data) ->
     #log_entry{value = Config} = ConfigEntry,
-    NewState = State#state{requests = [], config = ConfigEntry},
+    NewState = State#state{current_request = undefined,
+                           pending_requests = [],
+                           config = ConfigEntry},
 
     ConfigRequestId = chronicle_config:get_request_id(Config),
+    Replies0 =
+        case CurrentRequest of
+            undefined ->
+                [];
+            {Id, _} ->
+                Reply =
+                    case Id =:= ConfigRequestId of
+                        true ->
+                            {ok, Revision};
+                        false ->
+                            {error, {cas_failed, Revision}}
+                    end,
+                [{Id, Reply}]
+        end,
+
     Replies =
-        lists:map(
-          fun ({Id, _}) ->
-                  Reply =
-                      case Id =:= ConfigRequestId of
-                          true ->
-                              {ok, Revision};
-                          false ->
-                              {error, {cas_failed, Revision}}
-                      end,
-                  {Id, Reply}
-          end, Requests),
+        Replies0 ++ [{Id, {error, {cas_failed, Revision}}} ||
+                        {Id, _} <- PendingRequests],
 
     {ok, NewState, Data, Replies}.
 
 apply_snapshot(_Revision, State, _OldRevision, _OldState, Data) ->
-    maybe_submit_requests(State, Data),
+    maybe_submit_current_request(State, Data),
     {ok, Data}.
 
 handle_query(get_config, _, #state{config = ConfigEntry}, Data) ->
@@ -106,15 +118,24 @@ handle_query(get_cluster_info, {HistoryId, Seqno}, State, Data) ->
 
 apply_command(Id, {cas_config, _Config, CasRevision} = Request,
               _, _,
-              #state{requests = Requests,
+              #state{current_request = CurrentRequest,
+                     pending_requests = PendingRequests,
                      config = ConfigEntry} = State,
               Data) ->
     HaveRevision = chronicle_utils:log_entry_revision(ConfigEntry),
     case CasRevision =:= HaveRevision of
         true ->
-            NewRequests = [{Id, Request} | Requests],
-            maybe_submit_request(Id, Request, Data),
-            {noreply, State#state{requests = NewRequests}, Data};
+            NewState =
+                case CurrentRequest of
+                    undefined ->
+                        maybe_submit_request(Id, Request, Data),
+                        State#state{current_request = {Id, Request}};
+                    _ ->
+                        NewPendingRequests = [{Id, Request} | PendingRequests],
+                        State#state{pending_requests = NewPendingRequests}
+                end,
+
+            {noreply, NewState, Data};
         false ->
             {reply, {error, {cas_failed, HaveRevision}}, State, Data}
     end.
@@ -127,6 +148,14 @@ terminate(_Reason, _StateRevision, _State, _Data) ->
     ok.
 
 %% internal
+maybe_submit_current_request(State, Data) ->
+    case State#state.current_request of
+        undefined ->
+            ok;
+        {Id, Request} ->
+            maybe_submit_request(Id, Request, Data)
+    end.
+
 maybe_submit_request(Id, Request, Data) ->
     case Data#data.is_leader of
         true ->
@@ -134,20 +163,6 @@ maybe_submit_request(Id, Request, Data) ->
         false ->
             ok
     end.
-
-maybe_submit_requests(State, Data) ->
-    case Data#data.is_leader of
-        true ->
-            submit_requests(State, Data);
-        false ->
-            ok
-    end.
-
-submit_requests(#state{requests = Requests}, #data{is_leader = true}) ->
-    lists:foreach(
-      fun ({Id, Request}) ->
-              submit_request(Id, Request)
-      end, lists:reverse(Requests)).
 
 submit_request(Id, {cas_config, Config, CasRevision}) ->
     NewConfig = chronicle_config:set_request_id(Id, Config),
