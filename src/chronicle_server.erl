@@ -385,12 +385,12 @@ handle_cas_config(NewConfig, Revision, State, Data) ->
     handle_leader_request(
       any, noreply, State,
       fun () ->
-              deliver_cas_config(NewConfig, Revision, noreply, Data),
+              deliver_cas_config(NewConfig, Revision, Data),
               keep_state_and_data
       end).
 
-deliver_cas_config(NewConfig, Revision, ReplyTo, #data{proposer = Proposer}) ->
-    chronicle_proposer:cas_config(Proposer, ReplyTo, NewConfig, Revision).
+deliver_cas_config(NewConfig, Revision, #data{proposer = Proposer}) ->
+    chronicle_proposer:cas_config(Proposer, NewConfig, Revision).
 
 handle_register_rsm(Name, Pid, From, State, #data{rsms = RSMs} = Data) ->
     ?DEBUG("Registering RSM ~w with pid ~w", [Name, Pid]),

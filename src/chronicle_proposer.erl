@@ -24,7 +24,7 @@
 -endif.
 
 -export([start_link/2, stop/1]).
--export([sync_quorum/2, cas_config/4, append_commands/2]).
+-export([sync_quorum/2, cas_config/3, append_commands/2]).
 
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
@@ -102,7 +102,6 @@
                 acked_sync_round,
                 sync_requests,
 
-                config_change_reply_to,
                 postponed_config_requests }).
 
 -record(peer_status, {
@@ -134,8 +133,8 @@ stop(Pid) ->
 sync_quorum(Pid, ReplyTo) ->
     gen_statem:cast(Pid, {sync_quorum, ReplyTo}).
 
-cas_config(Pid, ReplyTo, NewConfig, Revision) ->
-    gen_statem:cast(Pid, {cas_config, ReplyTo, NewConfig, Revision}).
+cas_config(Pid, NewConfig, Revision) ->
+    gen_statem:cast(Pid, {cas_config, NewConfig, Revision}).
 
 append_commands(Pid, Commands) ->
     gen_statem:cast(Pid, {append_commands, Commands}).
@@ -228,19 +227,15 @@ handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
     handle_down(MRef, Pid, Reason, State, Data);
 handle_event(cast, {sync_quorum, ReplyTo}, State, Data) ->
     handle_sync_quorum(ReplyTo, State, Data);
-handle_event(cast,
-             {cas_config, ReplyTo, NewConfig, Revision} = Request,
-             State, Data) ->
+handle_event(cast, {cas_config, NewConfig, Revision} = Request, State, Data) ->
     case State of
         proposing ->
             maybe_postpone_config_request(
               Request, Data,
               fun () ->
-                      handle_cas_config(ReplyTo,
-                                        NewConfig, Revision, State, Data)
+                      handle_cas_config(NewConfig, Revision, State, Data)
               end);
         {stopped, _} ->
-            reply_not_leader(ReplyTo),
             keep_state_and_data
     end;
 handle_event(cast, {append_commands, Commands}, State, Data) ->
@@ -997,30 +992,10 @@ maybe_complete_config_transition(#data{config = ConfigEntry} = Data) ->
             case is_config_committed(Data) of
                 true ->
                     NextConfig = chronicle_config:next_config(Config),
-                    %% Preserve config_change_from if any.
-                    ReplyTo = Data#data.config_change_reply_to,
-                    propose_config(NextConfig, ReplyTo, Data);
+                    propose_config(NextConfig, Data);
                 false ->
                     Data
             end
-    end.
-
-maybe_reply_config_change(#data{config = ConfigEntry,
-                                config_change_reply_to = ReplyTo} = Data) ->
-    case chronicle_config:is_stable(ConfigEntry#log_entry.value) of
-        true ->
-            case ReplyTo =/= undefined of
-                true ->
-                    true = is_config_committed(Data),
-                    Revision = log_entry_revision(ConfigEntry),
-                    reply_request(ReplyTo, {ok, Revision}),
-                    Data#data{config_change_reply_to = undefined};
-                false ->
-                    Data
-            end;
-        false ->
-            %% We only reply once the stable config gets committed.
-            Data
     end.
 
 maybe_postpone_config_request(Request, Data, Fun) ->
@@ -1055,25 +1030,23 @@ handle_config_post_append(OldData,
         true ->
             %% Stop replicating to nodes that might have been removed.
             NewData0 = reset_peers(NewData),
+            NewData1 = maybe_complete_config_transition(NewData0),
 
-            NewData1 = maybe_reply_config_change(NewData0),
-            NewData2 = maybe_complete_config_transition(NewData1),
-
-            case check_leader_got_removed(NewData2) of
+            case check_leader_got_removed(NewData1) of
                 true ->
                     ?INFO("Shutting down because leader ~w "
                           "got removed from peers.~n"
                           "Peers: ~w",
-                          [Peer, NewData2#data.quorum_peers]),
-                    {stop, leader_removed, NewData2};
+                          [Peer, NewData1#data.quorum_peers]),
+                    {stop, leader_removed, NewData1};
                 false ->
                     %% Deliver postponed config changes again. We've postponed
                     %% them all the way till this moment to be able to return
                     %% an error that includes the revision of the conflicting
                     %% config. That way the caller can wait to receive the
                     %% conflicting config before retrying.
-                    {NewData3, Effects} = unpostpone_config_requests(NewData2),
-                    {ok, NewData3, Effects}
+                    {NewData2, Effects} = unpostpone_config_requests(NewData1),
+                    {ok, NewData2, Effects}
             end;
         false ->
             %% Nothing changed, so nothing to do.
@@ -1257,14 +1230,14 @@ start_sync_quorum(ReplyTo, OkReply,
 
     {keep_state, send_heartbeat(NewData)}.
 
-handle_cas_config(ReplyTo, NewConfig, CasRevision, _State, Data) ->
+handle_cas_config(NewConfig, CasRevision, _State, Data) ->
     case check_cas_config(NewConfig, CasRevision, Data) of
         {ok, OldConfig} ->
             FinalConfig = chronicle_config:transition(NewConfig, OldConfig),
-            NewData = propose_config(FinalConfig, ReplyTo, Data),
+            NewData = propose_config(FinalConfig, Data),
             {keep_state, replicate(NewData)};
-        {error, _} = Error ->
-            reply_request(ReplyTo, Error),
+        {error, Error} ->
+            ?DEBUG("cas_config failed ~p", [Error]),
             keep_state_and_data
     end.
 
@@ -1355,22 +1328,20 @@ handle_removed_peers(Peers, Data) ->
 handle_added_peers(Peers, Data) ->
     send_heartbeat(Peers, Data).
 
-force_propose_config(Config,
-                     #data{config_change_reply_to = undefined} = Data) ->
+force_propose_config(Config, Data) ->
     %% This function doesn't check that the current config is committed, which
     %% should be the case for regular config transitions. It's only meant to
     %% be used after resolving a branch.
-    do_propose_config(Config, undefined, Data).
+    do_propose_config(Config, Data).
 
-propose_config(Config, ReplyTo, Data) ->
+propose_config(Config, Data) ->
     true = is_config_committed(Data),
-    do_propose_config(Config, ReplyTo, Data).
+    do_propose_config(Config, Data).
 
 %% TODO: right now when this function is called we replicate the proposal in
 %% its own batch. But it can be coalesced with user batches.
-do_propose_config(Config, ReplyTo, Data) ->
-    {LogEntry, NewData0} = propose_value(Config, Data),
-    NewData = NewData0#data{config_change_reply_to = ReplyTo},
+do_propose_config(Config, Data) ->
+    {LogEntry, NewData} = propose_value(Config, Data),
     update_config(LogEntry, NewData).
 
 propose_value(Value,
@@ -2041,9 +2012,7 @@ stop(Reason, State, Data) ->
     stop(Reason, [], State, Data).
 
 stop(Reason, ExtraEffects, State,
-     #data{parent = Pid,
-           peers = Peers,
-           config_change_reply_to = ConfigReplyTo} = Data)
+     #data{parent = Pid, peers = Peers} = Data)
   when State =:= establish_term;
        State =:= proposing;
        State =:= recovery ->
@@ -2054,14 +2023,6 @@ stop(Reason, ExtraEffects, State,
 
     %% Reply to all in-flight sync_quorum requests
     NewData2 = sync_quorum_reply_not_leader(NewData1),
-
-    case ConfigReplyTo of
-        undefined ->
-            ok;
-        _ ->
-            reply_request(ConfigReplyTo, {error, {leader_error, leader_lost}})
-    end,
-
     NewData3 =
         case State =/= establish_term of
             true ->
