@@ -1156,15 +1156,13 @@ handle_down_establish_term(Peer,
             establish_term_handle_vote(Peer, failed, State, Data)
     end.
 
-handle_append_commands(Commands, {stopped, _}, _Data) ->
+handle_append_commands(_Commands, {stopped, _}, _Data) ->
     %% Proposer has stopped. Reject any incoming commands.
-    reply_commands_not_leader(Commands),
     keep_state_and_data;
-handle_append_commands(Commands, State, #data{being_removed = true})
+handle_append_commands(_Commands, State, #data{being_removed = true})
   when State =:= proposing;
        State =:= recovery ->
     %% Node is being removed. Don't accept new commands.
-    reply_commands_not_leader(Commands),
     keep_state_and_data;
 handle_append_commands(Commands,
                        State,
@@ -1174,14 +1172,12 @@ handle_append_commands(Commands,
        State =:= recovery ->
     {NewHighSeqno, NewPendingEntries, NewData0} =
         lists:foldl(
-          fun ({ReplyTo, Command}, {PrevSeqno, AccEntries, AccData} = Acc) ->
+          fun (Command, {PrevSeqno, AccEntries, AccData} = Acc) ->
                   Seqno = PrevSeqno + 1,
                   case handle_command(Command, Seqno, AccData) of
                       {ok, LogEntry, NewAccData} ->
-                          reply_request(ReplyTo, {accepted, Seqno}),
                           {Seqno, queue:in(LogEntry, AccEntries), NewAccData};
-                      {reject, Error} ->
-                          reply_request(ReplyTo, Error),
+                      {reject, _} ->
                           Acc
                   end
           end,
@@ -1203,10 +1199,6 @@ handle_command({rsm_command, Command}, Seqno,
                      "referencing a non-existing RSM: ~w", [RSMName]),
             {reject, {error, {unknown_rsm, RSMName}}}
     end.
-
-reply_commands_not_leader(Commands) ->
-    {ReplyTos, _} = lists:unzip(Commands),
-    lists:foreach(fun reply_not_leader/1, ReplyTos).
 
 handle_sync_quorum(ReplyTo, {stopped, _}, _Data) ->
     reply_not_leader(ReplyTo),

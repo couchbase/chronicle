@@ -81,8 +81,6 @@ reply_request(ReplyTo, Reply) ->
     case ReplyTo of
         noreply ->
             ok;
-        {from, From} ->
-            gen_statem:reply(From, Reply);
         {send, Pid, Tag} ->
             Pid ! {Tag, Reply},
             ok;
@@ -379,7 +377,8 @@ deliver_syncs(Syncs, #data{proposer = Proposer}) ->
     chronicle_proposer:sync_quorum(Proposer, ReplyTo).
 
 deliver_commands(Commands, #data{proposer = Proposer}) ->
-    chronicle_proposer:append_commands(Proposer, Commands).
+    {_, ActualCommands} = lists:unzip(Commands),
+    chronicle_proposer:append_commands(Proposer, ActualCommands).
 
 handle_cas_config(NewConfig, Revision, State, Data) ->
     handle_leader_request(
