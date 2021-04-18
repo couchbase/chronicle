@@ -101,8 +101,12 @@ content_types_accepted(Req, State) ->
 delete_resource(Req, State) ->
     Key = cowboy_req:binding(key, Req),
     ?LOG_DEBUG("delete_resource called for key: ~p", [Key]),
-    Result = delete_value(Req, any),
-    {Result, Req, State}.
+    case delete_value(Req, any) of
+        true ->
+            {true, Req, State};
+        no_rsm ->
+            {stop, reply(400, <<"no rsm">>, Req), State}
+    end.
 
 allow_missing_post(Req, State) ->
     {false, Req, State}.
@@ -118,7 +122,9 @@ json_api(Req, #state{domain=kv, op=get}=State) ->
                   {<<"value">>, jiffy:decode(Val)}]},
             {jiffy:encode(R), Req, State};
         not_found ->
-            {stop, reply(404, <<>>, Req), State}
+            {stop, reply(404, <<>>, Req), State};
+        no_rsm ->
+            {stop, reply(400, <<"no rsm">>, Req), State}
     end;
 json_api(Req, #state{domain=kv, op=post}=State) ->
     {Result, Req1} = set_value(Req, any),
@@ -240,12 +246,16 @@ consistency_constraint(format_error, _Error) ->
 
 do_get_value(Key, Consistency) ->
     ?LOG_DEBUG("key: ~p", [Key]),
-    Result = chronicle_kv:get(kv, Key, #{read_consistency => Consistency}),
-    case Result of
+    try chronicle_kv:get(kv, Key, #{read_consistency => Consistency}) of
         {ok, Value} ->
             {ok, Value};
         _ ->
             not_found
+    catch
+        exit:{noproc, _} ->
+            no_rsm;
+        error:badarg ->
+            no_rsm
     end.
 
 set_value(Req, ExpectedRevision) ->
@@ -256,19 +266,29 @@ set_value(Req, ExpectedRevision) ->
     ?LOG_DEBUG("read content: ~p", [Body]),
     try jiffy:decode(Body) of
         _ ->
-            {ok, _} = chronicle_kv:set(kv, Key, Body, ExpectedRevision),
-            {true, Req1}
+            try chronicle_kv:set(kv, Key, Body, ExpectedRevision) of
+                {ok, _} ->
+                    {true, Req1}
+            catch
+                exit:{noproc, _} ->
+                    {false, Req1}
+            end
     catch _:_ ->
             ?LOG_DEBUG("body not json: ~p", [Body]),
-            {false, Req}
+            {false, Req1}
     end.
 
 delete_value(Req, ExpectedRevision) ->
     BinKey = cowboy_req:binding(key, Req),
     Key = binary_to_list(BinKey),
     ?LOG_DEBUG("deleting key: ~p", [Key]),
-    {ok, _} = chronicle_kv:delete(kv, Key, ExpectedRevision),
-    true.
+    try chronicle_kv:delete(kv, Key, ExpectedRevision) of
+        {ok, _} ->
+            true
+    catch
+        exit:{noproc, _} ->
+            no_rsm
+    end.
 
 parse_nodes(Body) ->
     try jiffy:decode(Body) of
