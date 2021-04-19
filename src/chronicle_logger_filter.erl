@@ -67,7 +67,7 @@ gen_statem_filter(Report, Modules) ->
                             postponed => NewPostponed,
                             reason => {Class, NewReason, NewStack}};
                 _ ->
-                    ignored
+                    ignore
             end;
         _ ->
             ignore
