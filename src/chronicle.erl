@@ -18,6 +18,7 @@
 -include("chronicle.hrl").
 
 -export([get_system_state/0]).
+-export([force_snapshot/0, export_snapshot/1]).
 -export([check_quorum/0, check_quorum/1]).
 -export([get_peer_statuses/0, get_cluster_status/0]).
 -export([provision/1, reprovision/0, wipe/0]).
@@ -90,6 +91,15 @@ get_system_state() ->
                State =:= removed ->
             State
     end.
+
+-spec force_snapshot() -> chronicle_agent:force_snapshot_result().
+force_snapshot() ->
+    chronicle_agent:force_snapshot().
+
+-spec export_snapshot(Dir::file:name()) ->
+          chronicle_agent:export_snapshot_result().
+export_snapshot(Path) ->
+    chronicle_agent:export_snapshot(Path).
 
 -type check_quorum_result() :: true
                              | {false, timeout | no_leader}.

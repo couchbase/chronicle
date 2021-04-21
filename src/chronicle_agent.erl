@@ -44,7 +44,8 @@
          init/1, handle_event/4, terminate/3]).
 
 -export_type([provision_result/0, reprovision_result/0, wipe_result/0,
-              prepare_join_result/0, join_cluster_result/0]).
+              prepare_join_result/0, join_cluster_result/0,
+              force_snapshot_result/0, export_snapshot_result/0]).
 
 -import(chronicle_utils, [call/2, call/3, call/4,
                           call_async/4,
@@ -669,7 +670,9 @@ check_member(HistoryId, Peer, PeerId, PeerSeqno) ->
                               | snapshot_canceled
                               | wipe_requested
                               | {bad_state, joining_cluster | not_provisioned}.
--spec force_snapshot() -> {ok, file:name()} | {error, force_snapshot_error()}.
+-type force_snapshot_result() :: {ok, file:name()}
+                               | {error, force_snapshot_error()}.
+-spec force_snapshot() -> force_snapshot_result().
 force_snapshot() ->
     case call(?SERVER, force_snapshot, ?FORCE_SNAPSHOT_TIMEOUT) of
         {ok, Seqno} ->
@@ -682,8 +685,9 @@ force_snapshot() ->
         force_snapshot_error()
       | {link_failed | copy_failed, file:posix(), file:name(), file:name()}
       | {mkdir_failed, file:posix(), file:name()}.
+-type export_snapshot_result() :: ok | {error, export_snapshot_error()}.
 
--spec export_snapshot(file:name()) -> ok | {error, export_snapshot_error()}.
+-spec export_snapshot(file:name()) -> export_snapshot_result().
 export_snapshot(Path) ->
     case chronicle_utils:mkdir_p(Path) of
         ok ->
