@@ -917,7 +917,7 @@ handle_snapshot_ok(_State, #data{snapshot_state = SnapshotState} = Data) ->
            [Seqno, Config]),
 
     cancel_snapshot_timer(TRef),
-    NewData = Data#data{snapshot_state = undefined},
+    NewData = reset_snapshot_state(Data),
     {keep_state, record_snapshot(Seqno, HistoryId, Term, Config, NewData)}.
 
 handle_snapshot_failed(_State,
@@ -2406,7 +2406,7 @@ cancel_snapshot_retry(Data) ->
 
     _ = erlang:cancel_timer(TRef),
     ?FLUSH(retry_snapshot),
-    Data#data{snapshot_state = undefined}.
+    reset_snapshot_state(Data).
 
 maybe_cancel_snapshot(#data{snapshot_state = SnapshotState} = Data) ->
     case SnapshotState of
@@ -2430,8 +2430,10 @@ cancel_snapshot(#data{snapshot_state = SnapshotState,
 
     ?INFO("Snapshot at seqno ~p canceled.", [SnapshotSeqno]),
     chronicle_storage:delete_snapshot(SnapshotSeqno, Storage),
+    reset_snapshot_state(Data).
 
-    Data#data{snapshot_state = undefined}.
+reset_snapshot_state(Data) ->
+    Data#data{snapshot_state = undefined, snapshot_attempts = 0}.
 
 get_rsms(#log_entry{value = Config}) ->
     chronicle_config:get_rsms(Config).
