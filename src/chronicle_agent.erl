@@ -1853,17 +1853,17 @@ handle_install_snapshot(HistoryId, Term,
                     NewData0 =
                         case Action of
                             install ->
-                                install_snapshot(SnapshotSeqno,
-                                                 SnapshotHistoryId,
-                                                 SnapshotTerm, SnapshotConfig,
-                                                 RSMSnapshots, Metadata, Data);
+                                maybe_cancel_snapshot(
+                                  install_snapshot(
+                                    SnapshotSeqno, SnapshotHistoryId,
+                                    SnapshotTerm, SnapshotConfig,
+                                    RSMSnapshots, Metadata, Data));
                             commit_seqno ->
                                 store_meta(Metadata, Data)
                         end,
-                    NewData1 = maybe_cancel_snapshot(NewData0),
 
                     {NewState, NewData} =
-                        post_append(Term, SnapshotSeqno, State, Data, NewData1),
+                        post_append(Term, SnapshotSeqno, State, Data, NewData0),
 
                     {next_state, NewState, NewData,
                      {reply, From, {ok, build_metadata(NewData)}}}
