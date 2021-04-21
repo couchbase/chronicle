@@ -26,7 +26,7 @@
          get_config/1, get_committed_config/1,
          store_meta/2, append/5, sync/1, close/1, publish/1,
          install_snapshot/6, record_snapshot/5, delete_snapshot/2,
-         prepare_snapshot/1,
+         prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_and_hold_latest_snapshot/1, release_snapshot/2,
          get_latest_snapshot_seqno/1,
@@ -927,6 +927,41 @@ rsm_snapshot_path(SnapshotDir, RSM) ->
 prepare_snapshot(Seqno) ->
     SnapshotDir = snapshot_dir(Seqno),
     chronicle_utils:mkdir_p(SnapshotDir).
+
+copy_snapshot(Path, Seqno, Config) ->
+    SnapshotDir = snapshot_dir(Seqno),
+    RSMs = maps:keys(chronicle_config:get_rsms(Config#log_entry.value)),
+    copy_snapshot_loop(Path, SnapshotDir, RSMs).
+
+copy_snapshot_loop(_Path, _SnapshotDir, []) ->
+    ok;
+copy_snapshot_loop(Path, SnapshotDir, [RSM | Rest]) ->
+    SrcPath = rsm_snapshot_path(SnapshotDir, RSM),
+    DstPath = rsm_snapshot_path(Path, RSM),
+
+    case link_or_copy(SrcPath, DstPath) of
+        ok ->
+            copy_snapshot_loop(Path, SnapshotDir, Rest);
+        {error, _} = Error ->
+            Error
+    end.
+
+link_or_copy(SrcPath, DstPath) ->
+    case file:make_link(SrcPath, DstPath) of
+        ok ->
+            ok;
+        {error, Error}
+          when Error =:= exdev;
+               Error =:= enotsup ->
+            case file:copy(SrcPath, DstPath) of
+                {ok, _} ->
+                    ok;
+                {error, Error} ->
+                    {error, {copy_failed, Error, SrcPath, DstPath}}
+            end;
+        {error, Error} ->
+            {error, {link_failed, Error, SrcPath, DstPath}}
+    end.
 
 save_rsm_snapshot(Seqno, RSM, RSMState) ->
     SnapshotDir = snapshot_dir(Seqno),

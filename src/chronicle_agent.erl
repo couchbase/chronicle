@@ -38,7 +38,7 @@
          local_mark_committed/3,
          local_store_branch/2, store_branch/3, undo_branch/3,
          mark_removed/2, check_member/4,
-         force_snapshot/0]).
+         force_snapshot/0, export_snapshot/1]).
 
 -export([callback_mode/0, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
@@ -676,6 +676,38 @@ force_snapshot() ->
             {ok, chronicle_storage:snapshot_dir(Seqno)};
         {error, _} = Error ->
             Error
+    end.
+
+-type export_snapshot_error() ::
+        force_snapshot_error()
+      | {link_failed | copy_failed, file:posix(), file:name(), file:name()}
+      | {mkdir_failed, file:posix(), file:name()}.
+
+-spec export_snapshot(file:name()) -> ok | {error, export_snapshot_error()}.
+export_snapshot(Path) ->
+    case chronicle_utils:mkdir_p(Path) of
+        ok ->
+            case force_snapshot() of
+                {ok, _} ->
+                    Result = with_latest_snapshot(
+                               fun (Seqno, _, _, Config) ->
+                                       chronicle_storage:copy_snapshot(
+                                         Path, Seqno, Config)
+                               end),
+
+                    case Result of
+                        {error, no_snapshot} ->
+                            %% Should not happen because we just forced a
+                            %% snapshot.
+                            exit(no_snapshot);
+                        _ ->
+                            Result
+                    end;
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, Error} ->
+            {error, {mkdir_failed, Error, Path}}
     end.
 
 %% gen_statem callbacks
