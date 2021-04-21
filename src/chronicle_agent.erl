@@ -37,7 +37,8 @@
          install_snapshot/8,
          local_mark_committed/3,
          local_store_branch/2, store_branch/3, undo_branch/3,
-         mark_removed/2, check_member/4]).
+         mark_removed/2, check_member/4,
+         force_snapshot/0]).
 
 -export([callback_mode/0, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
@@ -87,6 +88,9 @@
 -define(SNAPSHOT_INTERVAL,
         chronicle_settings:get({agent, snapshot_interval}, 100)).
 
+-define(FORCE_SNAPSHOT_TIMEOUT,
+        chronicle_settings:get({agent, force_snapshot_timeout}, 60000)).
+
 %% Used to indicate that a function will send a message with the provided Tag
 %% back to the caller when the result is ready. And the result type is
 %% _ReplyType. This is entirely useless for dializer, but is usefull for
@@ -97,7 +101,9 @@
                           seqno,
                           history_id,
                           term,
-                          config }).
+                          config,
+
+                          waiters }).
 
 -record(prepare_join, { config }).
 -record(join_cluster, { from, config, seqno }).
@@ -659,6 +665,19 @@ check_member(HistoryId, Peer, PeerId, PeerSeqno) ->
             {error, {bad_state, State}}
     end.
 
+-type force_snapshot_error() :: snapshot_failed
+                              | snapshot_canceled
+                              | wipe_requested
+                              | {bad_state, joining_cluster | not_provisioned}.
+-spec force_snapshot() -> {ok, file:name()} | {error, force_snapshot_error()}.
+force_snapshot() ->
+    case call(?SERVER, force_snapshot, ?FORCE_SNAPSHOT_TIMEOUT) of
+        {ok, Seqno} ->
+            {ok, chronicle_storage:snapshot_dir(Seqno)};
+        {error, _} = Error ->
+            Error
+    end.
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -779,6 +798,8 @@ handle_call({undo_branch, BranchId}, From, State, Data) ->
     handle_undo_branch(BranchId, From, State, Data);
 handle_call({mark_removed, Peer, PeerId}, From, State, Data) ->
     handle_mark_removed(Peer, PeerId, From, State, Data);
+handle_call(force_snapshot, From, State, Data) ->
+    handle_force_snapshot(From, State, Data);
 handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
@@ -917,8 +938,13 @@ handle_snapshot_ok(_State, #data{snapshot_state = SnapshotState} = Data) ->
            [Seqno, Config]),
 
     cancel_snapshot_timer(TRef),
-    NewData = reset_snapshot_state(Data),
-    {keep_state, record_snapshot(Seqno, HistoryId, Term, Config, NewData)}.
+    NewData = record_snapshot(Seqno, HistoryId, Term, Config,
+                              reset_snapshot_state(Data)),
+
+    %% Reply after the snapshot is persistently recorded.
+    reply_snapshot_ok(Seqno, Data),
+
+    {keep_state, NewData}.
 
 handle_snapshot_failed(_State,
                        #data{snapshot_state = SnapshotState,
@@ -926,30 +952,39 @@ handle_snapshot_failed(_State,
                              storage = Storage} = Data) ->
     #snapshot_state{seqno = Seqno} = SnapshotState,
 
-    NewAttempts = Attempts + 1,
-    AttemptsRemaining = ?SNAPSHOT_RETRIES - NewAttempts,
+    ?ERROR("Failed to take a snapshot at seqno ~b", [Seqno]),
 
-    ?ERROR("Failed to take a snapshot at seqno ~b. ~b attempts remaining.",
-           [Seqno, AttemptsRemaining]),
-
+    reply_snapshot_failed(Data),
     chronicle_storage:delete_snapshot(Seqno, Storage),
 
-    NewData = Data#data{snapshot_attempts = NewAttempts},
-    case AttemptsRemaining > 0 of
+    case need_snapshot(Data) of
         true ->
-            {keep_state, schedule_retry_snapshot(NewData)};
+            NewAttempts = Attempts + 1,
+            AttemptsRemaining = ?SNAPSHOT_RETRIES - NewAttempts,
+            NewData = Data#data{snapshot_attempts = NewAttempts},
+
+            case AttemptsRemaining > 0 of
+                true ->
+                    ?INFO("Scheduling a snapshot retry. "
+                          "~b attempts remaining.", [AttemptsRemaining]),
+                    {keep_state, schedule_retry_snapshot(NewData)};
+                false ->
+                    {stop, {snapshot_failed, Seqno}, NewData}
+            end;
         false ->
-            {stop, {snapshot_failed, Seqno}, NewData}
+            %% This might have been a user-initiated snapshot and strictly
+            %% speaking we don't need a snapshot currently.
+            {keep_state, reset_snapshot_state(Data)}
     end.
 
 handle_snapshot_timeout(_State, #data{snapshot_state = SnapshotState} = Data) ->
+    reply_snapshot_failed(Data),
     #snapshot_state{seqno = Seqno} = SnapshotState,
     ?ERROR("Timeout while taking snapshot at seqno ~b.", [Seqno]),
     {stop, {snapshot_timeout, Seqno}, Data}.
 
 handle_retry_snapshot(_State, Data) ->
-    {retry, _} = Data#data.snapshot_state,
-    {keep_state, initiate_snapshot(Data#data{snapshot_state = undefined})}.
+    {keep_state, retry_snapshot(Data)}.
 
 foreach_rsm(Fun, Data) ->
     case get_config(Data) of
@@ -1854,6 +1889,8 @@ handle_install_snapshot(HistoryId, Term,
                         case Action of
                             install ->
                                 maybe_cancel_snapshot(
+                                  %% Reply with the installed snapshot seqno.
+                                  {ok, SnapshotSeqno},
                                   install_snapshot(
                                     SnapshotSeqno, SnapshotHistoryId,
                                     SnapshotTerm, SnapshotConfig,
@@ -2023,6 +2060,27 @@ check_peer_and_id(Peer, PeerId, Data) ->
         false ->
             {error, {peer_mismatch, Ours, Theirs}}
     end.
+
+handle_force_snapshot(From, State, Data) ->
+    case check_force_snapshot(State, Data) of
+        ok ->
+            LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
+            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+
+            case LatestSnapshotSeqno =:= CommittedSeqno of
+                true ->
+                    {keep_state_and_data,
+                     {reply, From, {ok, CommittedSeqno}}};
+                false ->
+                    {keep_state, force_snapshot(From, Data)}
+            end;
+        {error, _} = Error ->
+            {keep_state_and_data, {reply, From, Error}}
+    end.
+
+check_force_snapshot(State, Data) ->
+    ?CHECK(check_provisioned_or_removed(State),
+           check_not_wipe_requested(Data)).
 
 check_branch_id(BranchId, Data) ->
     OurBranch = get_meta(?META_PENDING_BRANCH, Data),
@@ -2324,7 +2382,8 @@ get_log_entry(Seqno, #data{storage = Storage}) ->
 
 maybe_initiate_snapshot(State, Data) ->
     case State of
-        provisioned ->
+        _ when State =:= provisioned;
+               State =:= removed ->
             maybe_initiate_snapshot(Data);
         _ ->
             %% State machines aren't running before the agent moves to state
@@ -2337,16 +2396,54 @@ maybe_initiate_snapshot(#data{snapshot_state = #snapshot_state{}} = Data) ->
 maybe_initiate_snapshot(#data{snapshot_state = {retry, _}} = Data) ->
     Data;
 maybe_initiate_snapshot(Data) ->
-    LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
-    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-
-    case CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL
-        andalso not is_wipe_requested(Data) of
+    case need_snapshot(Data) andalso not is_wipe_requested(Data) of
         true ->
             initiate_snapshot(Data);
         false ->
             Data
     end.
+
+need_snapshot(Data) ->
+    LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
+    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+    CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL.
+
+force_snapshot(From, #data{snapshot_state = SnapshotState} = Data) ->
+    NewData =
+        case SnapshotState of
+            #snapshot_state{} ->
+                Data;
+            {retry, _} ->
+                retry_snapshot(Data);
+            undefined ->
+                initiate_snapshot(Data)
+        end,
+
+    add_snapshot_waiter(From, NewData).
+
+retry_snapshot(Data) ->
+    {retry, TRef} = Data#data.snapshot_state,
+    cancel_snapshot_retry_timer(TRef),
+    initiate_snapshot(Data#data{snapshot_state = undefined}).
+
+add_snapshot_waiter(From, #data{snapshot_state = SnapshotState} = Data) ->
+    #snapshot_state{waiters = Waiters} = SnapshotState,
+    NewWaiters = [From | Waiters],
+    NewSnapshotState = SnapshotState#snapshot_state{waiters = NewWaiters},
+    Data#data{snapshot_state = NewSnapshotState}.
+
+reply_snapshot_waiters(Reply, #data{snapshot_state = SnapshotState}) ->
+    #snapshot_state{waiters = Waiters} = SnapshotState,
+    lists:foreach(
+      fun (From) ->
+              gen_statem:reply(From, Reply)
+      end, Waiters).
+
+reply_snapshot_ok(Seqno, Data) ->
+    reply_snapshot_waiters({ok, Seqno}, Data).
+
+reply_snapshot_failed(Data) ->
+    reply_snapshot_waiters({error, snapshot_failed}, Data).
 
 initiate_snapshot(Data) ->
     undefined = Data#data.snapshot_state,
@@ -2374,7 +2471,8 @@ initiate_snapshot(Data) ->
                                     history_id = HistoryId,
                                     term = Term,
                                     seqno = CommittedSeqno,
-                                    config = CommittedConfig},
+                                    config = CommittedConfig,
+                                    waiters = []},
 
     RSMs = maps:keys(CommittedRSMs),
     chronicle_snapshot_mgr:pending_snapshot(CommittedSeqno, RSMs),
@@ -2403,18 +2501,25 @@ schedule_retry_snapshot(Data) ->
 
 cancel_snapshot_retry(Data) ->
     {retry, TRef} = Data#data.snapshot_state,
-
-    _ = erlang:cancel_timer(TRef),
-    ?FLUSH(retry_snapshot),
+    cancel_snapshot_retry_timer(TRef),
     reset_snapshot_state(Data).
 
-maybe_cancel_snapshot(#data{snapshot_state = SnapshotState} = Data) ->
+cancel_snapshot_retry_timer(TRef) ->
+    _ = erlang:cancel_timer(TRef),
+    ?FLUSH(retry_snapshot),
+    ok.
+
+maybe_cancel_snapshot(Data) ->
+    maybe_cancel_snapshot({error, snapshot_canceled}, Data).
+
+maybe_cancel_snapshot(Reply, #data{snapshot_state = SnapshotState} = Data) ->
     case SnapshotState of
         undefined ->
             Data;
         {retry, _TRef} ->
             cancel_snapshot_retry(Data);
         #snapshot_state{} ->
+            reply_snapshot_waiters(Reply, Data),
             cancel_snapshot(Data)
     end.
 

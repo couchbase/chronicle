@@ -32,7 +32,7 @@
          get_latest_snapshot_seqno/1,
          get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
-         ensure_rsm_dir/1]).
+         ensure_rsm_dir/1, snapshot_dir/1]).
 
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
@@ -304,6 +304,9 @@ snapshots_dir(DataDir) ->
 
 rsms_dir(DataDir) ->
     filename:join(chronicle_dir(DataDir), "rsms").
+
+snapshot_dir(Seqno) ->
+    snapshot_dir(chronicle_env:data_dir(), Seqno).
 
 snapshot_dir(DataDir, Seqno) ->
     filename:join(snapshots_dir(DataDir), integer_to_list(Seqno)).
@@ -922,11 +925,11 @@ rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
 
 prepare_snapshot(Seqno) ->
-    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
+    SnapshotDir = snapshot_dir(Seqno),
     chronicle_utils:mkdir_p(SnapshotDir).
 
 save_rsm_snapshot(Seqno, RSM, RSMState) ->
-    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
+    SnapshotDir = snapshot_dir(Seqno),
 
     Path = rsm_snapshot_path(SnapshotDir, RSM),
     Data = term_to_binary(RSMState, [{compressed, 9}]),
@@ -986,7 +989,7 @@ read_rsm_snapshot_data(SnapshotDir, RSM) ->
     end.
 
 read_rsm_snapshot(RSM, Seqno) ->
-    SnapshotDir = snapshot_dir(chronicle_env:data_dir(), Seqno),
+    SnapshotDir = snapshot_dir(Seqno),
     case read_rsm_snapshot_data(SnapshotDir, RSM) of
         {ok, Data} ->
             {ok, binary_to_term(Data)};
