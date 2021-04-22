@@ -70,6 +70,7 @@
 
 -record(snapshot, { applied_history_id :: chronicle:history_id(),
                     applied_seqno :: chronicle:seqno(),
+                    mod :: module(),
                     mod_state :: any(),
                     peer_states :: peer_states() }).
 
@@ -1351,12 +1352,14 @@ save_snapshot(Seqno, #data{name = Name,
                            applied_history_id = AppliedHistoryId,
                            applied_seqno = AppliedSeqno,
                            read_seqno = ReadSeqno,
+                           mod = Mod,
                            mod_state = ModState,
                            peer_states = PeerStates}) ->
     true = (Seqno =:= ReadSeqno),
 
     Snapshot = #snapshot{applied_history_id = AppliedHistoryId,
                          applied_seqno = AppliedSeqno,
+                         mod = Mod,
                          mod_state = ModState,
                          peer_states = PeerStates},
     chronicle_agent:save_rsm_snapshot(Name, Seqno, Snapshot).
