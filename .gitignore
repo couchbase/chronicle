@@ -7,3 +7,9 @@
 /priv/
 /c_src/*.d
 /tmp/
+
+# rebar2
+.rebar/
+/chronicle_dump
+compile_commands.json
+ebin
