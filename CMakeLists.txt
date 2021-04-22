@@ -9,11 +9,13 @@ IF (NOT TARGET ns_realclean)
 ENDIF ()
 
 REBAR (TARGET chronicle CLEAN_HOOK ns_realclean)
+REBAR (TARGET chronicle_dump COMMAND escriptize NOCLEAN DEPENDS chronicle)
 
 SET(INSTALL_DIR "${INST_LIBDIR}/chronicle")
 
 # This assumes that rebar2 is used.
 INSTALL (DIRECTORY ebin DESTINATION "${INSTALL_DIR}")
+INSTALL (PROGRAMS chronicle_dump DESTINATION bin)
 
 # priv/ only exists on Linux currently, so make this OPTIONAL
 INSTALL (DIRECTORY priv OPTIONAL DESTINATION "${INSTALL_DIR}")
