@@ -93,6 +93,19 @@
 -define(WARNING(Msg), ?WARNING(Msg, [])).
 -define(ERROR(Msg), ?ERROR(Msg, [])).
 
+-define(CHRONICLE_LOAD_NIFS, '$chronicle_load_nifs').
+-define(WHEN_LOAD_NIFS(Body),
+        %% It's impossible to load *.so files from an escript archive without
+        %% lots of extra hoops. Currently I don't need this nif for
+        %% chronicle_dump, so escripts will simply not even attempt to load
+        %% it.
+        case persistent_term:get(?CHRONICLE_LOAD_NIFS, true) of
+            true ->
+                Body;
+            false ->
+                ok
+        end).
+
 -define(CHRONICLE_LOGGER, '$chronicle_logger').
 -define(LOG(Level, Fmt, Args),
         (persistent_term:get(?CHRONICLE_LOGGER))(

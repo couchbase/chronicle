@@ -558,15 +558,18 @@ is_quorum_feasible(Peers, FailedVotes, Quorum) ->
 -ifdef(HAVE_SYNC_DIR).
 
 init_sync_nif() ->
-    PrivDir = case code:priv_dir(?MODULE) of
-                  {error, _} ->
-                      EbinDir = filename:dirname(code:which(?MODULE)),
-                      AppPath = filename:dirname(EbinDir),
-                      filename:join(AppPath, "priv");
-                  Path ->
-                      Path
-              end,
-    erlang:load_nif(filename:join(PrivDir, "sync_nif"), 0).
+    ?WHEN_LOAD_NIFS(
+       begin
+           PrivDir = case code:priv_dir(?MODULE) of
+                         {error, _} ->
+                             EbinDir = filename:dirname(code:which(?MODULE)),
+                             AppPath = filename:dirname(EbinDir),
+                             filename:join(AppPath, "priv");
+                         Path ->
+                             Path
+                     end,
+           erlang:load_nif(filename:join(PrivDir, "sync_nif"), 0)
+       end).
 
 encode_path(Path) ->
     Encoded =
@@ -593,7 +596,7 @@ encode_path(Path) ->
     <<Encoded/binary, 0>>.
 
 sync_dir(Path) ->
-    do_sync_dir(encode_path(Path)).
+    ?WHEN_LOAD_NIFS(do_sync_dir(encode_path(Path))).
 
 do_sync_dir(_Path) ->
     erlang:nif_error(sync_nif_not_loaded).
