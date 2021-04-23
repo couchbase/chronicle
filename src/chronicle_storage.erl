@@ -32,7 +32,8 @@
          get_latest_snapshot_seqno/1,
          get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
-         ensure_rsm_dir/1, snapshot_dir/1]).
+         ensure_rsm_dir/1, snapshot_dir/1,
+         map_append/2]).
 
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
@@ -1319,3 +1320,13 @@ ensure_rsm_dir(Name) ->
     Dir = filename:join(RSMsDir, Name),
     ok = chronicle_utils:mkdir_p(Dir),
     Dir.
+
+map_append(Fun, Entry) ->
+    case Entry of
+        {append, StartSeqno, EndSeqno, Meta, Truncate, Terms} ->
+            {append,
+             StartSeqno, EndSeqno, Meta, Truncate,
+             lists:map(Fun, Terms)};
+        _ ->
+            Entry
+    end.

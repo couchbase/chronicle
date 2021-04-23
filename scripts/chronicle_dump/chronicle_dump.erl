@@ -45,18 +45,73 @@ parse_args_loop([Arg|Args], AccArgs, AccOptions, Spec) ->
             parse_args_loop(Args, [Arg | AccArgs], AccOptions, Spec)
     end.
 
+dump_logs(Args) ->
+    {Paths, Options} = parse_args(Args, #{}),
+    dump_many(Paths,
+              fun (Path) ->
+                      dump_log(Path, Options)
+              end).
+
+dump_log(Path, _Options) ->
+    ?fmt("Dumping '~s'~n", [Path]),
+    try chronicle_log:read_log(Path,
+                               fun dump_log_header/2,
+                               fun dump_log_entry/2,
+                               header) of
+        {ok, _} ->
+            ok;
+        {error, Error} ->
+            ?fmt("Error while dumping '~s': ~w", [Path, Error])
+    catch
+        T:E:Stacktrace ->
+            ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
+                 "~p",
+                 [T, E, Stacktrace])
+    end.
+
+dump_log_header(Header, header) ->
+    ?fmt("Header:"),
+    dump_term(indent(), Header),
+    first.
+
+dump_log_entry(Entry, State) ->
+    case State of
+        first ->
+            ?fmt("~nEntries:");
+        rest ->
+            ok
+    end,
+
+    dump_term(indent(), unpack_entry(Entry)),
+    rest.
+
+unpack_entry(Entry) ->
+    chronicle_storage:map_append(
+      fun (#log_entry{value = Value} = LogEntry) ->
+              case Value of
+                  #rsm_command{} ->
+                      LogEntry#log_entry{
+                        value = chronicle_rsm:unpack_payload(Value)};
+                  _ ->
+                      LogEntry
+              end
+      end, Entry).
+
 dump_snapshots(Args) ->
     {Paths, Options} = parse_args(Args, #{raw => flag}),
-    dump_snapshots_loop(Paths, Options).
+    dump_many(Paths,
+              fun (Path) ->
+                      dump_snapshot(Path, Options)
+              end).
 
-dump_snapshots_loop([], _) ->
+dump_many([], _) ->
     ok;
-dump_snapshots_loop([Path], Options) ->
-    dump_snapshot(Path, Options);
-dump_snapshots_loop([Path|Rest], Options) ->
-    dump_snapshot(Path, Options),
+dump_many([Path], Fun) ->
+    Fun(Path);
+dump_many([Path|Rest], Fun) ->
+    Fun(Path),
     ?fmt("~n"),
-    dump_snapshots_loop(Rest, Options).
+    dump_many(Rest, Fun).
 
 dump_snapshot(Path, Options) ->
     case chronicle_storage:read_rsm_snapshot(Path) of
@@ -134,6 +189,9 @@ dump_pair(Indent, {Name0, Value0} = Pair) ->
             dump_term(Indent, Pair)
     end.
 
+indent() ->
+    indent("").
+
 indent(Indent) ->
     "    " ++ Indent.
 
@@ -173,6 +231,8 @@ main(Args) ->
     case Args of
         ["snapshot" | RestArgs] ->
             dump_snapshots(RestArgs);
+        ["log" | RestArgs] ->
+            dump_logs(RestArgs);
         _ ->
             usage()
     end.

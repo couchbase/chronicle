@@ -24,6 +24,7 @@
          get_local_revision/1, sync_revision/3, sync/2,
          note_leader_status/2, note_seqno_committed/2, take_snapshot/2]).
 
+-export([unpack_payload/1]).
 -export([format_snapshot/1]).
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
@@ -1523,6 +1524,14 @@ pack_command(Command) ->
 
 unpack_command(PackedCommand) ->
     binary_to_term(PackedCommand).
+
+unpack_payload(#rsm_command{payload = Payload} = RSMCommand) ->
+    case Payload of
+        noop ->
+            RSMCommand;
+        {command, Command} ->
+            RSMCommand#rsm_command{payload = {command, unpack_command(Command)}}
+    end.
 
 get_incarnation(RSMDir) ->
     Path = filename:join(RSMDir, "incarnation"),
