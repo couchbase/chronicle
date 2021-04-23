@@ -218,21 +218,30 @@ type(Term) ->
 
 -spec usage() -> no_return().
 usage() ->
+    ?fmt("Usage: ~s [COMMAND]", [escript:script_name()]),
+    ?fmt("Commands:"),
+    ?fmt("    snapshot [--raw] [FILE]..."),
+    ?fmt("         log [FILE]..."),
     erlang:halt(1).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
 usage(Fmt, Args) ->
-    ?fmt(Fmt, Args),
+    ?fmt("~s: " ++ Fmt, [escript:script_name() | Args]),
     usage().
 
 main(Args) ->
     persistent_term:put(?CHRONICLE_LOAD_NIFS, false),
 
     case Args of
-        ["snapshot" | RestArgs] ->
-            dump_snapshots(RestArgs);
-        ["log" | RestArgs] ->
-            dump_logs(RestArgs);
+        [Command | RestArgs] ->
+            case Command of
+                "snapshot" ->
+                    dump_snapshots(RestArgs);
+                "log" ->
+                    dump_logs(RestArgs);
+                _ ->
+                    usage("unknown command '~s'", [Command])
+            end;
         _ ->
             usage()
     end.
