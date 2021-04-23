@@ -20,6 +20,8 @@
 -import(chronicle_utils, [start_timeout/1,
                           sanitize_stacktrace/1]).
 
+-export([format_state/1]).
+
 %% APIs
 -export([event_manager/1]).
 -export([add/3, add/4]).
@@ -74,6 +76,9 @@
 -else.
 -type event_manager_name() :: any().
 -endif.
+
+format_state(State) ->
+    chronicle_dump:raw(maps:to_list(State)).
 
 -spec event_manager(name()) -> event_manager_name().
 event_manager(Name) ->

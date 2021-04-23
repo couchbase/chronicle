@@ -27,7 +27,7 @@
          store_meta/2, append/5, sync/1, close/1, publish/1,
          install_snapshot/6, record_snapshot/5, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
-         read_rsm_snapshot/2, save_rsm_snapshot/3,
+         read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_and_hold_latest_snapshot/1, release_snapshot/2,
          get_latest_snapshot_seqno/1,
          get_term_for_seqno/2,
@@ -988,7 +988,7 @@ save_rsm_snapshot(Seqno, RSM, RSMState) ->
 
 validate_rsm_snapshot(SnapshotDir, RSM) ->
     Path = rsm_snapshot_path(SnapshotDir, RSM),
-    case read_rsm_snapshot_data(SnapshotDir, RSM) of
+    case read_rsm_snapshot_data(Path) of
         {ok, _Data} ->
             ok;
         {error, {invalid_snapshot, _Reason}} = Error ->
@@ -1003,8 +1003,7 @@ validate_rsm_snapshot(SnapshotDir, RSM) ->
             exit({snapshot_read_failed, Path, Reason})
     end.
 
-read_rsm_snapshot_data(SnapshotDir, RSM) ->
-    Path = rsm_snapshot_path(SnapshotDir, RSM),
+read_rsm_snapshot_data(Path) ->
     case file:read_file(Path) of
         {ok, Binary} ->
             case Binary of
@@ -1025,7 +1024,11 @@ read_rsm_snapshot_data(SnapshotDir, RSM) ->
 
 read_rsm_snapshot(RSM, Seqno) ->
     SnapshotDir = snapshot_dir(Seqno),
-    case read_rsm_snapshot_data(SnapshotDir, RSM) of
+    Path = rsm_snapshot_path(SnapshotDir, RSM),
+    read_rsm_snapshot(Path).
+
+read_rsm_snapshot(Path) ->
+    case read_rsm_snapshot_data(Path) of
         {ok, Data} ->
             {ok, binary_to_term(Data)};
         {error, _} = Error ->

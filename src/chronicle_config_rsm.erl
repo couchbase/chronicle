@@ -19,6 +19,7 @@
 
 -export([get_config/1, get_cluster_info/1, query/2, check_quorum/1]).
 -export([cas_config/3]).
+-export([format_state/1]).
 -export([specs/2, init/2, post_init/3, state_enter/4,
          handle_config/5, apply_snapshot/5, handle_query/4,
          apply_command/6, handle_info/4, terminate/4]).
@@ -55,6 +56,22 @@ cas_config(Config, CasRevision, Timeout) ->
     chronicle_rsm:command(?NAME, {cas_config, Config, CasRevision}, Timeout).
 
 %% callbacks
+format_state(#state{current_request = CurrentRequest,
+                    pending_requests = PendingRequests,
+                    config = ConfigEntry}) ->
+    #log_entry{history_id = HistoryId,
+               term = Term,
+               seqno = Seqno,
+               value = Config} = ConfigEntry,
+
+    [{"Current request", CurrentRequest},
+     {"Pending requests", PendingRequests},
+     {"Config",
+      [{"History id", HistoryId},
+       {"Term", Term},
+       {"Seqno", Seqno},
+       {"Value", chronicle_config:format_config(Config)}]}].
+
 specs(_Name, _Args) ->
     [].
 

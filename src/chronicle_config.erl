@@ -23,6 +23,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-export([format_config/1]).
 -export([is_config/1, is_stable/1]).
 -export([transition/2, next_config/1]).
 -export([init/3, reinit/3, branch/3]).
@@ -41,6 +42,51 @@
 
 -type peers() :: #{chronicle:peer() =>
                        #{id := chronicle:peer_id(), role := chronicle:role()}}.
+
+format_config(#config{request_id = Id,
+                      lock = Lock,
+                      peers = Peers,
+                      old_peers = OldPeers,
+                      state_machines = StateMachines,
+                      settings = Settings,
+                      branch = Branch,
+                      history_log = HistoryLog}) ->
+    [{"Request id", Id},
+     {"Lock", Lock},
+     {"Peers", format_peers(Peers)},
+     {"Old peers", format_peers(OldPeers)},
+     {"State machines", format_state_machines(StateMachines)},
+     {"Branch", format_branch(Branch)},
+     {"History log", HistoryLog},
+     {"Settings", Settings}].
+
+format_peers(undefined) ->
+    undefined;
+format_peers(Peers) ->
+    lists:map(
+      fun ({Peer, #{id := PeerId, role := Role}}) ->
+              {Peer, [{"Id", PeerId}, {"Role", Role}]}
+      end, maps:to_list(Peers)).
+
+format_state_machines(StateMachines) ->
+    lists:map(
+      fun ({Name, #rsm_config{module = Module, args = Args}}) ->
+              {Name, [{"Module", Module},
+                      {"Args", chronicle_dump:raw(Args)}]}
+      end, maps:to_list(StateMachines)).
+
+format_branch(undefined) ->
+    undefined;
+format_branch(#branch{history_id = HistoryId,
+                      old_history_id = OldHistoryId,
+                      coordinator = Coordinator,
+                      peers = Peers,
+                      opaque = Opaque}) ->
+    [{"History id", HistoryId},
+     {"Previous history id", OldHistoryId},
+     {"Coordinator", Coordinator},
+     {"Peers", Peers},
+     {"Opaque", Opaque}].
 
 is_config(Value) ->
     case Value of

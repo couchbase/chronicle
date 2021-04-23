@@ -24,6 +24,7 @@
          get_local_revision/1, sync_revision/3, sync/2,
          note_leader_status/2, note_seqno_committed/2, take_snapshot/2]).
 
+-export([format_snapshot/1]).
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
@@ -215,6 +216,41 @@ format_status(Opt, [_PDict, State, Data]) ->
                      %% During gen_statem initialization Data may be undefined.
                      Data
              end}
+    end.
+
+format_snapshot(#snapshot{applied_history_id = HistoryId,
+                          applied_seqno = Seqno,
+                          peer_states = PeerStates,
+                          mod = Mod,
+                          mod_state = ModState}) ->
+    [{"History id", HistoryId},
+     {"Seqno", Seqno},
+     {"Peer states", format_peer_states(PeerStates)},
+     {"RSM module", Mod},
+     {"RSM state", format_mod_state(Mod, ModState)}].
+
+format_peer_states(PeerStates) ->
+    maps:to_list(
+      maps:map(
+        fun (_PeerId, #peer_state{incarnation = Incarnation,
+                                 min_serial = MinSerial,
+                                 replies = Replies}) ->
+                [{"Incarnation", Incarnation},
+                 {"Min serial", MinSerial},
+                 {"Recent replies", Replies}]
+        end, PeerStates)).
+
+format_mod_state(Mod, ModState) ->
+    case code:ensure_loaded(Mod) of
+        {module, _} ->
+            case erlang:function_exported(Mod, format_state, 1) of
+                true ->
+                    Mod:format_state(ModState);
+                false ->
+                    chronicle_dump:raw(ModState)
+            end;
+        _ ->
+            chronicle_dump:raw(ModState)
     end.
 
 sanitize_event({call, _} = Type,
