@@ -63,12 +63,19 @@ dump_snapshot(Path, Options) ->
         {ok, Snapshot} ->
             ?fmt("Dumping '~s'~n", [Path]),
 
-            case maps:get(raw, Options, false) of
-                true ->
-                    dump_term(Snapshot);
-                false ->
-                    Props = chronicle_rsm:format_snapshot(Snapshot),
-                    dump_props(Props)
+            try
+                case maps:get(raw, Options, false) of
+                    true ->
+                        dump_term(Snapshot);
+                    false ->
+                        Props = chronicle_rsm:format_snapshot(Snapshot),
+                        dump_props(Props)
+                end
+            catch
+                T:E:Stacktrace ->
+                    ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
+                         "~p",
+                         [T, E, Stacktrace])
             end;
         {error, Error} ->
             ?fmt("Couldn't read snapshot '~s': ~w", [Path, Error])
