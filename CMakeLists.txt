@@ -8,8 +8,11 @@ IF (NOT TARGET ns_realclean)
   MESSAGE(FATAL_ERROR "ns_realclean target does not exist.")
 ENDIF ()
 
-REBAR (TARGET chronicle CLEAN_HOOK ns_realclean)
-REBAR (TARGET chronicle_dump COMMAND escriptize NOCLEAN DEPENDS chronicle)
+SET (REBAR_OPTS -C "${CMAKE_CURRENT_SOURCE_DIR}/rebar2.config")
+
+REBAR (TARGET chronicle REBAR_OPTS ${REBAR_OPTS} CLEAN_HOOK ns_realclean)
+REBAR (TARGET chronicle_dump REBAR_OPTS ${REBAR_OPTS}
+  COMMAND escriptize NOCLEAN DEPENDS chronicle)
 
 SET(INSTALL_DIR "${INST_LIBDIR}/chronicle")
 
