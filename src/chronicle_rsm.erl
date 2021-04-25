@@ -136,14 +136,16 @@ query(Name, Query) ->
 query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, query, Timeout).
 
-get_quorum_revision(Name, Timeout) ->
-    leader_request(Name, get_quorum_revision, Timeout).
+sync(Name, Timeout) ->
+    leader_request(Name, sync, Timeout).
 
 leader_request(Name, Request, TRef) ->
     Deadline = read_deadline(TRef),
     case call(?SERVER(Name),
               {leader_request, Request, Deadline}, leader_request,
               infinity) of
+        ok ->
+            ok;
         {ok, Reply} ->
             Reply;
         {error, Error} ->
@@ -184,11 +186,6 @@ sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
         _ ->
             use_slow_path
     end.
-
-sync(Name, Timeout) ->
-    TRef = start_timeout(Timeout),
-    Revision = get_quorum_revision(Name, TRef),
-    sync_revision(Name, Revision, TRef).
 
 note_leader_status(Pid, LeaderStatus) ->
     gen_statem:cast(Pid, {leader_status, LeaderStatus}).
@@ -670,8 +667,14 @@ leader_request_sync_revision(Request, Result, From, Data) ->
                 _ ->
                     {reply, Result}
             end;
-        _Other ->
-            {reply, Result}
+        sync ->
+            case Result of
+                {ok, Revision} ->
+                    Deadline = Request#request.deadline,
+                    do_handle_sync_revision(ok, Revision, Deadline, From, Data);
+                _ ->
+                    {reply, Result}
+            end
     end.
 
 handle_leader_down(State, #data{leader_last_retry = LastRetry,
@@ -811,8 +814,8 @@ do_leader_request(Request, ReplyTo, State, Data) ->
         {command, PeerId, Incarnation, Serial, SeenSerial, Command} ->
             handle_command(PeerId, Incarnation,
                            Serial, SeenSerial, Command, ReplyTo, State, Data);
-        get_quorum_revision ->
-            handle_get_quorum_revision(ReplyTo, State, Data)
+        sync ->
+            handle_sync(ReplyTo, State, Data)
     end.
 
 handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
@@ -993,7 +996,7 @@ find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
             not_found
     end.
 
-handle_get_quorum_revision(ReplyTo, State, Data) ->
+handle_sync(ReplyTo, State, Data) ->
     {keep_state, sync_quorum(ReplyTo, State, Data)}.
 
 sync_quorum(ReplyTo, #leader{history_id = HistoryId, term = Term}, Data) ->
