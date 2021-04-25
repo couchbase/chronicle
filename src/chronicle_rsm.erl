@@ -78,6 +78,7 @@
 
 -record(request, { ref,
                    tref,
+                   deadline,
                    reply_to,
                    request
                  }).
@@ -420,6 +421,7 @@ add_request(Ref, RawRequest, Deadline, ReplyTo, Field, Data) ->
 
     Request = #request{ref = Ref,
                        tref = TRef,
+                       deadline = Deadline,
                        reply_to = ReplyTo,
                        request = RawRequest},
 
@@ -646,9 +648,30 @@ handle_leader_request_result(Ref, Result, State, Data) ->
             cancel_request_timer(Request),
             {NewData, Effects} = maybe_update_serials(Request, State, NewData0),
             {from, From} = ReplyTo,
-            {keep_state, NewData, [{reply, From, Result} | Effects]};
+
+            case leader_request_sync_revision(Request, Result, From, NewData) of
+                {reply, Reply} ->
+                    {keep_state, NewData, [{reply, From, Reply} | Effects]};
+                {noreply, FinalData} ->
+                    {keep_state, FinalData, Effects}
+            end;
         no_request ->
             keep_state_and_data
+    end.
+
+leader_request_sync_revision(Request, Result, From, Data) ->
+    case Request#request.request of
+        {command, _, _, _, _, _} ->
+            case Result of
+                {ok, Revision, Reply} ->
+                    Deadline = Request#request.deadline,
+                    do_handle_sync_revision({ok, Reply},
+                                            Revision, Deadline, From, Data);
+                _ ->
+                    {reply, Result}
+            end;
+        _Other ->
+            {reply, Result}
     end.
 
 handle_leader_down(State, #data{leader_last_retry = LastRetry,
@@ -1004,22 +1027,29 @@ handle_get_local_revision(From, _State,
                                 applied_seqno = Seqno}) ->
     {keep_state_and_data, {reply, From, {HistoryId, Seqno}}}.
 
-handle_sync_revision({_, Seqno} = Revision, Deadline, From,
-                     _State,
-                     #data{read_seqno = ReadSeqno,
-                           config = Config} = Data) ->
+handle_sync_revision(Revision, Deadline, From, _State, Data) ->
+    case do_handle_sync_revision(ok, Revision, Deadline, From, Data) of
+        {reply, Reply} ->
+            {keep_state_and_data, {reply, From, Reply}};
+        {noreply, NewData} ->
+            {keep_state, NewData}
+    end.
+
+do_handle_sync_revision(OkReply, {_, Seqno} = Revision, Deadline, From,
+                        #data{read_seqno = ReadSeqno, config = Config} =
+                            Data) ->
     case check_revision_compatible(Revision, ReadSeqno, Config) of
         ok ->
             case Seqno =< ReadSeqno of
                 true ->
-                    {keep_state_and_data, {reply, From, ok}};
+                    {reply, OkReply};
                 false ->
-                    {keep_state,
-                     sync_revision_add_request(Seqno, Revision,
-                                               Deadline, From, Data)}
+                    {noreply,
+                     sync_revision_add_request(OkReply, Seqno,
+                                               Revision, Deadline, From, Data)}
             end;
         {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
+            {reply, Error}
     end.
 
 check_revision_compatible(Revision, HighSeqno, Config) ->
@@ -1030,11 +1060,11 @@ check_revision_compatible(Revision, HighSeqno, Config) ->
             {error, {history_mismatch, Info}}
     end.
 
-sync_revision_add_request(Seqno, Revision, Deadline, From,
+sync_revision_add_request(OkReply, Seqno, Revision, Deadline, From,
                           #data{sync_revision_requests = Requests} = Data) ->
     Request = {Seqno, make_ref()},
     TRef = sync_revision_start_timer(Request, Deadline),
-    RequestData = {From, TRef, Revision},
+    RequestData = {From, TRef, Revision, OkReply},
     NewRequests = gb_trees:insert(Request, RequestData, Requests),
     Data#data{sync_revision_requests = NewRequests}.
 
@@ -1067,11 +1097,18 @@ sync_revision_requests_reply_loop(Seqno, Config, Requests) ->
             Requests;
         false ->
             {{ReqSeqno, _} = Request,
-             {_, _, Revision} = RequestData, NewRequests} =
+             {_, _, Revision, OkReply} = RequestData, NewRequests} =
                 gb_trees:take_smallest(Requests),
             case ReqSeqno =< Seqno of
                 true ->
-                    Reply = check_revision_compatible(Revision, Seqno, Config),
+                    Reply =
+                        case check_revision_compatible(Revision,
+                                                       Seqno, Config) of
+                            ok ->
+                                OkReply;
+                            Other ->
+                                Other
+                        end,
                     sync_revision_request_reply(Request, RequestData, Reply),
                     sync_revision_requests_reply_loop(Seqno,
                                                       Config, NewRequests);
@@ -1080,7 +1117,7 @@ sync_revision_requests_reply_loop(Seqno, Config, Requests) ->
             end
     end.
 
-sync_revision_request_reply(Request, {From, TRef, _Revision}, Reply) ->
+sync_revision_request_reply(Request, {From, TRef, _Revision, _}, Reply) ->
     sync_revision_cancel_timer(Request, TRef),
     gen_statem:reply(From, Reply).
 
@@ -1090,7 +1127,7 @@ sync_revision_drop_diverged_requests(#data{read_seqno = ReadSeqno,
                                          Data) ->
     NewRequests =
         chronicle_utils:gb_trees_filter(
-          fun (Request, {_, _, Revision} = RequestData) ->
+          fun (Request, {_, _, Revision, _} = RequestData) ->
                   case check_revision_compatible(Revision,
                                                  ReadSeqno, Config) of
                       ok ->
@@ -1104,18 +1141,22 @@ sync_revision_drop_diverged_requests(#data{read_seqno = ReadSeqno,
 
     Data#data{sync_revision_requests = NewRequests}.
 
+sync_revision_start_timer(_Request, infinity) ->
+    undefined;
 sync_revision_start_timer(Request, Deadline) ->
     erlang:send_after(Deadline, self(),
                       {?RSM_TAG, sync_revision_timeout, Request},
                       [{abs, true}]).
 
+sync_revision_cancel_timer(_, undefined) ->
+    ok;
 sync_revision_cancel_timer(Request, TRef) ->
     _ = erlang:cancel_timer(TRef),
     ?FLUSH({?RSM_TAG, sync_revision_timeout, Request}).
 
 handle_sync_revision_timeout(Request, _State,
                              #data{sync_revision_requests = Requests} = Data) ->
-    {{From, _, _}, NewRequests} = gb_trees:take(Request, Requests),
+    {{From, _, _, _}, NewRequests} = gb_trees:take(Request, Requests),
     gen_statem:reply(From, {error, timeout}),
     {keep_state, Data#data{sync_revision_requests = NewRequests}}.
 
@@ -1209,7 +1250,7 @@ apply_command(RSMCommand, AppliedRevision, Revision, Replies,
                                        Revision, AppliedRevision,
                                        ModState, ModData) of
                     {reply, Reply0, NewModState0, NewModData0} ->
-                        Reply1 = {ok, Reply0},
+                        Reply1 = {ok, Revision, Reply0},
                         Replies0 = [{Id, Reply1} | Replies],
                         {{reply, Reply1}, Replies0,
                          NewModState0, NewModData0};

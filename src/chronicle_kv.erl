@@ -269,14 +269,9 @@ txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
                 {extra, ActualExtra} ->
                     {ok, Revision, ActualExtra}
             end;
-        {error, {conflict, Revision}} ->
+        {error, {conflict, _Revision}} ->
             case Retries > 0 of
                 true ->
-                    %% The following should normally hit the fast path. So it
-                    %% shouldn't be a big deal that we're doing this
-                    %% "redundant" sync.
-                    chronicle_rsm:sync_revision(Name, Revision, TRef),
-
                     %% Don't trigger extra synchronization when retrying.
                     NewOpts = Opts#{read_consistency => local},
 
@@ -614,27 +609,7 @@ handle_read_consistency(Name, Timeout, Opts) ->
 
 submit_command(Name, Command, Timeout) ->
     TRef = start_timeout(Timeout),
-    Result = chronicle_rsm:command(Name, Command, TRef),
-    wait_for_result_revision(Name, Result, TRef),
-    Result.
-
-wait_for_result_revision(Name, Result, TRef) ->
-    case get_result_revision(Result) of
-        {ok, Revision} ->
-            chronicle_rsm:sync_revision(Name, Revision, TRef);
-        no_revision ->
-            ok
-    end.
-
-get_result_revision(Result) ->
-    case Result of
-        {ok, Revision} ->
-            {ok, Revision};
-        {error, {conflict, Revision}} ->
-            {ok, Revision};
-        _Other ->
-            no_revision
-    end.
+    chronicle_rsm:command(Name, Command, TRef).
 
 handle_rewrite(Fun, StateRevision, State, Data) ->
     Updates =
