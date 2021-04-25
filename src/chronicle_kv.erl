@@ -60,8 +60,7 @@
 
 -type read_consistency() :: local | quorum.
 -type options() :: #{timeout => timeout(),
-                     read_consistency => read_consistency(),
-                     read_own_writes => boolean()}.
+                     read_consistency => read_consistency()}.
 -type op_result() :: {ok, revision()}
                    | {error, {conflict, revision()}}.
 
@@ -90,7 +89,7 @@ add(Name, Key, Value) ->
 
 -spec add(name(), key(), value(), options()) -> op_result().
 add(Name, Key, Value, Opts) ->
-    submit_command(Name, {add, Key, Value}, get_timeout(Opts), Opts).
+    submit_command(Name, {add, Key, Value}, get_timeout(Opts)).
 
 -spec set(name(), key(), value()) -> op_result().
 set(Name, Key, Value) ->
@@ -104,7 +103,7 @@ set(Name, Key, Value, ExpectedRevision) ->
 set(Name, Key, Value, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {set, Key, Value, ExpectedRevision},
-                   get_timeout(Opts), Opts).
+                   get_timeout(Opts)).
 
 -type update_result() :: {ok, revision()}
                        | {error, not_found | exceeded_retries}.
@@ -138,7 +137,7 @@ delete(Name, Key, ExpectedRevision) ->
 delete(Name, Key, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
-                   get_timeout(Opts), Opts).
+                   get_timeout(Opts)).
 
 -type multi_ops() :: [multi_op()].
 -type multi_op() :: {add, key(), value()}
@@ -154,7 +153,7 @@ multi(Name, Updates) ->
 -spec multi(name(), multi_ops(), options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
-    submit_transaction(Name, TxnConditions, TxnUpdates, Opts).
+    submit_transaction(Name, TxnConditions, TxnUpdates, get_timeout(Opts)).
 
 multi_to_txn(Updates) ->
     multi_to_txn_loop(Updates, [], []).
@@ -262,7 +261,7 @@ txn_loop(Name, Fun, Opts, TRef, Retries) ->
     end.
 
 txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
-    case submit_transaction(Name, Conditions, Updates, TRef, Opts) of
+    case submit_transaction(Name, Conditions, Updates, TRef) of
         {ok, Revision} = Ok ->
             case Extra of
                 no_extra ->
@@ -273,9 +272,9 @@ txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
         {error, {conflict, Revision}} ->
             case Retries > 0 of
                 true ->
-                    %% If read_own_writes is true, the following should
-                    %% normally hit the fast path. So it shouldn't be a big
-                    %% deal that we're doing this "redundant" sync.
+                    %% The following should normally hit the fast path. So it
+                    %% shouldn't be a big deal that we're doing this
+                    %% "redundant" sync.
                     chronicle_rsm:sync_revision(Name, Revision, TRef),
 
                     %% Don't trigger extra synchronization when retrying.
@@ -316,11 +315,8 @@ prepare_txn_fast(Name, Fun) ->
             use_slow_path
     end.
 
-submit_transaction(Name, Conditions, Updates, Opts) ->
-    submit_transaction(Name, Conditions, Updates, get_timeout(Opts), Opts).
-
-submit_transaction(Name, Conditions, Updates, Timeout, Opts) ->
-    submit_command(Name, {transaction, Conditions, Updates}, Timeout, Opts).
+submit_transaction(Name, Conditions, Updates, Timeout) ->
+    submit_command(Name, {transaction, Conditions, Updates}, Timeout).
 
 -type ro_txn_fun() :: fun ((txn_opaque()) -> TxnResult::any()).
 -type ro_txn_result() :: {ok, {TxnResult::any(), revision()}}.
@@ -396,7 +392,7 @@ rewrite(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     case submit_query(Name, {rewrite, Fun}, TRef, Opts) of
         {ok, Conditions, Updates} ->
-            submit_transaction(Name, Conditions, Updates, TRef, Opts);
+            submit_transaction(Name, Conditions, Updates, TRef);
         {error, _} = Error ->
             Error
     end.
@@ -616,32 +612,27 @@ handle_read_consistency(Name, Timeout, Opts) ->
     Consistency = maps:get(read_consistency, Opts, local),
     sync(Name, Consistency, Timeout).
 
-submit_command(Name, Command, Timeout, Opts) ->
+submit_command(Name, Command, Timeout) ->
     TRef = start_timeout(Timeout),
     Result = chronicle_rsm:command(Name, Command, TRef),
-    handle_read_own_writes(Name, Result, TRef, Opts),
+    wait_for_result_revision(Name, Result, TRef),
     Result.
 
-handle_read_own_writes(Name, Result, TRef, Opts) ->
-    case get_read_own_writes_revision(Result, Opts) of
+wait_for_result_revision(Name, Result, TRef) ->
+    case get_result_revision(Result) of
         {ok, Revision} ->
             chronicle_rsm:sync_revision(Name, Revision, TRef);
         no_revision ->
             ok
     end.
 
-get_read_own_writes_revision(Result, Opts) ->
-    case maps:get(read_own_writes, Opts, true) of
-        true ->
-            case Result of
-                {ok, Revision} ->
-                    {ok, Revision};
-                {error, {conflict, Revision}} ->
-                    {ok, Revision};
-                _Other ->
-                    no_revision
-            end;
-        false ->
+get_result_revision(Result) ->
+    case Result of
+        {ok, Revision} ->
+            {ok, Revision};
+        {error, {conflict, Revision}} ->
+            {ok, Revision};
+        _Other ->
             no_revision
     end.
 
