@@ -736,6 +736,11 @@ maybe_resolve_branch(#data{high_seqno = HighSeqno,
                         high_seqno = CommittedSeqno,
                         pending_entries = NewPendingEntries},
 
+    %% Peer statuses are acquired before we know the final committed
+    %% seqno. Since we are dropping any writes that were not known to be
+    %% committed, the peer statuses need to also be adjusted accordingly.
+    rollback_peers(CommittedSeqno, Branch#branch.peers, NewData),
+
     %% Note, that the new config may be based on an uncommitted config that
     %% will get truncated from the history. This can be confusing and it's
     %% possible to deal with this situation better. But for the time being I
@@ -1443,6 +1448,36 @@ set_peer_active(Peer, PeerStatus, HighSeqno, CommittedSeqno, Data) ->
                       sent_commit_seqno = CommittedSeqno,
                       state = active},
     put_peer_status(Peer, NewPeerStatus, Data).
+
+rollback_peers(Seqno, Peers, Data) ->
+    lists:foreach(
+      fun (Peer) ->
+              case get_peer_status(Peer, Data) of
+                  {ok, #peer_status{
+                          state = active,
+                          sent_seqno = HighSeqno,
+                          acked_seqno = AckedHighSeqno,
+                          sent_commit_seqno = CommittedSeqno,
+                          acked_commit_seqno = AckedCommittedSeqno} = Status} ->
+                      true = (CommittedSeqno =< Seqno),
+                      true = (HighSeqno =:= AckedHighSeqno),
+                      true = (CommittedSeqno =:= AckedCommittedSeqno),
+
+                      case HighSeqno > Seqno of
+                          true ->
+                              ?DEBUG("Rolling back peer ~w "
+                                     "high seqno from ~b to ~b",
+                                     [Peer, HighSeqno, Seqno]),
+
+                              set_peer_active(Peer, Status,
+                                              Seqno, CommittedSeqno, Data);
+                          false ->
+                              ok
+                      end;
+                  _ ->
+                      ok
+              end
+      end, Peers).
 
 set_peer_sent_seqnos(Peer, HighSeqno, CommittedSeqno, Data) ->
     update_peer_status(
