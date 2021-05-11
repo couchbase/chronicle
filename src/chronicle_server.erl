@@ -807,6 +807,51 @@ leader_transfer_test__(Nodes) ->
 
     ok.
 
+failover_recovery_test_() ->
+    Nodes = [a, b, c],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 10, fun () -> failover_recovery_test__(Nodes) end}}.
+
+failover_recovery_test__(Nodes) ->
+    [Node|RestNodes] = Nodes,
+    ok = rpc_node(a,
+                  fun () ->
+                               chronicle:provision([{kv, chronicle_kv, []}])
+                  end),
+    add_voters(Node, RestNodes),
+    ok = rpc_node(Node,
+                  fun () ->
+                          {ok, _} = chronicle_kv:add(kv, a, 42),
+                          ok
+                  end),
+
+    lists:foreach(
+      fun (OtherNode) ->
+              ok = vnet:disconnect(Node, OtherNode)
+      end, RestNodes),
+
+    {exit, timeout} =
+        rpc_node(Node,
+                 fun () ->
+                         try
+                             chronicle_kv:add(kv, b, 84,
+                                              #{timeout => 100})
+                         catch
+                             T:E ->
+                                 {T, E}
+                         end
+                 end),
+
+    ok = rpc_node(Node,
+                  fun () ->
+                          ok = chronicle:failover([Node]),
+                          {ok, {42, _}} = chronicle_kv:get(kv, a),
+                          {error, not_found} = chronicle_kv:get(kv, b),
+                          ok
+                  end).
+
 reprovision_test_() ->
     Nodes = [a],
     {setup,
