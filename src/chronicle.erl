@@ -392,9 +392,11 @@ unset_setting(Name, Timeout) ->
               maps:remove(Name, Settings)
       end, Timeout).
 
+-spec replace_settings(map()) -> ok.
 replace_settings(Settings) ->
     replace_settings(Settings, ?DEFAULT_TIMEOUT).
 
+-spec replace_settings(map(), timeout()) -> ok.
 replace_settings(Settings, Timeout) ->
     update_settings(
       fun (_) ->
