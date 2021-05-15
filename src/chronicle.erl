@@ -280,7 +280,7 @@ set_peer_roles(Lock, Peers) ->
 set_peer_roles(Lock, Peers, Timeout) ->
     chronicle_config_rsm:set_peer_roles(Lock, Peers, Timeout).
 
--type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
+-type get_peers_result() :: #{voters := peers(), replicas := peers()}.
 
 -spec get_peers() -> get_peers_result().
 get_peers() ->
@@ -292,29 +292,29 @@ get_peers(Timeout) ->
                fun (Config, _ConfigRevision) ->
                        Voters = chronicle_config:get_voters(Config),
                        Replicas = chronicle_config:get_replicas(Config),
-                       {ok, #{voters => Voters, replicas => Replicas}}
+                       #{voters => Voters, replicas => Replicas}
                end).
 
--spec get_voters() -> {ok, peers()}.
+-spec get_voters() -> peers().
 get_voters() ->
     get_voters(?DEFAULT_TIMEOUT).
 
--spec get_voters(timeout()) -> {ok, peers()}.
+-spec get_voters(timeout()) -> peers().
 get_voters(Timeout) ->
     get_config(Timeout,
                fun (Config, _ConfigRevision) ->
-                       {ok, chronicle_config:get_voters(Config)}
+                       chronicle_config:get_voters(Config)
                end).
 
--spec get_replicas() -> {ok, peers()}.
+-spec get_replicas() -> peers().
 get_replicas() ->
     get_replicas(?DEFAULT_TIMEOUT).
 
--spec get_replicas(timeout()) -> {ok, peers()}.
+-spec get_replicas(timeout()) -> peers().
 get_replicas(Timeout) ->
     get_config(Timeout,
                fun (Config, _ConfigRevision) ->
-                       {ok, chronicle_config:get_replicas(Config)}
+                       chronicle_config:get_replicas(Config)
                end).
 
 -spec get_cluster_info() -> cluster_info().

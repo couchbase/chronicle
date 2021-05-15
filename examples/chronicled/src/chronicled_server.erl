@@ -134,7 +134,7 @@ json_api(Req, #state{domain=kv, op=put}=State) ->
     {Result, Req1, State}.
 
 config_api(Req, #state{domain=config, op=info}) ->
-    {ok, Peers} = chronicle:get_peers(),
+    Peers = chronicle:get_peers(),
     reply_json(200, Peers, Req);
 config_api(Req, #state{domain=config, op={addnode, Type}}) ->
     {ok, Body, Req1} = cowboy_req:read_body(Req),
@@ -358,19 +358,16 @@ remove_nodes(Nodes) ->
     end.
 
 get_present_nodes() ->
-    {ok, #{voters := Voters, replicas := Replicas}} = chronicle:get_peers(),
+    #{voters := Voters, replicas := Replicas} = chronicle:get_peers(),
     Voters ++ Replicas.
 
 get_nodes_of_type(Type) ->
-    {ok, Nodes} =
-        case Type of
-            voter ->
-                chronicle:get_voters();
-            replica ->
-                chronicle:get_replicas()
-        end,
-
-    Nodes.
+    case Type of
+        voter ->
+            chronicle:get_voters();
+        replica ->
+            chronicle:get_replicas()
+    end.
 
 do_add_nodes(Nodes, Type) ->
     case Type of

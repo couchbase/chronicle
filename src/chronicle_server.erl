@@ -619,7 +619,7 @@ simple_test__(Nodes) ->
     ok = rpc_node(a,
                   fun () ->
                           ok = chronicle:remove_peer(d),
-                          {ok, Voters} = chronicle:get_voters(),
+                          Voters = chronicle:get_voters(),
                           ?DEBUG("Voters: ~p", [Voters]),
 
                           ok = chronicle_failover:failover([a, b],
