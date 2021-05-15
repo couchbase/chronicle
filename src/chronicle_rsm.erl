@@ -1155,7 +1155,8 @@ sync_revision_cancel_timer(_, undefined) ->
     ok;
 sync_revision_cancel_timer(Request, TRef) ->
     _ = erlang:cancel_timer(TRef),
-    ?FLUSH({?RSM_TAG, sync_revision_timeout, Request}).
+    ?FLUSH({?RSM_TAG, sync_revision_timeout, Request}),
+    ok.
 
 handle_sync_revision_timeout(Request, _State,
                              #data{sync_revision_requests = Requests} = Data) ->
