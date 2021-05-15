@@ -40,8 +40,7 @@
 %% unusable.
 -export([set_setting/2, set_setting/3,
          unset_setting/1, unset_setting/2,
-         replace_settings/1, replace_settings/2,
-         update_settings/1, update_settings/2]).
+         replace_settings/1, replace_settings/2]).
 
 -export_type([uuid/0, peer/0, peer_id/0,
               history_id/0, history_log/0,
@@ -140,18 +139,7 @@ acquire_lock() ->
 
 -spec acquire_lock(timeout()) -> acquire_lock_result().
 acquire_lock(Timeout) ->
-    Lock = chronicle_utils:random_uuid(),
-    Result = update_config(
-               fun (Config) ->
-                       {ok, chronicle_config:set_lock(Lock, Config)}
-               end, Timeout),
-
-    case Result of
-        ok ->
-            {ok, Lock};
-        _ ->
-            Result
-    end.
+    chronicle_config_rsm:acquire_lock(Timeout).
 
 -type no_voters_left_error() :: no_voters_left.
 -type lock_revoked_error() ::
@@ -183,11 +171,7 @@ remove_peers(Lock, Peers) ->
 
 -spec remove_peers(lockreq(), peers(), timeout()) -> remove_peers_result().
 remove_peers(Lock, Peers, Timeout) ->
-    validate_peers(Peers),
-    update_config(
-      fun (Config) ->
-              chronicle_config:remove_peers(Peers, Config)
-      end, Lock, Timeout).
+    chronicle_config_rsm:remove_peers(Lock, Peers, Timeout).
 
 -spec add_voter(peer()) -> add_peers_result().
 add_voter(Peer) ->
@@ -263,11 +247,7 @@ add_peers(Lock, Peers) ->
 
 -spec add_peers(lockreq(), peers_and_roles(), timeout()) -> add_peers_result().
 add_peers(Lock, Peers, Timeout) ->
-    validate_peers_and_roles(Peers),
-    update_config(
-      fun (Config) ->
-              chronicle_config:add_peers(Peers, Config)
-      end, Lock, Timeout).
+    chronicle_config_rsm:add_peers(Lock, Peers, Timeout).
 
 -type set_peer_roles_result() :: ok | {error, set_peer_roles_error()}.
 -type set_peer_roles_error() :: lock_revoked_error()
@@ -298,11 +278,7 @@ set_peer_roles(Lock, Peers) ->
 -spec set_peer_roles(lockreq(), peers_and_roles(), timeout()) ->
           set_peer_roles_result().
 set_peer_roles(Lock, Peers, Timeout) ->
-    validate_peers_and_roles(Peers),
-    update_config(
-      fun (Config) ->
-              chronicle_config:set_peer_roles(Peers, Config)
-      end, Lock, Timeout).
+    chronicle_config_rsm:set_peer_roles(Lock, Peers, Timeout).
 
 -type get_peers_result() :: {ok, #{voters := peers(), replicas := peers()}}.
 
@@ -376,10 +352,7 @@ set_setting(Name, Value) ->
 
 -spec set_setting(term(), term(), timeout()) -> ok.
 set_setting(Name, Value, Timeout) ->
-    update_settings(
-      fun (Settings) ->
-              maps:put(Name, Value, Settings)
-      end, Timeout).
+    chronicle_config_rsm:set_settings(#{Name => Value}, Timeout).
 
 -spec unset_setting(term()) -> ok.
 unset_setting(Name) ->
@@ -387,10 +360,7 @@ unset_setting(Name) ->
 
 -spec unset_setting(term(), timeout()) -> ok.
 unset_setting(Name, Timeout) ->
-    update_settings(
-      fun (Settings) ->
-              maps:remove(Name, Settings)
-      end, Timeout).
+    chronicle_config_rsm:unset_settings([Name], Timeout).
 
 -spec replace_settings(map()) -> ok.
 replace_settings(Settings) ->
@@ -398,24 +368,7 @@ replace_settings(Settings) ->
 
 -spec replace_settings(map(), timeout()) -> ok.
 replace_settings(Settings, Timeout) ->
-    update_settings(
-      fun (_) ->
-              Settings
-      end, Timeout).
-
--type update_settings_fun() :: fun ((map()) -> map()).
-
--spec update_settings(update_settings_fun()) -> ok.
-update_settings(Fun) ->
-    update_settings(Fun, ?DEFAULT_TIMEOUT).
-
--spec update_settings(update_settings_fun(), timeout()) -> ok.
-update_settings(Fun, Timeout) ->
-    update_config(
-      fun (Config) ->
-              NewSettings = Fun(chronicle_config:get_settings(Config)),
-              {ok, chronicle_config:set_settings(NewSettings, Config)}
-      end, Timeout).
+    chronicle_config_rsm:replace_settings(Settings, Timeout).
 
 %% internal
 get_config(Timeout, Fun) ->
@@ -424,83 +377,4 @@ get_config(Timeout, Fun) ->
             Fun(Config, ConfigRevision);
         {error, _} = Error ->
             Error
-    end.
-
-update_config(Fun, Timeout) ->
-    update_config(Fun, unlocked, Timeout).
-
-update_config(Fun, Lock, Timeout) ->
-    TRef = chronicle_utils:start_timeout(Timeout),
-    update_config_loop(Fun, Lock, TRef).
-
-update_config_loop(Fun, Lock, TRef) ->
-    validate_lock(Lock),
-    get_config(
-      TRef,
-      fun (Config, ConfigRevision) ->
-              case chronicle_config:check_lock(Lock, Config) of
-                  ok ->
-                      case Fun(Config) of
-                          {ok, NewConfig} ->
-                              case cas_config(NewConfig,
-                                              ConfigRevision, TRef) of
-                                  {ok, _} ->
-                                      ok;
-                                  {error, {cas_failed, _}} ->
-                                      update_config_loop(Fun, Lock, TRef);
-                                  {error, {invalid_config, _} = Error} ->
-                                      error(Error);
-                                  {error, _} = Error ->
-                                      Error
-                              end;
-                          {error, _} = Error ->
-                              Error
-                      end;
-                  {error, _} = Error ->
-                      Error
-              end
-      end).
-
-cas_config(NewConfig, CasRevision, TRef) ->
-    chronicle_config_rsm:cas_config(NewConfig, CasRevision, TRef).
-
-validate_peers(Peers) ->
-    lists:foreach(
-      fun (Peer) ->
-              case is_atom(Peer) of
-                  true ->
-                      ok;
-                  false ->
-                      error(badarg)
-              end
-      end, Peers).
-
-validate_peers_and_roles(PeerRoles) ->
-    Peers = [Peer || {Peer, _} <- PeerRoles],
-    validate_peers(Peers),
-    case lists:usort(Peers) =:= lists:sort(Peers) of
-        true ->
-            ok;
-        false ->
-            error(badarg)
-    end,
-
-    lists:foreach(
-      fun ({_Peer, Role}) ->
-              case lists:member(Role, [replica, voter]) of
-                  true ->
-                      ok;
-                  false ->
-                      error(badarg)
-              end
-      end, PeerRoles).
-
-validate_lock(Lock) ->
-    case Lock of
-        unlocked ->
-            ok;
-        _ when is_binary(Lock) ->
-            ok;
-        _ ->
-            error(badarg)
     end.
