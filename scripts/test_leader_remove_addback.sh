@@ -42,7 +42,7 @@ wipe() {
 addback() {
     local port=$(( 8080 + $1 ))
     curl --fail -s -XPOST -H "Content-Type: applycation/json" \
-         127.0.0.1:$port/config/addnode
+         127.0.0.1:$port/config/addnode \
          -d "\"chronicle_$2@127.0.0.1\"" > /dev/null
 }
 
