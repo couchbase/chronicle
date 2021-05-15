@@ -288,12 +288,7 @@ get_peers() ->
 
 -spec get_peers(timeout()) -> get_peers_result().
 get_peers(Timeout) ->
-    get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       Voters = chronicle_config:get_voters(Config),
-                       Replicas = chronicle_config:get_replicas(Config),
-                       #{voters => Voters, replicas => Replicas}
-               end).
+    chronicle_config_rsm:get_peers(Timeout).
 
 -spec get_voters() -> peers().
 get_voters() ->
@@ -301,10 +296,8 @@ get_voters() ->
 
 -spec get_voters(timeout()) -> peers().
 get_voters(Timeout) ->
-    get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       chronicle_config:get_voters(Config)
-               end).
+    #{voters := Voters} = get_peers(Timeout),
+    Voters.
 
 -spec get_replicas() -> peers().
 get_replicas() ->
@@ -312,10 +305,8 @@ get_replicas() ->
 
 -spec get_replicas(timeout()) -> peers().
 get_replicas(Timeout) ->
-    get_config(Timeout,
-               fun (Config, _ConfigRevision) ->
-                       chronicle_config:get_replicas(Config)
-               end).
+    #{replicas := Replicas} = get_peers(Timeout),
+    Replicas.
 
 -spec get_cluster_info() -> cluster_info().
 get_cluster_info() ->
@@ -369,12 +360,3 @@ replace_settings(Settings) ->
 -spec replace_settings(map(), timeout()) -> ok.
 replace_settings(Settings, Timeout) ->
     chronicle_config_rsm:replace_settings(Settings, Timeout).
-
-%% internal
-get_config(Timeout, Fun) ->
-    case chronicle_config_rsm:get_config(Timeout) of
-        {ok, Config, ConfigRevision} ->
-            Fun(Config, ConfigRevision);
-        {error, _} = Error ->
-            Error
-    end.

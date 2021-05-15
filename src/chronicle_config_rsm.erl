@@ -17,7 +17,7 @@
 
 -include("chronicle.hrl").
 
--export([get_config/1, get_cluster_info/1, query/2, check_quorum/1]).
+-export([get_config/1, get_cluster_info/1, get_peers/1, check_quorum/1]).
 -export([acquire_lock/1, remove_peers/3, add_peers/3, set_peer_roles/3,
          set_settings/2, replace_settings/2, unset_settings/2]).
 
@@ -39,6 +39,9 @@ get_config(Timeout) ->
 
 get_cluster_info(Timeout) ->
     query(get_cluster_info, Timeout).
+
+get_peers(Timeout) ->
+    query(get_peers, Timeout).
 
 query(Query, Timeout) ->
     TRef = chronicle_utils:start_timeout(Timeout),
@@ -165,6 +168,11 @@ handle_query(get_config, _, #state{config = ConfigEntry}, Data) ->
     Config = ConfigEntry#log_entry.value,
     Revision = chronicle_utils:log_entry_revision(ConfigEntry),
     {reply, {ok, Config, Revision}, Data};
+handle_query(get_peers, _, #state{config = ConfigEntry}, Data) ->
+    Config = ConfigEntry#log_entry.value,
+    Voters = chronicle_config:get_voters(Config),
+    Replicas = chronicle_config:get_replicas(Config),
+    {reply, #{voters => Voters, replicas => Replicas}, Data};
 handle_query(get_cluster_info, {HistoryId, Seqno}, State, Data) ->
     #state{config = ConfigEntry} = State,
     Info = #{history_id => HistoryId,
