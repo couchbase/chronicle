@@ -235,35 +235,24 @@ multi_call(Peers, Name, Request, Timeout) ->
                  timeout()) ->
           multi_call_result().
 multi_call(Peers, Name, Request, OkPred, Timeout) ->
-    Tag = make_ref(),
     Parent = self(),
-    {_, MRef} =
-        spawn_monitor(
-          fun () ->
-                  ParentMRef = erlang:monitor(process, Parent),
-                  TRef = make_ref(),
 
-                  case Timeout of
-                      infinity ->
-                          ok;
-                      _ when is_integer(Timeout) ->
-                          erlang:send_after(Timeout, self(), TRef),
-                          ok
-                  end,
+    run_on_process(
+      fun () ->
+              ParentMRef = erlang:monitor(process, Parent),
+              TRef = make_ref(),
 
-                  Refs = multi_call_send(Peers, Name, Request),
-                  Result = multi_call_recv(Refs, ParentMRef,
-                                           TRef, OkPred, #{}, #{}),
-                  Parent ! {Tag, Result}
-          end),
+              case Timeout of
+                  infinity ->
+                      ok;
+                  _ when is_integer(Timeout) ->
+                      erlang:send_after(Timeout, self(), TRef),
+                      ok
+              end,
 
-    receive
-        {Tag, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, _, _, Reason} ->
-            exit(Reason)
-    end.
+              Refs = multi_call_send(Peers, Name, Request),
+              multi_call_recv(Refs, ParentMRef, TRef, OkPred, #{}, #{})
+      end).
 
 multi_call_send(Peers, Name, Request) ->
     lists:foldl(
