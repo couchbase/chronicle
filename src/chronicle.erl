@@ -35,6 +35,7 @@
          remove_peer/1, remove_peer/2, remove_peers/1, remove_peers/2]).
 -export([set_peer_role/2, set_peer_role/3, set_peer_role/4,
          set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
+-export([switch_compat_version/0, switch_compat_version/1]).
 
 %% For internal use only currently. Changing these may render chronicle
 %% unusable.
@@ -58,6 +59,7 @@
 -type peers_and_roles() :: [{peer(), role()}].
 -type history_id() :: binary().
 -type history_log() :: [{history_id(), seqno()}].
+-type compat_version() :: non_neg_integer().
 
 -type leader_term() :: {non_neg_integer(), peer()}.
 -type seqno() :: non_neg_integer().
@@ -360,3 +362,34 @@ replace_settings(Settings) ->
 -spec replace_settings(map(), timeout()) -> ok.
 replace_settings(Settings, Timeout) ->
     chronicle_config_rsm:replace_settings(Settings, Timeout).
+
+-type switch_compat_version_result() ::
+        {ok,
+         OldVersion::chronicle:compat_version(),
+         NewVersion::chronicle:compat_version()} |
+        {error, switch_compat_version_error()}.
+-type switch_compat_version_error() ::
+        lock_revoked_error() |
+        {get_peer_infos_failed,
+         #{chronicle:peer() => Error::any()}}.
+
+-spec switch_compat_version() -> switch_compat_version_result().
+switch_compat_version() ->
+    switch_compat_version(unlocked).
+
+-spec switch_compat_version(lockreq()) -> switch_compat_version_result().
+switch_compat_version(Lock) ->
+    #{voters := Voters, replicas := Replicas} = get_peers(),
+    Peers = Voters ++ Replicas,
+    case chronicle_agent:get_peer_infos(Peers) of
+        {ok, Infos0} ->
+            Infos = maps:values(Infos0),
+            Versions = [maps:get(supported_compat_version, Info) ||
+                           Info <- Infos],
+
+            SupportedVersion = lists:min(Versions),
+            chronicle_config_rsm:set_compat_version(Lock, SupportedVersion,
+                                                    ?DEFAULT_TIMEOUT);
+        {error, Failed} ->
+            {error, {get_peer_infos_failed, Failed}}
+    end.

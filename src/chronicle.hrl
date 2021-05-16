@@ -37,6 +37,8 @@
 -define(NO_TERM, {0, ?NO_PEER}).
 -define(NO_SEQNO, 0).
 
+-define(COMPAT_VERSION, 0).
+
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
 
@@ -56,6 +58,8 @@
                  opaque :: any()}).
 
 -record(config, { request_id :: any(),
+
+                  compat_version :: chronicle:compat_version(),
                   lock :: undefined | binary(),
                   peers :: chronicle_config:peers(),
                   old_peers :: undefined | chronicle_config:peers(),

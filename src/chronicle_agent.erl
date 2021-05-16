@@ -22,6 +22,7 @@
 -export([start_link/0]).
 -export([server_ref/2, monitor/1,
          get_system_state/0, get_metadata/0,
+         get_peer_info/0, get_peer_infos/1,
          check_grant_vote/2,
          get_info_for_rsm/1, save_rsm_snapshot/3, get_rsm_snapshot/1,
          get_full_snapshot/1, release_snapshot/1,
@@ -59,6 +60,9 @@
 -define(NAME, ?MODULE).
 -define(SERVER, ?SERVER_NAME(?NAME)).
 -define(SERVER(Peer), ?SERVER_NAME(Peer, ?NAME)).
+
+-define(GET_PEER_INFO_TIMEOUT,
+        chronicle_settings:get({agent, get_peer_info_timeout}, 15000)).
 
 -define(PROVISION_TIMEOUT,
         chronicle_settings:get({agent, provision_timeout}, 10000)).
@@ -159,6 +163,42 @@ get_metadata() ->
             Metadata;
         _ ->
             exit(not_provisioned)
+    end.
+
+-type peer_info() :: #{peer := chronicle:peer(),
+                       peer_id := chronicle:peer_id(),
+                       supported_compat_version := chronicle:compat_version()}.
+-type get_peer_info_error() :: {error, not_initialized}.
+-type get_peer_info_result() :: {ok, peer_info()} | get_peer_info_error().
+
+-spec get_peer_info() -> get_peer_info_result().
+get_peer_info() ->
+    call(?SERVER, get_peer_info, ?GET_PEER_INFO_TIMEOUT).
+
+-spec get_peer_infos([chronicle:peer()]) ->
+          {ok, #{chronicle:peer() => peer_info()}} |
+          {error, #{chronicle:peer() => get_peer_info_error()}}.
+get_peer_infos(Peers) ->
+    {Good, Bad} =
+        chronicle_utils:multi_call(Peers, ?NAME,
+                                   get_peer_info,
+                                   fun (Result) ->
+                                           case Result of
+                                               {ok, _} ->
+                                                   true;
+                                               _ ->
+                                                   false
+                                           end
+                                   end,
+                                   ?GET_PEER_INFO_TIMEOUT),
+
+    case maps:size(Bad) =:= 0 of
+        true ->
+            {ok, maps:map(fun (_Peer, {ok, Info}) ->
+                                  Info
+                          end, Good)};
+        false ->
+            {error, Bad}
     end.
 
 -type check_grant_error() :: {bad_state, not_provisioned | removed}
@@ -411,7 +451,10 @@ wipe() ->
 -type prepare_join_result() :: ok | {error, prepare_join_error()}.
 -type prepare_join_error() :: provisioned
                             | joining_cluster
-                            | {bad_cluster_info, any()}.
+                            | {bad_cluster_info, any()}
+                            | {unsupported_compat_version,
+                               ClusterVersion::chronicle:compat_version(),
+                               OurVersion::chronicle:compat_version()}.
 -spec prepare_join(chronicle:cluster_info()) -> prepare_join_result().
 prepare_join(ClusterInfo) ->
     call(?SERVER, {prepare_join, ClusterInfo}, ?PREPARE_JOIN_TIMEOUT).
@@ -782,6 +825,8 @@ handle_event(Type, Event, _State, _Data) ->
     ?WARNING("Unexpected event of type ~p: ~p", [Type, Event]),
     keep_state_and_data.
 
+handle_call(get_peer_info, From, State, Data) ->
+    handle_get_peer_info(From, State, Data);
 handle_call(get_log, From, _State, _Data) ->
     %% TODO: get rid of this
     {keep_state_and_data,
@@ -902,6 +947,22 @@ check_prepared(State) ->
         _ ->
             ok
     end.
+
+handle_get_peer_info(From, _State, Data) ->
+    Meta = get_meta(Data),
+    Reply =
+        case Meta of
+            #{?META_PEER := Peer,
+              ?META_PEER_ID := PeerId} when Peer =/= ?NO_PEER,
+                                            PeerId =/= ?NO_PEER_ID ->
+                {ok, #{peer => Peer,
+                       peer_id => PeerId,
+                       supported_compat_version => ?COMPAT_VERSION}};
+            _ ->
+                {error, not_initialized}
+        end,
+
+    {keep_state_and_data, {reply, From, Reply}}.
 
 handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data) ->
     Reply =
@@ -1235,7 +1296,8 @@ flush_snapshot_mgr_msgs() ->
 
 handle_prepare_join(ClusterInfo, From, State, Data) ->
     case ?CHECK(check_not_provisioned(State),
-                check_cluster_info(ClusterInfo)) of
+                check_cluster_info(ClusterInfo),
+                check_compat_version(ClusterInfo)) of
         ok ->
             #{history_id := HistoryId,
               config := Config} = ClusterInfo,
@@ -1259,12 +1321,22 @@ check_cluster_info(ClusterInfo) ->
     case ClusterInfo of
         #{history_id := HistoryId,
           committed_seqno := CommittedSeqno,
+          compat_version := CompatVersion,
           config := #log_entry{value = #config{}}}
           when is_binary(HistoryId),
-               is_integer(CommittedSeqno) ->
+               is_integer(CommittedSeqno),
+               is_integer(CompatVersion) ->
             ok;
         _ ->
             {error, {bad_cluster_info, ClusterInfo}}
+    end.
+
+check_compat_version(#{compat_version := Version}) ->
+    case Version =< ?COMPAT_VERSION of
+        true ->
+            ok;
+        false ->
+            {error, {unsupported_compat_version, Version, ?COMPAT_VERSION}}
     end.
 
 handle_join_cluster(ClusterInfo, From, State, Data) ->

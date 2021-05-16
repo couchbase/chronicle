@@ -19,7 +19,8 @@
 
 -export([get_config/1, get_cluster_info/1, get_peers/1, check_quorum/1]).
 -export([acquire_lock/1, remove_peers/3, add_peers/3, set_peer_roles/3,
-         set_settings/2, replace_settings/2, unset_settings/2]).
+         set_settings/2, replace_settings/2, unset_settings/2,
+         set_compat_version/3]).
 
 -export([format_state/1]).
 -export([specs/2, init/2, post_init/3, state_enter/4,
@@ -77,6 +78,9 @@ replace_settings(Settings, Timeout) ->
 
 unset_settings(Names, Timeout) ->
     command({unset_settings, Names}, Timeout).
+
+set_compat_version(Lock, NewVersion, Timeout) ->
+    command({set_compat_version, Lock, NewVersion}, Timeout).
 
 %% callbacks
 format_state(#state{current_request = CurrentRequest,
@@ -175,7 +179,9 @@ handle_query(get_peers, _, #state{config = ConfigEntry}, Data) ->
     {reply, #{voters => Voters, replicas => Replicas}, Data};
 handle_query(get_cluster_info, {HistoryId, Seqno}, State, Data) ->
     #state{config = ConfigEntry} = State,
+    #log_entry{value = Config} = ConfigEntry,
     Info = #{history_id => HistoryId,
+             compat_version => chronicle_config:get_compat_version(Config),
              committed_seqno => Seqno,
              config => ConfigEntry},
     {reply, Info, Data};
@@ -220,6 +226,8 @@ do_apply_command({replace_settings, Settings}, Config) ->
     update(fun handle_replace_settings/2, [Settings, Config]);
 do_apply_command({unset_settings, Names}, Config) ->
     update(fun handle_unset_settings/2, [Names, Config]);
+do_apply_command({set_compat_version, Lock, NewVersion}, Config) ->
+    update(fun handle_set_compat_version/3, [Lock, NewVersion, Config]);
 do_apply_command(_, _Config) ->
     {reject, {error, unknown_command}}.
 
@@ -296,6 +304,22 @@ handle_unset_settings(Names, Config) ->
               maps:without(Names, Settings)
       end, Config).
 
+handle_set_compat_version(Lock, NewVersion, Config) ->
+    Version = chronicle_config:get_compat_version(Config),
+
+    check_lock(Lock, Config),
+    check_compat_version(Version, NewVersion),
+
+    NewConfig = chronicle_config:set_compat_version(NewVersion, Config),
+    {ok, {ok, Version, NewVersion}, NewConfig}.
+
+check_compat_version(OldVersion, NewVersion) ->
+    NewVersion >= ?COMPAT_VERSION orelse
+        raise({unsupported_compat_version, NewVersion, ?COMPAT_VERSION}),
+
+    NewVersion >= OldVersion orelse
+        raise({bad_compat_version, OldVersion, NewVersion}).
+
 check_peers(Peers) ->
     is_list(Peers) orelse raise(bad_peers),
     lists:foreach(
@@ -356,6 +380,8 @@ update(Fun, Args) ->
     try erlang:apply(Fun, Args) of
         {ok, NewConfig} ->
             {accept, ok, NewConfig};
+        {ok, Reply, NewConfig} ->
+            {accept, Reply, NewConfig};
         {error, _} = Error ->
             {reject, Error}
     catch

@@ -28,6 +28,7 @@
 -export([transition/2, next_config/1]).
 -export([init/3, reinit/3, branch/3]).
 -export([get_request_id/1, set_request_id/2]).
+-export([get_compat_version/1, set_compat_version/2]).
 -export([set_lock/2, check_lock/2]).
 -export([get_rsms/1, get_quorum/1]).
 -export([get_peers/1, get_replicas/1, get_voters/1]).
@@ -122,7 +123,8 @@ init(HistoryId, Peer, Machines0) ->
           [{Name, #rsm_config{module = Module, args = Args}} ||
               {Name, Module, Args} <- Machines]),
     Peers = #{Peer => peer_info(voter)},
-    #config{peers = Peers,
+    #config{compat_version = ?COMPAT_VERSION,
+            peers = Peers,
             state_machines = MachinesMap,
             history_log = add_history(HistoryId, ?NO_SEQNO, [])}.
 
@@ -148,6 +150,12 @@ add_history(HistoryId, Seqno, [{_, PrevSeqno} | _] = HistoryLog) ->
     true = Seqno > PrevSeqno,
     NewHistoryLog = [{HistoryId, Seqno} | HistoryLog],
     lists:sublist(NewHistoryLog, ?MAX_HISTORY_LOG_SIZE).
+
+get_compat_version(#config{compat_version = Version}) ->
+    Version.
+
+set_compat_version(Version, Config) ->
+    reset(Config#config{compat_version = Version}).
 
 set_lock(Lock, #config{} = Config) ->
     reset(Config#config{lock = Lock}).
