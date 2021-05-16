@@ -178,7 +178,9 @@ handle_query(get_cluster_info, {HistoryId, Seqno}, State, Data) ->
     Info = #{history_id => HistoryId,
              committed_seqno => Seqno,
              config => ConfigEntry},
-    {reply, Info, Data}.
+    {reply, Info, Data};
+handle_query(_, _, _, Data) ->
+    {reply, {error, unknown_query}, Data}.
 
 apply_command(Id, Request, _, _,
               #state{current_request = CurrentRequest,
@@ -219,7 +221,7 @@ do_apply_command({replace_settings, Settings}, Config) ->
 do_apply_command({unset_settings, Names}, Config) ->
     update(fun handle_unset_settings/2, [Names, Config]);
 do_apply_command(_, _Config) ->
-    {reject, {error, unknown_request}}.
+    {reject, {error, unknown_command}}.
 
 handle_info(Msg, _StateRevision, _State, Data) ->
     ?WARNING("Unexpected message: ~p", [Msg]),

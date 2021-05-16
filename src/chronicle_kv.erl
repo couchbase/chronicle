@@ -548,7 +548,9 @@ handle_query(get_full_snapshot, StateRevision, State, Data) ->
 handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
     handle_get_snapshot(Keys, StateRevision, State, Data);
 handle_query({prepare_txn, Fun}, StateRevision, State, Data) ->
-    handle_prepare_txn(Fun, StateRevision, State, Data).
+    handle_prepare_txn(Fun, StateRevision, State, Data);
+handle_query(_, _, _, Data) ->
+    {reply, {error, unknown_query}, Data}.
 
 apply_command(_, {add, Key, Value}, Revision, StateRevision, State, Data) ->
     apply_add(Key, Value, Revision, StateRevision, State, Data);
@@ -562,7 +564,9 @@ apply_command(_, {delete, Key, ExpectedRevision}, Revision,
 apply_command(_, {transaction, Conditions, Updates}, Revision,
               StateRevision, State, Data) ->
     apply_transaction(Conditions, Updates,
-                      Revision, StateRevision, State, Data).
+                      Revision, StateRevision, State, Data);
+apply_command(_, _, _, _, State, Data) ->
+    {reply, {error, unknown_command}, State, Data}.
 
 handle_config(ConfigEntry, Revision, _StateRevision, State, Data) ->
     #log_entry{value = Config} = ConfigEntry,
