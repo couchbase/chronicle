@@ -45,6 +45,7 @@
                        #{id := chronicle:peer_id(), role := chronicle:role()}}.
 
 format_config(#config{request_id = Id,
+                      compat_version = Version,
                       lock = Lock,
                       peers = Peers,
                       old_peers = OldPeers,
@@ -53,6 +54,7 @@ format_config(#config{request_id = Id,
                       branch = Branch,
                       history_log = HistoryLog}) ->
     [{"Request id", Id},
+     {"Compat version", Version},
      {"Lock", Lock},
      {"Peers", format_peers(Peers)},
      {"Old peers", format_peers(OldPeers)},
