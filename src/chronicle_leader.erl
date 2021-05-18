@@ -62,6 +62,7 @@
 -record(data, { %% Since heartbeats are sent frequently, keep a precomputed
                 %% list of our peers.
                 peers = [],
+                live_peers = [],
 
                 history_id = ?NO_HISTORY,
                 established_term = ?NO_TERM,
@@ -165,6 +166,7 @@ callback_mode() ->
 
 init([]) ->
     process_flag(trap_exit, true),
+    chronicle_peers:monitor(),
 
     Self = self(),
     chronicle_events:subscribe(
@@ -191,6 +193,7 @@ init([]) ->
                 exit({unexpected_state, Other})
         end,
 
+    ping_nodes(Data),
     {ok, make_observer(Data), Data}.
 
 handle_event(enter, OldState, State, Data) ->
@@ -198,6 +201,10 @@ handle_event(enter, OldState, State, Data) ->
     NewData0 = maybe_publish_leader(OldState, State, Data),
     NewData1 = handle_state_leave(OldState, NewData0),
     handle_state_enter(State, NewData1);
+handle_event(info, {nodeup, _, _}, _State, Data) ->
+    {keep_state, refresh_live_peers(Data)};
+handle_event(info, {nodedown, _, _}, _State, Data) ->
+    {keep_state, refresh_live_peers(Data)};
 handle_event(info, {chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
 handle_event(info, {heartbeat, LeaderInfo}, State, Data) ->
@@ -278,7 +285,7 @@ maybe_announce_stepping_down(OldState, NewState, Data) ->
 
 send_stepping_down(#leader{} = OldState, Data) ->
     {leader, LeaderInfo} = state_leader_info(OldState),
-    send_msg_to_peers({stepping_down, LeaderInfo}, Data).
+    send_msg_to_live_peers({stepping_down, LeaderInfo}, Data).
 
 handle_state_enter(State, Data) ->
     NewData0 = start_state_timers(State, Data),
@@ -533,11 +540,13 @@ metadata2data(Removed, Metadata, Data) ->
         chronicle_config:is_peer(Self, SelfId, ConfigEntry#log_entry.value),
     Electable = not Removed andalso Electable0,
 
-    Data#data{history_id = chronicle_agent:get_history_id(Metadata),
-              established_term = Metadata#metadata.term,
-              peers = AllPeers -- [Self],
-              electable = Electable,
-              removed = Removed}.
+    NewData = Data#data{history_id = chronicle_agent:get_history_id(Metadata),
+                        established_term = Metadata#metadata.term,
+                        peers = AllPeers -- [Self],
+                        electable = Electable,
+                        removed = Removed},
+
+    refresh_live_peers(NewData).
 
 handle_note_term_status(HistoryId, Term, Status, State, Data) ->
     case check_is_leader(HistoryId, Term, State) of
@@ -941,16 +950,16 @@ handle_send_heartbeat(State, Data) ->
 send_heartbeat(#leader{} = State, Data) ->
     {leader, LeaderInfo} = state_leader_info(State),
     Heartbeat = {heartbeat, LeaderInfo},
-    send_msg_to_peers(Heartbeat, Data).
+    send_msg_to_live_peers(Heartbeat, Data).
 
-send_msg_to_peers(Msg, #data{peers = Peers}) ->
+send_msg_to_live_peers(Msg, #data{live_peers = Peers}) ->
     lists:foreach(
       fun (Peer) ->
               send_msg(Peer, Msg)
       end, Peers).
 
 send_msg(Peer, Msg) ->
-    send(?SERVER(Peer), Msg, [nosuspend]).
+    send(?SERVER(Peer), Msg, [noconnect, nosuspend]).
 
 handle_announce_leader_status(State, _Data) ->
     announce_leader_status(state_leader_info(State)),
@@ -1180,4 +1189,25 @@ maybe_reset_backoff(State, Data) ->
             reset_backoff(Data);
         false ->
             Data
+    end.
+
+refresh_live_peers(#data{peers = Peers} = Data) ->
+    LivePeers = chronicle_peers:get_live_peers(Peers),
+    Data#data{live_peers = LivePeers}.
+
+ping_nodes(#data{peers = Peers, live_peers = LivePeers}) ->
+    PingPeers = Peers -- LivePeers,
+    case PingPeers of
+        [] ->
+            ok;
+        _ ->
+            ?DEBUG("Pinging some peers: ~w", [Peers]),
+            lists:foreach(
+              fun (Peer) ->
+                      spawn(
+                        fun () ->
+                                Result = net_kernel:connect_node(Peer),
+                                ?DEBUG("Pinged ~p: ~p", [Peer, Result])
+                        end)
+              end, PingPeers)
     end.
