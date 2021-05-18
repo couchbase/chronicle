@@ -240,15 +240,10 @@ format_peer_states(PeerStates) ->
         end, PeerStates)).
 
 format_mod_state(Mod, ModState) ->
-    case code:ensure_loaded(Mod) of
-        {module, _} ->
-            case erlang:function_exported(Mod, format_state, 1) of
-                true ->
-                    Mod:format_state(ModState);
-                false ->
-                    chronicle_dump:raw(ModState)
-            end;
-        _ ->
+    case chronicle_utils:is_function_exported(Mod, format_state, 1) of
+        true ->
+            Mod:format_state(ModState);
+        false ->
             chronicle_dump:raw(ModState)
     end.
 

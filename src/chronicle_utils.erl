@@ -50,7 +50,8 @@
          sanitize_entry/1, sanitize_entries/1,
          sanitize_stacktrace/1, sanitize_reason/1,
          shuffle/1,
-         announce_important_change/1]).
+         announce_important_change/1,
+         is_function_exported/3]).
 
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
@@ -988,3 +989,11 @@ shuffle(List) when is_list(List) ->
 
 announce_important_change(Type) ->
     gen_event:notify(?EXTERNAL_EVENTS_SERVER, {important_change, Type}).
+
+is_function_exported(Mod, Fun, Arity) ->
+    case code:ensure_loaded(Mod) of
+        {module, _} ->
+            erlang:function_exported(Mod, Fun, Arity);
+        _ ->
+            false
+    end.

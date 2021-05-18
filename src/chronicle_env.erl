@@ -61,7 +61,7 @@ get_logger_function() ->
 
 
 validate_function({Mod, Fun}, Arity) ->
-    case erlang:function_exported(Mod, Fun, Arity) of
+    case chronicle_utils:is_function_exported(Mod, Fun, Arity) of
         true ->
             {true, fun Mod:Fun/Arity};
         false ->
