@@ -459,7 +459,8 @@ handle_check_quorum(OldCommittedSeqno, OldSyncRound, State,
                     #data{acked_sync_round = SyncRound,
                           committed_seqno = CommittedSeqno} = Data) ->
     case State of
-        proposing ->
+        _ when State =:= recovery;
+               State =:= proposing ->
             case SyncRound =:= OldSyncRound
                 andalso CommittedSeqno =:= OldCommittedSeqno of
                 true ->
