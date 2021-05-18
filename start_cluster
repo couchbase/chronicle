@@ -72,7 +72,7 @@ def start_cluster(args):
     mkdir(data_dir)
 
     nodes = []
-    for i in range(args.num_nodes):
+    for i in range(args.start_index, args.start_index + args.num_nodes):
         nodes.append(start_node(i, hostname, ebin_path, data_dir, app))
 
     return nodes
@@ -89,6 +89,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--num-nodes', type=int,
                         dest='num_nodes', required=True)
+    parser.add_argument('--start-index', type=int,
+                        dest='start_index', default=0)
     parser.add_argument('--data-dir', dest='data_dir', default=DEFAULT_DATA_DIR)
     parser.add_argument('--app', dest='app',
                         default=DEFAULT_APP, choices=APPS.keys())
