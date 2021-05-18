@@ -433,6 +433,9 @@ check_peers(#data{peers = Peers,
                   acked_sync_round = AckedSyncRound} = Data) ->
     erlang:send_after(?CHECK_PEERS_INTERVAL, self(), check_peers),
 
+    %% Don't touch dead nodes. Those are checked by check_quorum at a more
+    %% spaced out interval.
+    LivePeers = chronicle_peers:get_live_peers(Peers),
     PeersToCheck =
         lists:filter(
           fun (Peer) ->
@@ -447,13 +450,27 @@ check_peers(#data{peers = Peers,
                       not_found ->
                           true
                   end
-          end, Peers),
+          end, LivePeers),
 
     NewData = send_heartbeat(PeersToCheck, Data),
 
     %% Some peers may be behind because we didn't replicate to them due to
     %% chronicle_agent:append() returning 'nosuspend'.
     replicate(NewData).
+
+check_down_peers(#data{peers = Peers} = Data) ->
+    PeersToCheck =
+        lists:filter(
+          fun (Peer) ->
+                  case get_peer_status(Peer, Data) of
+                      {ok, #peer_status{}} ->
+                          false;
+                      not_found ->
+                          true
+                  end
+          end, Peers),
+
+    send_heartbeat(PeersToCheck, Data).
 
 handle_check_quorum(OldCommittedSeqno, OldSyncRound, State,
                     #data{acked_sync_round = SyncRound,
@@ -476,7 +493,7 @@ schedule_check_quorum(#data{sync_round = SyncRound,
                             acked_sync_round = AckedSyncRound,
                             committed_seqno = CommittedSeqno,
                             high_seqno = HighSeqno} = Data) ->
-    NewData =
+    NewData0 =
         case SyncRound =/= AckedSyncRound orelse CommittedSeqno =/= HighSeqno of
             true ->
                 %% There are some outstanding requests, so just piggy-back on
@@ -485,6 +502,8 @@ schedule_check_quorum(#data{sync_round = SyncRound,
             false ->
                 send_heartbeat(Data#data{sync_round = SyncRound + 1})
         end,
+
+    NewData = check_down_peers(NewData0),
 
     erlang:send_after(?NO_QUORUM_TIMEOUT, self(),
                       {check_quorum, CommittedSeqno, AckedSyncRound}),
@@ -1226,7 +1245,7 @@ start_sync_quorum(ReplyTo, OkReply,
     NewData = Data#data{sync_round = NewRound,
                         sync_requests = NewSyncRequests},
 
-    {keep_state, send_heartbeat(NewData)}.
+    {keep_state, send_heartbeat_connected(NewData)}.
 
 handle_cas_config(NewConfig, CasRevision, _State, Data) ->
     case check_cas_config(NewConfig, CasRevision, Data) of
@@ -1549,22 +1568,27 @@ remove_peer_statuses(Peers, #data{peer_statuses = Tab}) ->
 
 maybe_send_requests(Peers, Data, Fun) ->
     NewData = monitor_agents(Peers, Data),
-    NotSent =
-        lists:filtermap(
-          fun (Peer) ->
-                  {ok, Ref} = get_peer_monitor(Peer, NewData),
-                  ServerRef = chronicle_agent:server_ref(Peer, Data#data.peer),
-                  case Fun(Peer, Ref, ServerRef) of
-                      true ->
-                          false;
-                      false ->
-                          true;
-                      {false, Reason} ->
-                          {true, {Peer, Reason}}
-                  end
-          end, Peers),
+    {NewData, maybe_send_requests_connected(Peers, NewData, Fun)}.
 
-    {NewData, NotSent}.
+maybe_send_requests_connected(Peers, Data, Fun) ->
+    lists:filtermap(
+      fun (Peer) ->
+              case get_peer_monitor(Peer, Data) of
+                  {ok, Ref} ->
+                      ServerRef =
+                          chronicle_agent:server_ref(Peer, Data#data.peer),
+                      case Fun(Peer, Ref, ServerRef) of
+                          true ->
+                              false;
+                          false ->
+                              true;
+                          {false, Reason} ->
+                              {true, {Peer, Reason}}
+                      end;
+                  not_found ->
+                      false
+              end
+      end, Peers).
 
 make_agent_opaque(Ref, Peer, Request) ->
     {agent_response, Ref, Peer, Request}.
@@ -1621,13 +1645,13 @@ replicate(Peer, Data) when is_atom(Peer) ->
     replicate([Peer], Data).
 
 replicate_to_peers(Peers, Data) ->
-    {NewData, NotSent} = send_append(Peers, Data),
+    NotSent = send_append(Peers, Data),
     BusyPeers = [Peer || {Peer, busy} <- NotSent],
     CatchupPeers = [{Peer, PeerSeqno} ||
                        {Peer, {need_catchup, PeerSeqno}} <- NotSent],
 
     log_busy_peers(append, BusyPeers),
-    catchup_peers(CatchupPeers, NewData).
+    catchup_peers(CatchupPeers, Data).
 
 should_replicate_to(Peer, HighSeqno, CommitSeqno, MaxInflight, Data) ->
     case get_peer_status(Peer, Data) of
@@ -1657,7 +1681,12 @@ send_append(Peers, #data{history_id = HistoryId,
                          high_seqno = HighSeqno,
                          committed_seqno = CommittedSeqno} = Data) ->
     MaxInflight = ?MAX_INFLIGHT,
-    maybe_send_requests(
+
+    %% We are explicitly sending appends only to nodes that we already have
+    %% connections to. So that if there are nodes that are down for a long
+    %% time, we don't keep trying to connect. Those nodes that are down are
+    %% periodically checked on as part of check_quorum.
+    maybe_send_requests_connected(
       Peers, Data,
       fun (Peer, PeerRef, ServerRef) ->
               case should_replicate_to(Peer, HighSeqno, CommittedSeqno,
@@ -1680,13 +1709,15 @@ send_append_to_peer(Peer, PeerCredit, PeerRef, PeerSeqno,
             case chronicle_agent:append(ServerRef, Opaque, HistoryId,
                                         Term, CommittedSeqno,
                                         AtTerm, PeerSeqno, Entries,
-                                        [nosuspend]) of
+                                        [noconnect, nosuspend]) of
                 ok ->
                     set_peer_sent_seqnos(Peer, HighSeqno,
                                          CommittedSeqno, Data),
                     true;
                 nosuspend ->
-                    {false, busy}
+                    {false, busy};
+                noconnect ->
+                    {false, no_connection}
             end;
         need_catchup ->
             {false, {need_catchup, PeerSeqno}}
@@ -1858,6 +1889,20 @@ send_ensure_term(Peers, Request,
 
 send_heartbeat(#data{quorum_peers = QuorumPeers} = Data) ->
     send_heartbeat(QuorumPeers, Data).
+
+send_heartbeat_connected(#data{quorum_peers = QuorumPeers} = Data) ->
+    ConnectedPeers =
+        lists:filter(
+          fun (Peer) ->
+                  case get_peer_monitor(Peer, Data) of
+                      {ok, _} ->
+                          true;
+                      not_found ->
+                          false
+                  end
+          end, QuorumPeers),
+
+    send_heartbeat(ConnectedPeers, Data).
 
 send_heartbeat(Peers, #data{sync_round = Round} = Data) when is_list(Peers) ->
     {NewData, BusyPeers} = send_ensure_term(Peers, {heartbeat, Round}, Data),
