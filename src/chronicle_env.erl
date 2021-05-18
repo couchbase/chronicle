@@ -46,19 +46,18 @@ check_data_dir() ->
             {error, {missing_parameter, data_dir}}
     end.
 
-get_logger_function() ->
-    case get_env(logger_function) of
+get_function(Name, Arity, Default) ->
+    case get_env(Name) of
         {ok, ModFun} ->
-            case validate_logger_function(ModFun) of
-                {true, LoggerFun} ->
-                    {ok, LoggerFun};
+            case validate_function(ModFun, Arity) of
+                {true, Fun} ->
+                    {ok, Fun};
                 false ->
-                    {error, {badarg, logger_function, ModFun}}
+                    {error, {badarg, Name, ModFun}}
             end;
         undefined ->
-            {ok, fun logger:log/4}
+            {ok, Default}
     end.
-
 
 validate_function({Mod, Fun}, Arity) ->
     case chronicle_utils:is_function_exported(Mod, Fun, Arity) of
@@ -70,16 +69,16 @@ validate_function({Mod, Fun}, Arity) ->
 validate_function(_, _) ->
     false.
 
-validate_logger_function(Fun) ->
-    validate_function(Fun, 4).
-
-setup_logger() ->
-    case get_logger_function() of
+setup_function(Name, Arity, Default, Key) ->
+    case get_function(Name, Arity, Default) of
         {ok, Fun} ->
-            persistent_term:put(?CHRONICLE_LOGGER, Fun);
+            persistent_term:put(Key, Fun);
         {error, _} = Error ->
             Error
     end.
+
+setup_logger() ->
+    setup_function(logger_function, 4, fun logger:log/4, ?CHRONICLE_LOGGER).
 
 setup_logger_filter() ->
     case get_env(setup_logger_filter, true) of
