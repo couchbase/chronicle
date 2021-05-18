@@ -702,7 +702,7 @@ establish_term_maybe_transition(establish_term = State,
                              "Votes received: ~w~n"
                              "Quorum: ~w~n",
                              [Term, HistoryId, Votes, Quorum]),
-                    stop({error, no_quorum}, State, Data)
+                    stop(no_quorum, State, Data)
             end
     end.
 
