@@ -59,15 +59,19 @@ get_logger_function() ->
             {ok, fun logger:log/4}
     end.
 
-validate_logger_function({Mod, Fun}) ->
-    case erlang:function_exported(Mod, Fun, 4) of
+
+validate_function({Mod, Fun}, Arity) ->
+    case erlang:function_exported(Mod, Fun, Arity) of
         true ->
-            {true, fun Mod:Fun/4};
+            {true, fun Mod:Fun/Arity};
         false ->
             false
     end;
-validate_logger_function(_) ->
+validate_function(_, _) ->
     false.
+
+validate_logger_function(Fun) ->
+    validate_function(Fun, 4).
 
 setup_logger() ->
     case get_logger_function() of
