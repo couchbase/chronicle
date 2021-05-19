@@ -613,7 +613,12 @@ handle_read_consistency(Name, Timeout, Opts) ->
 
 submit_command(Name, Command, Timeout) ->
     TRef = start_timeout(Timeout),
-    chronicle_rsm:command(Name, Command, TRef).
+    case chronicle_rsm:command(Name, Command, TRef) of
+        {error, {raise, Error}} ->
+            error(Error);
+        Other ->
+            Other
+    end.
 
 handle_rewrite(Fun, StateRevision, State, Data) ->
     Updates =
@@ -703,7 +708,8 @@ apply_delete(Key, ExpectedRevision, Revision, StateRevision, State, Data) ->
     end.
 
 apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
-    case check_transaction(Conditions, Revision, StateRevision, State) of
+    case check_transaction(Conditions, Updates,
+                           Revision, StateRevision, State) of
         ok ->
             NewState =
                 apply_transaction_updates(Updates, Revision, State, Data),
@@ -713,15 +719,48 @@ apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
             {reply, Error, State, Data}
     end.
 
-check_transaction(Conditions, Revision, StateRevision, State) ->
-    check_transaction_loop(Conditions, Revision, StateRevision, State).
+check_transaction(Conditions, Updates, Revision, StateRevision, State) ->
+    case check_transaction_updates(Updates) of
+        ok ->
+            check_transaction_conditions(Conditions,
+                                         Revision, StateRevision, State);
+        {error, _} = Error ->
+            Error
+    end.
 
-check_transaction_loop([], _, _, _) ->
+check_transaction_updates(Updates) ->
+    Valid =
+        case is_list(Updates) of
+            true ->
+                lists:all(
+                  fun (Update) ->
+                          case Update of
+                              {delete, _} ->
+                                  true;
+                              {set, _, _} ->
+                                  true;
+                              _ ->
+                                  false
+                          end
+                  end, Updates);
+            false ->
+                false
+        end,
+
+    case Valid of
+        true ->
+            ok;
+        false ->
+            {error, {raise, {bad_updates, Updates}}}
+    end.
+
+check_transaction_conditions([], _, _, _) ->
     ok;
-check_transaction_loop([Condition | Rest], Revision, StateRevision, State) ->
+check_transaction_conditions([Condition | Rest],
+                             Revision, StateRevision, State) ->
     case check_condition(Condition, Revision, StateRevision, State) of
         ok ->
-            check_transaction_loop(Rest, Revision, StateRevision, State);
+            check_transaction_conditions(Rest, Revision, StateRevision, State);
         {error, _} = Error ->
             Error
     end.

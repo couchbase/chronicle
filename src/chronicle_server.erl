@@ -727,6 +727,34 @@ simple_test__(Nodes) ->
                           {error, not_found} = chronicle_kv:get(kv, b),
                           {error, not_found} = chronicle_kv:get(kv, c),
 
+                          ?assertError({bad_updates, _},
+                                       chronicle_kv:transaction(
+                                         kv, [a],
+                                         fun (_) ->
+                                                 {commit, sldkjflk}
+                                         end)),
+
+                          ?assertError({bad_updates, _},
+                                       chronicle_kv:transaction(
+                                         kv, [a],
+                                         fun (_) ->
+                                                 {commit, sldkjflk, extra}
+                                         end)),
+
+                          ?assertError({bad_updates, _},
+                                       chronicle_kv:transaction(
+                                         kv, [a],
+                                         fun (_) ->
+                                                 {commit, [sldkjflk], extra}
+                                         end)),
+
+                          ?assertError({bad_updates, _},
+                                       chronicle_kv:transaction(
+                                         kv, [a],
+                                         fun (_) ->
+                                                 {commit, [{set, {sldkjflk,v}}]}
+                                         end)),
+
                           ok
                   end),
 
