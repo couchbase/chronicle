@@ -934,13 +934,13 @@ partition_test__(Nodes) ->
                    fun () ->
                            spawn(
                              fun () ->
-                                     chronicle_kv:set(kv, b, 43)
+                                     chronicle_kv:add(kv, b, 43)
                              end)
                    end),
 
     ok = rpc_node(b,
                   fun () ->
-                          {ok, _} = chronicle_kv:set(kv, c, 44),
+                          {ok, _} = chronicle_kv:add(kv, b, 44),
                           ok
                   end),
 
@@ -952,8 +952,7 @@ partition_test__(Nodes) ->
                   fun () ->
                           ok = chronicle_kv:sync(kv, 10000),
                           {ok, {42, _}} = chronicle_kv:get(kv, a),
-                          {error, not_found} = chronicle_kv:get(kv, b),
-                          {ok, {44, _}} = chronicle_kv:get(kv, c),
+                          {ok, {44, _}} = chronicle_kv:get(kv, b),
                           ok
                   end),
 
