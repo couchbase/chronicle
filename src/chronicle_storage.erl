@@ -47,6 +47,33 @@
 -define(MAX_SNAPSHOTS,
         chronicle_settings:get({storage, max_snapshots}, 1)).
 
+-define(HISTO_METRIC(Op), {<<"chronicle_disk_latency">>, [{op, Op}]}).
+-define(HISTO_MAX, 5000).
+-define(HISTO_UNIT, millisecond).
+
+-define(TIME_OK(Op, StartTS),
+        begin
+            __EndTS = erlang:monotonic_time(?HISTO_UNIT),
+            __Diff = __EndTS - StartTS,
+            chronicle_stats:report_histo(
+              ?HISTO_METRIC(Op), ?HISTO_MAX, ?HISTO_UNIT, __Diff)
+        end).
+
+-define(TIME(Op, Body), ?TIME(Op, ok, Body)).
+-define(TIME(Op, OkPattern, Body),
+        begin
+            __StartTS = erlang:monotonic_time(?HISTO_UNIT),
+            __Result = Body,
+            case __Result of
+                OkPattern ->
+                    ?TIME_OK(Op, __StartTS);
+                _ ->
+                    ok
+            end,
+
+            __Result
+        end).
+
 -type meta_state() :: ?META_STATE_PROVISIONED
                     | ?META_STATE_NOT_PROVISIONED
                     | {?META_STATE_PREPARE_JOIN,
@@ -564,7 +591,8 @@ append_handle_truncate(StartSeqno, Opts,
     Truncate.
 
 sync(#storage{current_log = Log}) ->
-    case chronicle_log:sync(Log) of
+    Result = ?TIME(<<"sync">>, chronicle_log:sync(Log)),
+    case Result of
         ok ->
             ok;
         {error, Error} ->
@@ -705,7 +733,9 @@ log_path(DataDir, LogIndex) ->
 
 log_append(Record, #storage{current_log = Log,
                             current_log_data_size = LogDataSize} = Storage) ->
-    case chronicle_log:append(Log, Record) of
+    Result = ?TIME(<<"append">>, {ok, _},
+                   chronicle_log:append(Log, Record)),
+    case Result of
         {ok, BytesWritten} ->
             NewLogDataSize = LogDataSize + BytesWritten,
             Storage#storage{current_log_data_size = NewLogDataSize};
@@ -790,7 +820,8 @@ file_exists(Path, Type) ->
     end.
 
 sync_dir(Dir) ->
-    case chronicle_utils:sync_dir(Dir) of
+    Result = ?TIME(<<"sync_dir">>, chronicle_utils:sync_dir(Dir)),
+    case Result of
         ok ->
             ok;
         {error, Error} ->
@@ -1264,7 +1295,8 @@ do_compact_log(#storage{low_seqno = LowSeqno,
 
             lists:foreach(
               fun ({LogPath, _}) ->
-                      case file:delete(LogPath) of
+                      Result = ?TIME(<<"delete">>, file:delete(LogPath)),
+                      case Result of
                           ok ->
                               ?INFO("Deleted ~s", [LogPath]),
                               true;

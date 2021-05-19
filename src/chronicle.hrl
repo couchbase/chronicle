@@ -111,6 +111,8 @@
         end).
 
 -define(CHRONICLE_LOGGER, '$chronicle_logger').
+-define(CHRONICLE_STATS, '$chronicle_stats').
+
 -define(LOG(Level, Fmt, Args),
         (persistent_term:get(?CHRONICLE_LOGGER))(
           Level, Fmt, Args,

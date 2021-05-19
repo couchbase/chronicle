@@ -35,7 +35,9 @@ data_dir() ->
 setup() ->
     ?CHECK(check_data_dir(),
            setup_logger_filter(),
-           setup_logger()).
+           setup_logger(),
+           setup_stats()
+          ).
 
 check_data_dir() ->
     try data_dir() of
@@ -97,6 +99,10 @@ setup_logger_filter() ->
         false ->
             ok
     end.
+
+setup_stats() ->
+    setup_function(stats_function, 1,
+                   fun chronicle_stats:ignore_stats/1, ?CHRONICLE_STATS).
 
 -ifndef(TEST).
 
