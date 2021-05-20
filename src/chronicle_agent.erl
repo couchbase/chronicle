@@ -2381,20 +2381,20 @@ storage_open() ->
             true ->
                 Version = maps:get(?META_VERSION, Meta),
                 if
-                    Version > ?COMPAT_VERSION ->
+                    Version > ?LOCAL_VERSION ->
                         ?ERROR("Can't start due to storage being newer "
-                               "than supported version. "
+                               "than our supported version. "
                                "Storage version: ~b."
                                "Our version: ~b",
-                               [Version, ?COMPAT_VERSION]),
+                               [Version, ?LOCAL_VERSION]),
                         error({unsupported_compat_version,
-                               Version, ?COMPAT_VERSION});
-                    Version < ?COMPAT_VERSION ->
-                        ?INFO("Updating storage with new compat version. "
+                               Version, ?LOCAL_VERSION});
+                    Version < ?LOCAL_VERSION ->
+                        ?INFO("Updating storage with new version. "
                               "Old version: ~b. New version: ~b",
-                              [Version, ?COMPAT_VERSION]),
+                              [Version, ?LOCAL_VERSION]),
                         chronicle_storage:store_meta(
-                         #{?META_VERSION => ?COMPAT_VERSION}, Storage0);
+                         #{?META_VERSION => ?LOCAL_VERSION}, Storage0);
                     true ->
                         Storage0
                 end;
