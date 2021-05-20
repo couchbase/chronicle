@@ -44,8 +44,6 @@
         chronicle_settings:get({storage, log_max_size}, 1024 * 1024)).
 -define(MAX_LOG_SEGMENTS,
         chronicle_settings:get({storage, max_log_segments}, 20)).
--define(MAX_SNAPSHOTS,
-        chronicle_settings:get({storage, max_snapshots}, 1)).
 
 -define(HISTO_METRIC(Op), {<<"chronicle_disk_latency">>, [{op, Op}]}).
 -define(HISTO_MAX, 5000).
@@ -1160,13 +1158,8 @@ release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
     NewSnapshots = gb_sets:del_element(Seqno, Snapshots),
     compact(Storage#storage{snapshots_in_use = NewSnapshots}).
 
-get_used_snapshot_seqno(#storage{snapshots_in_use = Snapshots}) ->
-    case gb_sets:is_empty(Snapshots) of
-        true ->
-            no_seqno;
-        false ->
-            gb_sets:smallest(Snapshots)
-    end.
+snapshot_in_use({Seqno, _, _, _}, #storage{snapshots_in_use = Snapshots}) ->
+    gb_sets:is_element(Seqno, Snapshots).
 
 get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
@@ -1188,47 +1181,35 @@ compact(Storage) ->
     compact_log(compact_snapshots(Storage)).
 
 compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
-    NumSnapshots = length(Snapshots),
-    case NumSnapshots > ?MAX_SNAPSHOTS of
-        true ->
-            {KeepSnapshots0, DeleteSnapshots0} =
-                lists:split(?MAX_SNAPSHOTS, Snapshots),
-
+    case Snapshots of
+        [CurrentSnapshot | OtherSnapshots] ->
             {KeepSnapshots, DeleteSnapshots} =
-                case get_used_snapshot_seqno(Storage) of
-                    no_seqno ->
-                        {KeepSnapshots0, DeleteSnapshots0};
-                    UsedSeqno ->
-                        {Used, Unused} = lists:splitwith(
-                                           fun ({Seqno, _, _, _}) ->
-                                                   Seqno >= UsedSeqno
-                                           end, DeleteSnapshots0),
+                lists:partition(
+                  fun (Snapshot) ->
+                          snapshot_in_use(Snapshot, Storage)
+                  end, OtherSnapshots),
 
-                        case Used of
-                            [] ->
-                                ok;
-                            [_] ->
-                                %% The agent will only release the previous
-                                %% snapshot once the new one is recorded. So
-                                %% it's normal that one extra snapshot may
-                                %% still be held.
-                                ok;
-                            _ ->
-                                ?DEBUG("Won't delete some snapshots because "
-                                       "they are in use (used seqno ~p):~n~p",
-                                       [UsedSeqno, Used])
-                        end,
-
-                        {KeepSnapshots0 ++ Used, Unused}
-                end,
+            case KeepSnapshots of
+                [] ->
+                    ok;
+                [_] ->
+                    %% The agent will only release the previous snapshot once
+                    %% the new one is recorded. So it's normal that one extra
+                    %% snapshot may still be held.
+                    ok;
+                _ ->
+                    ?DEBUG("Won't delete some snapshots because "
+                           "they are in use :~n~p",
+                           [KeepSnapshots])
+            end,
 
             lists:foreach(
               fun ({SnapshotSeqno, _, _, _}) ->
                       delete_snapshot(SnapshotSeqno, Storage)
               end, DeleteSnapshots),
 
-            Storage#storage{snapshots = KeepSnapshots};
-        false ->
+            Storage#storage{snapshots = [CurrentSnapshot | KeepSnapshots]};
+        _ ->
             Storage
     end.
 
