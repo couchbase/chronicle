@@ -139,7 +139,11 @@ open() ->
 
         cleanup_orphan_snapshots(Storage2),
 
-        Storage2
+        %% Sync storage to make sure that whatever state is exposed to the
+        %% outside world is durable: theoretically it's possible for agent to
+        %% crash after writing an update out to storage but before making it
+        %% durable. This is meant to deal with such possibility.
+        sync(Storage2)
     catch
         T:E:Stack ->
             close(Storage0),
@@ -252,7 +256,6 @@ rollover(#storage{current_log = CurrentLog,
                   meta = Meta,
                   high_seqno = HighSeqno,
                   log_segments = LogSegments} = Storage) ->
-    sync(Storage),
     ok = chronicle_log:close(CurrentLog),
 
     LogSegment = {CurrentLogPath, CurrentLogStartSeqno},
@@ -526,8 +529,9 @@ store_meta(Updates, Storage) ->
     case maps:size(Meta) > 0 of
         true ->
             NewStorage0 = add_meta(Meta, Storage),
-            NewStorage = compact_configs(NewStorage0),
-            maybe_rollover(log_append({meta, Meta}, NewStorage));
+            NewStorage1 = compact_configs(NewStorage0),
+            NewStorage = log_append({meta, Meta}, NewStorage1),
+            maybe_rollover(sync(NewStorage));
         false ->
             Storage
     end.
@@ -550,7 +554,7 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     NewStorage0 = log_append(LogEntry, Storage),
     NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
                             Truncate, Entries, NewStorage0),
-    maybe_rollover(NewStorage1).
+    maybe_rollover(sync(NewStorage1)).
 
 do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -591,11 +595,11 @@ append_handle_truncate(StartSeqno, Opts,
 
     Truncate.
 
-sync(#storage{current_log = Log}) ->
+sync(#storage{current_log = Log} = Storage) ->
     Result = ?TIME(<<"sync">>, chronicle_log:sync(Log)),
     case Result of
         ok ->
-            ok;
+            Storage;
         {error, Error} ->
             exit({sync_failed, Error})
     end.
@@ -937,7 +941,7 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
 
     NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
     NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
-    compact(NewStorage1).
+    compact(sync(NewStorage1)).
 
 install_snapshot(Seqno, HistoryId, Term, Config, Meta,
                  #storage{meta = OldMeta} = Storage) ->
@@ -1187,10 +1191,6 @@ compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
     NumSnapshots = length(Snapshots),
     case NumSnapshots > ?MAX_SNAPSHOTS of
         true ->
-            %% Sync the log file to make sure we don't forget about any of the
-            %% existing snapshots.
-            sync(Storage),
-
             {KeepSnapshots0, DeleteSnapshots0} =
                 lists:split(?MAX_SNAPSHOTS, Snapshots),
 
@@ -1253,12 +1253,6 @@ compact_log(#storage{log_segments = LogSegments} = Storage) ->
 
 do_compact_log(#storage{low_seqno = LowSeqno,
                         log_segments = LogSegments} = Storage) ->
-    %% Make sure we don't lose the snapshots
-    %%
-    %% TODO: consider moving all syncing to chronicle_storage, so no extra
-    %% syncing is needed here.
-    sync(Storage),
-
     %% Don't delete past our earliest snapshot.
     SnapshotSeqno = get_latest_snapshot_seqno(Storage),
 

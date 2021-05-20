@@ -2393,11 +2393,6 @@ storage_open() ->
                 chronicle_storage:store_meta(SeedMeta, Storage0)
         end,
 
-    %% Sync storage to make sure that whatever state is exposed to the outside
-    %% world is durable: theoretically it's possible for agent to crash after
-    %% writing an update out to storage but before making it durable. This is
-    %% meant to deal with such possibility.
-    chronicle_storage:sync(Storage1),
     publish_storage(Storage1).
 
 publish_storage(Storage) ->
@@ -2409,7 +2404,6 @@ append_entry(Entry, Meta, Data) ->
 
 store_meta(Meta, #data{storage = Storage} = Data) ->
     NewStorage = chronicle_storage:store_meta(Meta, Storage),
-    chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 
 append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
@@ -2418,7 +2412,6 @@ append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
                                           Entries,
                                           #{meta => Metadata,
                                             truncate => Truncate}, Storage),
-    chronicle_storage:sync(NewStorage),
     Data#data{storage = publish_storage(NewStorage)}.
 
 record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
@@ -2441,7 +2434,6 @@ install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
         chronicle_storage:install_snapshot(SnapshotSeqno,
                                            SnapshotHistoryId, SnapshotTerm,
                                            SnapshotConfig, Metadata, Storage),
-    chronicle_storage:sync(NewStorage),
     pass_snapshot_to_mgr(Data#data{storage = publish_storage(NewStorage)}).
 
 get_peer_name() ->
