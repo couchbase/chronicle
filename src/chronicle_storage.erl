@@ -124,7 +124,7 @@ open() ->
                         low_seqno = ?NO_SEQNO + 1,
                         high_seqno = ?NO_SEQNO,
                         meta = #{},
-                        snapshots_in_use = gb_sets:new()},
+                        snapshots_in_use = sets:new()},
 
     try
         DataDir = chronicle_env:data_dir(),
@@ -1151,15 +1151,15 @@ get_and_hold_latest_snapshot(Storage) ->
     end.
 
 hold_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewSnapshots = gb_sets:add_element(Seqno, Snapshots),
+    NewSnapshots = sets:add_element(Seqno, Snapshots),
     Storage#storage{snapshots_in_use = NewSnapshots}.
 
 release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewSnapshots = gb_sets:del_element(Seqno, Snapshots),
+    NewSnapshots = sets:del_element(Seqno, Snapshots),
     compact(Storage#storage{snapshots_in_use = NewSnapshots}).
 
 snapshot_in_use({Seqno, _, _, _}, #storage{snapshots_in_use = Snapshots}) ->
-    gb_sets:is_element(Seqno, Snapshots).
+    sets:is_element(Seqno, Snapshots).
 
 get_latest_snapshot(#storage{snapshots = Snapshots}) ->
     case Snapshots of
