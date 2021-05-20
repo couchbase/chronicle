@@ -51,7 +51,8 @@
          sanitize_stacktrace/1, sanitize_reason/1,
          shuffle/1,
          announce_important_change/1,
-         is_function_exported/3]).
+         is_function_exported/3,
+         read_int_from_file/2, store_int_to_file/2]).
 
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
@@ -997,3 +998,20 @@ is_function_exported(Mod, Fun, Arity) ->
         _ ->
             false
     end.
+
+read_int_from_file(Path, Default) ->
+    case file:read_file(Path) of
+        {ok, Contents} ->
+            binary_to_integer(string:trim(Contents));
+        {error, enoent} ->
+            Default;
+        {error, Error} ->
+            exit({read_failed, Path, Error})
+    end.
+
+store_int_to_file(Path, Value) ->
+    atomic_write_file(
+      Path,
+      fun (Fd) ->
+              file:write(Fd, [integer_to_binary(Value), $\n])
+      end).

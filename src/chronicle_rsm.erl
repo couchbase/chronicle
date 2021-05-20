@@ -1576,18 +1576,13 @@ unpack_payload(#rsm_command{payload = Payload} = RSMCommand) ->
 get_incarnation(RSMDir) ->
     Path = filename:join(RSMDir, "incarnation"),
     Incarnation =
-        case file:read_file(Path) of
-            {ok, Contents} ->
-                binary_to_integer(string:trim(Contents)) + 1;
-            {error, enoent} ->
+        case chronicle_utils:read_int_from_file(Path, no_incarnation) of
+            no_incarnation ->
                 ?INFO("No incarnation file found at '~s'", [Path]),
-                0
+                0;
+            V when is_integer(V) ->
+                V + 1
         end,
 
-    ok = chronicle_utils:atomic_write_file(
-           Path,
-           fun (Fd) ->
-                   file:write(Fd, [integer_to_binary(Incarnation), $\n])
-           end),
-
+    ok = chronicle_utils:store_int_to_file(Path, Incarnation),
     Incarnation.
