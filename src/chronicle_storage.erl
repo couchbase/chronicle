@@ -30,7 +30,7 @@
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_and_hold_latest_snapshot/1, release_snapshot/2,
          get_latest_snapshot_seqno/1,
-         get_term_for_seqno/2,
+         get_term_for_committed_seqno/1, get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
          ensure_rsm_dir/1, snapshot_dir/1,
          map_append/2]).
@@ -39,6 +39,7 @@
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
 
 -define(RANGE_KEY, '$range').
+-define(SNAPSHOT_KEY, '$snapshot').
 
 -define(LOG_MAX_SIZE,
         chronicle_settings:get({storage, log_max_size}, 1024 * 1024)).
@@ -135,6 +136,7 @@ open() ->
         Storage1 = Storage0#storage{data_dir = DataDir},
         Storage2 = compact(validate_state(open_logs(Storage1))),
 
+        publish_snapshot(Storage2),
         cleanup_orphan_snapshots(Storage2),
 
         %% Sync storage to make sure that whatever state is exposed to the
@@ -491,6 +493,21 @@ get_high_seqno(Storage) ->
 get_high_term(#storage{high_seqno = HighSeqno} = Storage) ->
     {ok, Term} = get_term_for_seqno(HighSeqno, Storage),
     Term.
+
+get_term_for_committed_seqno(?NO_SEQNO) ->
+    {ok, ?NO_TERM};
+get_term_for_committed_seqno(Seqno) ->
+    case get_log_committed(Seqno, Seqno) of
+        {ok, [#log_entry{term = Term}]} ->
+            {ok, Term};
+        {error, compacted} ->
+            case get_published_snapshot() of
+                {SnapSeqno, SnapTerm} when Seqno =:= SnapSeqno ->
+                    {ok, SnapTerm};
+                _ ->
+                    {error, compacted}
+            end
+    end.
 
 get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
                                    low_seqno = LowSeqno,
@@ -922,6 +939,14 @@ get_published_seqno_range() ->
             {LowSeqno, HighSeqno, CommittedSeqno}
     end.
 
+get_published_snapshot() ->
+    case ets:lookup(?MEM_LOG_INFO_TAB, ?SNAPSHOT_KEY) of
+        [] ->
+            no_snapshot;
+        [{_, Seqno, Term}] ->
+            {Seqno, Term}
+    end.
+
 record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
     record_snapshot(Seqno, HistoryId, Term, Config,
                     {snapshot, Seqno, HistoryId, Term, Config}, Storage).
@@ -937,9 +962,23 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
 
     NewStorage0 = log_append(LogRecord, Storage),
 
+    Snapshot = {Seqno, HistoryId, Term, Config},
+    publish_snapshot(Snapshot, Storage),
+
     NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
     NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
     compact(sync(NewStorage1)).
+
+publish_snapshot(Storage) ->
+    case get_latest_snapshot(Storage) of
+        no_snapshot ->
+            ok;
+        Snapshot ->
+            publish_snapshot(Snapshot, Storage)
+    end.
+
+publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
+    ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
 
 install_snapshot(Seqno, HistoryId, Term, Config, Meta,
                  #storage{meta = OldMeta} = Storage) ->

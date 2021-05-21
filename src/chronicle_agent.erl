@@ -390,20 +390,7 @@ get_log(HistoryId, Term, StartSeqno, EndSeqno) ->
     call(?SERVER, {get_log, HistoryId, Term, StartSeqno, EndSeqno}).
 
 get_term_for_seqno(Seqno) ->
-    case get_log_committed(Seqno, Seqno) of
-        {ok, [#log_entry{term = Term}]} ->
-            {ok, Term};
-        {error, compacted} ->
-            %% We might still have a snapshot at the given seqno.
-            case call(?SERVER, {get_term_for_seqno, Seqno}) of
-                {ok, _} = Ok ->
-                    Ok;
-                {error, compacted} = Error ->
-                    Error;
-                {error, Error} ->
-                    exit(Error)
-            end
-    end.
+    chronicle_storage:get_term_for_committed_seqno(Seqno).
 
 -spec get_history_id(#metadata{}) -> chronicle:history_id().
 get_history_id(#metadata{history_id = CommittedHistoryId,
@@ -834,8 +821,6 @@ handle_call(get_log, From, _State, _Data) ->
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
             From, State, Data) ->
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data);
-handle_call({get_term_for_seqno, Seqno}, From, State, Data) ->
-    handle_get_term_for_seqno(Seqno, From, State, Data);
 handle_call({provision, Machines}, From, State, Data) ->
     handle_provision(Machines, From, State, Data);
 handle_call(reprovision, From, State, Data) ->
@@ -982,19 +967,6 @@ check_get_log(HistoryId, Term, StartSeqno, EndSeqno, State, Data) ->
            check_history_id(HistoryId, Data),
            check_same_term(Term, Data),
            check_log_range(StartSeqno, EndSeqno, Data)).
-
-handle_get_term_for_seqno(Seqno, From, _State,
-                          #data{storage = Storage} = Data) ->
-    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
-    Reply =
-        case Seqno =< CommittedSeqno of
-            true ->
-                chronicle_storage:get_term_for_seqno(Seqno, Storage);
-            false ->
-                {error, {uncommitted, Seqno, CommittedSeqno}}
-        end,
-
-    {keep_state_and_data, {reply, From, Reply}}.
 
 check_existing_rsm(Name, Config) ->
     case Config of
