@@ -28,8 +28,8 @@
          install_snapshot/6, record_snapshot/5, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
-         get_and_hold_latest_snapshot/1, release_snapshot/2,
-         get_latest_snapshot_seqno/1,
+         get_current_snapshot/1, get_current_snapshot_seqno/1,
+         release_snapshot/2,
          get_term_for_committed_seqno/1, get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
          ensure_rsm_dir/1, snapshot_dir/1,
@@ -103,8 +103,8 @@
                    committed_config,
                    pending_configs,
 
-                   snapshots,
-                   snapshots_in_use,
+                   current_snapshot,
+                   extra_snapshots,
 
                    data_dir,
 
@@ -124,8 +124,7 @@ open() ->
                         log_tab = ets:whereis(?MEM_LOG_TAB),
                         low_seqno = ?NO_SEQNO + 1,
                         high_seqno = ?NO_SEQNO,
-                        meta = #{},
-                        snapshots_in_use = sets:new()},
+                        meta = #{}},
 
     try
         DataDir = chronicle_env:data_dir(),
@@ -137,13 +136,13 @@ open() ->
         Storage2 = compact(validate_state(open_logs(Storage1))),
 
         publish_snapshot(Storage2),
-        cleanup_orphan_snapshots(Storage2),
+        Storage3 = cleanup_snapshots(Storage2),
 
         %% Sync storage to make sure that whatever state is exposed to the
         %% outside world is durable: theoretically it's possible for agent to
         %% crash after writing an update out to storage but before making it
         %% durable. This is meant to deal with such possibility.
-        publish(sync(Storage2))
+        publish(sync(Storage3))
     catch
         T:E:Stack ->
             close(Storage0),
@@ -159,7 +158,8 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                                   pending_configs = [],
                                   low_seqno = ?NO_SEQNO + 1,
                                   high_seqno = ?NO_SEQNO,
-                                  snapshots = [],
+                                  current_snapshot = no_snapshot,
+                                  extra_snapshots = [],
                                   log_segments = []},
 
     %% TODO: Be more robust when dealing with corrupt log files. As long as a
@@ -472,10 +472,20 @@ handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
 add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
     Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
 
-add_snapshot(Seqno, HistoryId, Term, Config,
-             #storage{snapshots = CurrentSnapshots} = Storage) ->
-    Storage#storage{snapshots =
-                        [{Seqno, HistoryId, Term, Config} | CurrentSnapshots]}.
+add_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
+    Snapshot = {Seqno, HistoryId, Term, Config},
+    NewStorage = retire_snapshot(Storage),
+    NewStorage#storage{current_snapshot = Snapshot}.
+
+retire_snapshot(#storage{current_snapshot = CurrentSnapshot,
+                         extra_snapshots = ExtraSnapshots} = Storage) ->
+    case CurrentSnapshot of
+        no_snapshot ->
+            Storage;
+        _ ->
+            Storage#storage{extra_snapshots =
+                                [CurrentSnapshot | ExtraSnapshots]}
+    end.
 
 is_config_entry(#log_entry{value = Value}) ->
     chronicle_config:is_config(Value).
@@ -512,8 +522,7 @@ get_term_for_committed_seqno(Seqno) ->
     end.
 
 get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
-                                   low_seqno = LowSeqno,
-                                   snapshots = Snapshots} = Storage) ->
+                                   low_seqno = LowSeqno} = Storage) ->
     case Seqno =< HighSeqno of
         true ->
             if
@@ -523,10 +532,10 @@ get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
                 Seqno =:= ?NO_SEQNO ->
                     {ok, ?NO_TERM};
                 true ->
-                    case lists:keyfind(Seqno, 1, Snapshots) of
-                        {_, _, Term, _} ->
-                            {ok, Term};
-                        false ->
+                    case get_current_snapshot(Storage) of
+                        {SnapSeqno, _, SnapTerm, _} when Seqno =:= SnapSeqno ->
+                            {ok, SnapTerm};
+                        _ ->
                             {error, compacted}
                     end
             end;
@@ -650,14 +659,24 @@ find_logs(DataDir) ->
             {Orphans, lists:droplast(NonOrphans), lists:last(NonOrphans)}
     end.
 
-cleanup_orphan_snapshots(#storage{data_dir = DataDir,
-                                  snapshots = Snapshots}) ->
-    SnapshotSeqnos = [Seqno || {Seqno, _, _, _} <- Snapshots],
+cleanup_snapshots(#storage{extra_snapshots = Snapshots} = Storage) ->
+    case Snapshots of
+        [] ->
+            ok;
+        _ ->
+            Seqnos = [Seqno || {Seqno, _, _, _} <- Snapshots],
+            ?DEBUG("Going to delete redundant snapshots. Seqnos: ~w", [Seqnos])
+    end,
+
+    cleanup_orphan_snapshots(Storage#storage{extra_snapshots = []}).
+
+cleanup_orphan_snapshots(#storage{data_dir = DataDir} = Storage) ->
+    SnapshotSeqno = get_current_snapshot_seqno(Storage),
     DiskSnapshots = find_disk_snapshots(DataDir),
     OrphanSnapshots =
         lists:filtermap(
-          fun ({SnapshotSeqno, Path}) ->
-                  case lists:member(SnapshotSeqno, SnapshotSeqnos) of
+          fun ({Seqno, Path}) ->
+                  case Seqno =:= SnapshotSeqno of
                       true ->
                           false;
                       false ->
@@ -670,11 +689,13 @@ cleanup_orphan_snapshots(#storage{data_dir = DataDir,
             ok;
         _ ->
             ?WARNING("Found orphan snapshots.~n"
-                     "Known snapshots seqnos: ~p~n"
+                     "Curent snapshot seqno: ~p~n"
                      "Orphan snapshot files:~n~p",
-                     [SnapshotSeqnos, OrphanSnapshots]),
+                     [SnapshotSeqno, OrphanSnapshots]),
             try_delete_files(OrphanSnapshots)
-    end.
+    end,
+
+    Storage.
 
 find_disk_snapshots(DataDir) ->
     SnapshotsDir = snapshots_dir(DataDir),
@@ -954,25 +975,20 @@ record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
                     {snapshot, Seqno, HistoryId, Term, Config}, Storage).
 
 record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
-                #storage{data_dir = DataDir,
-                         snapshots = Snapshots} = Storage) ->
-    LatestSnapshotSeqno = get_latest_snapshot_seqno(Storage),
+                #storage{data_dir = DataDir} = Storage) ->
+    LatestSnapshotSeqno = get_current_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
 
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
     NewStorage0 = log_append(LogRecord, Storage),
-
-    Snapshot = {Seqno, HistoryId, Term, Config},
-    publish_snapshot(Snapshot, Storage),
-
-    NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
-    NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
+    NewStorage1 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage0),
+    publish_snapshot(NewStorage1),
     publish(compact(sync(NewStorage1))).
 
 publish_snapshot(Storage) ->
-    case get_latest_snapshot(Storage) of
+    case get_current_snapshot(Storage) of
         no_snapshot ->
             ok;
         Snapshot ->
@@ -1112,15 +1128,15 @@ read_rsm_snapshot(Path) ->
             Error
     end.
 
-validate_snapshot(DataDir, Seqno, Config) ->
+validate_snapshot(_DataDir, no_snapshot) ->
+    ok;
+validate_snapshot(DataDir, {Seqno, _, _, Config}) ->
     SnapshotDir = snapshot_dir(DataDir, Seqno),
     case chronicle_utils:check_file_exists(SnapshotDir, directory) of
         ok ->
             validate_existing_snapshot(SnapshotDir, Config);
-        {error, enoent} ->
-            missing;
         {error, Error} ->
-            error({validate_snapshot_failed, SnapshotDir, Error})
+            exit({validate_snapshot_failed, SnapshotDir, Error})
     end.
 
 validate_existing_snapshot(SnapshotDir, Config) ->
@@ -1140,38 +1156,14 @@ validate_existing_snapshot(SnapshotDir, Config) ->
         true ->
             ok;
         false ->
-            {error, Errors}
+            exit({validate_snapshot_failed, SnapshotDir, Errors})
     end.
 
 validate_state(#storage{low_seqno = LowSeqno,
-                        snapshots = Snapshots,
                         data_dir = DataDir} = Storage) ->
-    {ValidSnapshots0, InvalidSnapshots} =
-        lists:foldl(
-          fun ({Seqno, _, _, Config} = Snapshot,
-               {AccValid, AccInvalid} = Acc) ->
-                  case validate_snapshot(DataDir, Seqno, Config) of
-                      ok ->
-                          {[Snapshot | AccValid], AccInvalid};
-                      missing ->
-                          Acc;
-                      {error, _} = Error ->
-                          {AccValid, [{Snapshot, Error} | AccInvalid]}
-                  end
-          end, {[], []}, Snapshots),
+    validate_snapshot(DataDir, get_current_snapshot(Storage)),
 
-    case InvalidSnapshots =:= [] of
-        true ->
-            ok;
-        false ->
-            ?WARNING("Found some snapshots to be invalid.~n~p",
-                     [InvalidSnapshots])
-    end,
-
-    ValidSnapshots = lists:reverse(ValidSnapshots0),
-    NewStorage = Storage#storage{snapshots = ValidSnapshots},
-    SnapshotSeqno = get_latest_snapshot_seqno(NewStorage),
-
+    SnapshotSeqno = get_current_snapshot_seqno(Storage),
     case SnapshotSeqno + 1 >= LowSeqno of
         true ->
             ok;
@@ -1181,77 +1173,15 @@ validate_state(#storage{low_seqno = LowSeqno,
             exit({missing_snapshot, SnapshotSeqno, LowSeqno})
     end,
 
-    NewStorage.
+    Storage.
 
-get_and_hold_latest_snapshot(Storage) ->
-    case get_latest_snapshot(Storage) of
-        no_snapshot ->
-            no_snapshot;
-        {Seqno, _, _, _} = Snapshot ->
-            {Snapshot, hold_snapshot(Seqno, Storage)}
-    end.
-
-hold_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewSnapshots = sets:add_element(Seqno, Snapshots),
-    Storage#storage{snapshots_in_use = NewSnapshots}.
-
-release_snapshot(Seqno, #storage{snapshots_in_use = Snapshots} = Storage) ->
-    NewSnapshots = sets:del_element(Seqno, Snapshots),
-    compact(Storage#storage{snapshots_in_use = NewSnapshots}).
-
-snapshot_in_use({Seqno, _, _, _}, #storage{snapshots_in_use = Snapshots}) ->
-    sets:is_element(Seqno, Snapshots).
-
-get_latest_snapshot(#storage{snapshots = Snapshots}) ->
-    case Snapshots of
-        [] ->
-            no_snapshot;
-        [{_, _, _, _} = Snapshot| _] ->
-            Snapshot
-    end.
-
-get_latest_snapshot_seqno(Storage) ->
-    case get_latest_snapshot(Storage) of
-        no_snapshot ->
-            ?NO_SEQNO;
-        {Seqno, _, _Term, _Config} ->
-            Seqno
-    end.
-
-compact(Storage) ->
-    compact_log(compact_snapshots(Storage)).
-
-compact_snapshots(#storage{snapshots = Snapshots} = Storage) ->
-    case Snapshots of
-        [CurrentSnapshot | OtherSnapshots] ->
-            {KeepSnapshots, DeleteSnapshots} =
-                lists:partition(
-                  fun (Snapshot) ->
-                          snapshot_in_use(Snapshot, Storage)
-                  end, OtherSnapshots),
-
-            case KeepSnapshots of
-                [] ->
-                    ok;
-                [_] ->
-                    %% The agent will only release the previous snapshot once
-                    %% the new one is recorded. So it's normal that one extra
-                    %% snapshot may still be held.
-                    ok;
-                _ ->
-                    ?DEBUG("Won't delete some snapshots because "
-                           "they are in use :~n~p",
-                           [KeepSnapshots])
-            end,
-
-            lists:foreach(
-              fun ({SnapshotSeqno, _, _, _}) ->
-                      delete_snapshot(SnapshotSeqno, Storage)
-              end, DeleteSnapshots),
-
-            Storage#storage{snapshots = [CurrentSnapshot | KeepSnapshots]};
-        _ ->
-            Storage
+release_snapshot(Seqno, #storage{extra_snapshots = ExtraSnapshots} = Storage) ->
+    case lists:keytake(Seqno, 1, ExtraSnapshots) of
+        false ->
+            Storage;
+        {value, _, NewExtraSnapshot} ->
+            delete_snapshot(Seqno, Storage),
+            Storage#storage{extra_snapshots = NewExtraSnapshot}
     end.
 
 delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
@@ -1264,19 +1194,29 @@ delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
             exit({delete_snapshot_failed, Error})
     end.
 
-compact_log(#storage{log_segments = LogSegments} = Storage) ->
+get_current_snapshot(#storage{current_snapshot = MaybeSnapshot}) ->
+    MaybeSnapshot.
+
+get_current_snapshot_seqno(Storage) ->
+    case get_current_snapshot(Storage) of
+        no_snapshot ->
+            ?NO_SEQNO;
+        {Seqno, _, _Term, _Config} ->
+            Seqno
+    end.
+
+compact(#storage{log_segments = LogSegments} = Storage) ->
     NumLogSegments = length(LogSegments),
     case NumLogSegments > ?MAX_LOG_SEGMENTS of
         true ->
-            do_compact_log(Storage);
+            do_compact(Storage);
         false ->
             Storage
     end.
 
-do_compact_log(#storage{low_seqno = LowSeqno,
-                        log_segments = LogSegments} = Storage) ->
-    %% Don't delete past our earliest snapshot.
-    SnapshotSeqno = get_latest_snapshot_seqno(Storage),
+do_compact(#storage{low_seqno = LowSeqno,
+                    log_segments = LogSegments} = Storage) ->
+    SnapshotSeqno = get_current_snapshot_seqno(Storage),
 
     {CannotDelete, CanDelete} = classify_logs(SnapshotSeqno, LogSegments),
     LogSegments = CannotDelete ++ CanDelete,

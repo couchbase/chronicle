@@ -2144,7 +2144,7 @@ check_peer_and_id(Peer, PeerId, Data) ->
 handle_force_snapshot(From, State, Data) ->
     case check_force_snapshot(State, Data) of
         ok ->
-            LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
+            LatestSnapshotSeqno = get_current_snapshot_seqno(Data),
             CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
 
             case LatestSnapshotSeqno =:= CommittedSeqno of
@@ -2229,13 +2229,14 @@ init_data() ->
     pass_snapshot_to_mgr(#data{storage = storage_open()}).
 
 pass_snapshot_to_mgr(Data) ->
-    case get_and_hold_latest_snapshot(Data) of
-        {Snapshot, NewData} ->
-            chronicle_snapshot_mgr:store_snapshot(Snapshot),
-            NewData;
+    case get_current_snapshot(Data) of
         no_snapshot ->
-            Data
-    end.
+            ok;
+        Snapshot ->
+            chronicle_snapshot_mgr:store_snapshot(Snapshot)
+    end,
+
+    Data.
 
 assert_valid_history_id(HistoryId) ->
     true = is_binary(HistoryId).
@@ -2429,16 +2430,11 @@ get_config(#data{storage = Storage}) ->
 get_committed_config(#data{storage = Storage}) ->
     chronicle_storage:get_committed_config(Storage).
 
-get_latest_snapshot_seqno(#data{storage = Storage}) ->
-    chronicle_storage:get_latest_snapshot_seqno(Storage).
+get_current_snapshot(#data{storage = Storage}) ->
+    chronicle_storage:get_current_snapshot(Storage).
 
-get_and_hold_latest_snapshot(#data{storage = Storage} = Data) ->
-    case chronicle_storage:get_and_hold_latest_snapshot(Storage) of
-        {Snapshot, NewStorage} ->
-            {Snapshot, Data#data{storage = NewStorage}};
-        no_snapshot ->
-            no_snapshot
-    end.
+get_current_snapshot_seqno(#data{storage = Storage}) ->
+    chronicle_storage:get_current_snapshot_seqno(Storage).
 
 release_snapshot(Seqno, #data{storage = Storage} = Data) ->
     Data#data{storage = chronicle_storage:release_snapshot(Seqno, Storage)}.
@@ -2470,7 +2466,7 @@ maybe_initiate_snapshot(Data) ->
     end.
 
 need_snapshot(Data) ->
-    LatestSnapshotSeqno = get_latest_snapshot_seqno(Data),
+    LatestSnapshotSeqno = get_current_snapshot_seqno(Data),
     CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
     CommittedSeqno - LatestSnapshotSeqno >= ?SNAPSHOT_INTERVAL.
 
