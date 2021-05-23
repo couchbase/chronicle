@@ -21,7 +21,7 @@
 
 -define(MAGIC, <<"chronicle">>).
 -define(MAGIC_BYTES, 9).
--define(VERSION, 1).
+-define(LOG_VERSION, 1).
 -define(HEADER_BYTES, (?MAGIC_BYTES + 1)).
 
 -define(READ_CHUNK_SIZE, 1024 * 1024).
@@ -145,7 +145,7 @@ check_header_data(Data) ->
         <<MaybeMagic:?MAGIC_BYTES/binary, Version:8>> ->
             case MaybeMagic =:= ?MAGIC of
                 true ->
-                    case Version =:= ?VERSION of
+                    case Version =:= ?LOG_VERSION of
                         true ->
                             ok;
                         false ->
@@ -157,7 +157,7 @@ check_header_data(Data) ->
     end.
 
 write_header(Fd, UserData) ->
-    Header = <<?MAGIC/binary, ?VERSION:8>>,
+    Header = <<?MAGIC/binary, ?LOG_VERSION:8>>,
     file:write(Fd, encode_term(UserData, Header)).
 
 append(#log{mode = write, fd = Fd}, Term) ->

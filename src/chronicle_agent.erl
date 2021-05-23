@@ -2379,25 +2379,7 @@ storage_open() ->
     Storage1 =
         case maps:size(Meta) > 0 of
             true ->
-                Version = maps:get(?META_VERSION, Meta),
-                if
-                    Version > ?LOCAL_VERSION ->
-                        ?ERROR("Can't start due to storage being newer "
-                               "than our supported version. "
-                               "Storage version: ~b."
-                               "Our version: ~b",
-                               [Version, ?LOCAL_VERSION]),
-                        error({unsupported_compat_version,
-                               Version, ?LOCAL_VERSION});
-                    Version < ?LOCAL_VERSION ->
-                        ?INFO("Updating storage with new version. "
-                              "Old version: ~b. New version: ~b",
-                              [Version, ?LOCAL_VERSION]),
-                        chronicle_storage:store_meta(
-                         #{?META_VERSION => ?LOCAL_VERSION}, Storage0);
-                    true ->
-                        Storage0
-                end;
+                Storage0;
             false ->
                 SeedMeta = #{?META_STATE => not_provisioned,
                              ?META_PEER => ?NO_PEER,
@@ -2405,8 +2387,7 @@ storage_open() ->
                              ?META_HISTORY_ID => ?NO_HISTORY,
                              ?META_TERM => ?NO_TERM,
                              ?META_COMMITTED_SEQNO => ?NO_SEQNO,
-                             ?META_PENDING_BRANCH => undefined,
-                             ?META_VERSION => ?COMPAT_VERSION},
+                             ?META_PENDING_BRANCH => undefined},
                 ?INFO("Found empty storage. "
                       "Seeding it with default metadata:~n~p", [SeedMeta]),
                 chronicle_storage:store_meta(SeedMeta, Storage0)

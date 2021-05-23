@@ -35,8 +35,6 @@
          ensure_rsm_dir/1, snapshot_dir/1,
          map_append/2]).
 
--define(STORAGE_VERSION, 0).
-
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
 
@@ -1368,16 +1366,16 @@ map_append(Fun, Entry) ->
     end.
 
 check_version(DataDir) ->
-    Path = filename:join(chronicle_dir(DataDir), "storage_version"),
+    Path = filename:join(chronicle_dir(DataDir), "version"),
     Version = chronicle_utils:read_int_from_file(Path, -1),
 
     if
-        Version =:= ?STORAGE_VERSION ->
+        Version =:= ?VERSION ->
             ok;
-        Version < ?STORAGE_VERSION ->
-            ok = chronicle_utils:store_int_to_file(Path, ?STORAGE_VERSION);
+        Version < ?VERSION ->
+            ok = chronicle_utils:store_int_to_file(Path, ?VERSION);
         true ->
             ?ERROR("Found unsupported storage version ~b (our version is ~b)",
-                   [Version, ?STORAGE_VERSION]),
-            exit({unsupported_storage_version, Version, ?STORAGE_VERSION})
+                   [Version, ?VERSION]),
+            exit({unsupported_storage_version, Version, ?VERSION})
     end.
