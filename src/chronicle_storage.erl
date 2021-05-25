@@ -24,7 +24,7 @@
 -export([open/0, wipe/0,
          get_meta/1, get_high_seqno/1, get_high_term/1,
          get_config/1, get_committed_config/1,
-         store_meta/2, append/5, sync/1, close/1, publish/1,
+         store_meta/2, append/5, sync/1, close/1,
          install_snapshot/6, record_snapshot/5, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
@@ -143,7 +143,7 @@ open() ->
         %% outside world is durable: theoretically it's possible for agent to
         %% crash after writing an update out to storage but before making it
         %% durable. This is meant to deal with such possibility.
-        sync(Storage2)
+        publish(sync(Storage2))
     catch
         T:E:Stack ->
             close(Storage0),
@@ -485,7 +485,9 @@ get_meta(Storage) ->
     Storage#storage.meta.
 
 get_committed_seqno(#{?META_COMMITTED_SEQNO := CommittedSeqno}) ->
-    CommittedSeqno.
+    CommittedSeqno;
+get_committed_seqno(_) ->
+    ?NO_SEQNO.
 
 get_high_seqno(Storage) ->
     Storage#storage.high_seqno.
@@ -546,7 +548,7 @@ store_meta(Updates, Storage) ->
             NewStorage0 = add_meta(Meta, Storage),
             NewStorage1 = compact_configs(NewStorage0),
             NewStorage = log_append({meta, Meta}, NewStorage1),
-            maybe_rollover(sync(NewStorage));
+            publish(maybe_rollover(sync(NewStorage)));
         false ->
             Storage
     end.
@@ -569,7 +571,7 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     NewStorage0 = log_append(LogEntry, Storage),
     NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
                             Truncate, Entries, NewStorage0),
-    maybe_rollover(sync(NewStorage1)).
+    publish(maybe_rollover(sync(NewStorage1))).
 
 do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -967,7 +969,7 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
 
     NewSnapshots = [{Seqno, HistoryId, Term, Config} | Snapshots],
     NewStorage1 = NewStorage0#storage{snapshots = NewSnapshots},
-    compact(sync(NewStorage1)).
+    publish(compact(sync(NewStorage1))).
 
 publish_snapshot(Storage) ->
     case get_latest_snapshot(Storage) of
