@@ -65,6 +65,7 @@ get_options() ->
                   {"/cluster/peers", ?MODULE, #state{domain=cluster, op=peers}},
                   {"/cluster/status", ?MODULE,
                    #state{domain=cluster, op=status}},
+                  {"/kv", ?MODULE, #state{domain=kv, op=txn}},
                   {"/kv/:key", ?MODULE, #state{domain=kv}}
                  ]}
           ]),
@@ -72,10 +73,12 @@ get_options() ->
 
 init(Req, State) ->
     case State of
-        #state{domain=kv} ->
+        #state{domain=kv, op=undefined} ->
             Method = method_to_atom(cowboy_req:method(Req)),
             ?LOG_DEBUG("Method: ~p", [Method]),
             {cowboy_rest, Req, State#state{op = Method}};
+        #state{domain=kv} ->
+            {cowboy_rest, Req, State};
         #state{domain=config} ->
             {ok, config_api(Req, State), State};
         #state{domain=node} ->
@@ -131,6 +134,9 @@ json_api(Req, #state{domain=kv, op=post}=State) ->
     {Result, Req1, State};
 json_api(Req, #state{domain=kv, op=put}=State) ->
     {Result, Req1} = set_value(Req, any),
+    {Result, Req1, State};
+json_api(Req, #state{domain=kv, op=txn}=State) ->
+    {Result, Req1} = txn(Req),
     {Result, Req1, State}.
 
 config_api(Req, #state{domain=config, op=info}) ->
@@ -288,6 +294,104 @@ delete_value(Req, ExpectedRevision) ->
     catch
         exit:{noproc, _} ->
             no_rsm
+    end.
+
+get_retries(Req) ->
+    #{retries := Retries} =
+        cowboy_req:match_qs(
+          [{retries, [fun retries_constraint/2], 50}],
+          Req),
+    Retries.
+
+retries_constraint(forward, Value) ->
+    try binary_to_integer(Value) of
+        Retries when Retries > 0 ->
+            {ok, Retries};
+        _ ->
+            {error, bad_retries}
+    catch
+        error:badarg ->
+            {error, bad_retries}
+    end;
+retries_constraint(format_error, _Error) ->
+    "retries must be a positive integer".
+
+txn(Req) ->
+    {ok, Body, Req1} = cowboy_req:read_body(Req),
+    case parse_txn(Body) of
+        error ->
+            {false, Req1};
+        Ops ->
+            Retries = get_retries(Req1),
+            Consistency = get_consistency(Req1),
+            try do_txn(Retries, Consistency, Ops) of
+                {ok, Snapshot} ->
+                    {stop, reply_json(200, txn_reply(Snapshot), Req1)};
+                {error, exceeded_retries} ->
+                    {stop, reply(409, "Transaction exceeded retries", Req1)}
+            catch
+                exit:{noproc, _} ->
+                    {false, Req1}
+            end
+    end.
+
+txn_reply(Snapshot) ->
+    {lists:map(
+       fun ({Key, {Value, {HistoryId, Seqno}}}) ->
+               {list_to_binary(Key),
+                {[{value, jiffy:decode(Value)},
+                  {rev, {[{history_id, HistoryId}, {seqno, Seqno}]}}]}}
+       end, maps:to_list(Snapshot))}.
+
+do_txn(Retries, Consistency, Ops) ->
+    Gets = [Key || {get, Key} <- Ops],
+    Sets = [Op || {set, _Key, _Value} = Op <- Ops],
+    Result = chronicle_kv:transaction(
+               kv, Gets,
+               fun (Snapshot) ->
+                       case Sets of
+                           [] ->
+                               {abort, {ok, Snapshot}};
+                           _ ->
+                               {commit, Sets, Snapshot}
+                       end
+               end, #{retries => Retries,
+                      read_consistency => Consistency}),
+
+    case Result of
+        {ok, _Revision, Snapshot} ->
+            {ok, Snapshot};
+        _ ->
+            Result
+    end.
+
+parse_txn(Body) ->
+    try jiffy:decode(Body, [return_maps]) of
+        Ops when is_list(Ops) ->
+            try
+                parse_txn_ops(Ops)
+            catch
+                error:badarg ->
+                    error
+            end;
+        _ ->
+            error
+    catch _:_ ->
+            error
+    end.
+
+parse_txn_ops([]) ->
+    [];
+parse_txn_ops([Op | Ops]) ->
+    case Op of
+        #{<<"op">> := <<"set">>,
+          <<"key">> := Key,
+          <<"value">> := Value} ->
+            [{set,
+              binary_to_list(Key),
+              jiffy:encode(Value)} | parse_txn_ops(Ops)];
+        #{<<"op">> := <<"get">>, <<"key">> := Key} ->
+            [{get, binary_to_list(Key)} | parse_txn_ops(Ops)]
     end.
 
 parse_nodes(Body) ->
