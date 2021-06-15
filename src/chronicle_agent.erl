@@ -489,7 +489,6 @@ establish_local_term(HistoryId, Term) ->
                      chronicle_utils:send_options()) ->
           maybe_replies(Opaque, establish_term_result()).
 establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
-    %% TODO: don't abuse gen_server calls here and everywhere else
     call_async(ServerRef, Opaque,
                {establish_term, HistoryId, Term, Position},
                Options).
