@@ -332,6 +332,7 @@ snapshot_result(Seqno, Result) ->
     chronicle_utils:send(?SERVER,
                          {snapshot_mgr, {snapshot_result, Seqno, Result}}, []).
 
+%% For debugging only.
 get_log() ->
     call(?SERVER, get_log).
 
@@ -815,7 +816,6 @@ handle_event(Type, Event, _State, _Data) ->
 handle_call(get_peer_info, From, State, Data) ->
     handle_get_peer_info(From, State, Data);
 handle_call(get_log, From, _State, _Data) ->
-    %% TODO: get rid of this
     {keep_state_and_data,
      {reply, From, {ok, chronicle_storage:get_log()}}};
 handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
