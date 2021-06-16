@@ -43,8 +43,6 @@
 
 -define(LOG_MAX_SIZE,
         chronicle_settings:get({storage, log_max_size}, 1024 * 1024)).
--define(MAX_LOG_SEGMENTS,
-        chronicle_settings:get({storage, max_log_segments}, 20)).
 
 -define(HISTO_METRIC(Op), {<<"chronicle_disk_latency">>, [{op, Op}]}).
 -define(HISTO_MAX, 5000).
@@ -1206,41 +1204,18 @@ get_current_snapshot_seqno(Storage) ->
     end.
 
 compact(#storage{log_segments = LogSegments} = Storage) ->
-    NumLogSegments = length(LogSegments),
-    case NumLogSegments > ?MAX_LOG_SEGMENTS of
-        true ->
-            do_compact(Storage);
-        false ->
-            Storage
+    case LogSegments of
+        [] ->
+            Storage;
+        _ ->
+            do_compact(Storage)
     end.
 
 do_compact(#storage{low_seqno = LowSeqno,
                     log_segments = LogSegments} = Storage) ->
     SnapshotSeqno = get_current_snapshot_seqno(Storage),
 
-    {CannotDelete, CanDelete} = classify_logs(SnapshotSeqno, LogSegments),
-    LogSegments = CannotDelete ++ CanDelete,
-
-    {Keep, Delete} =
-        case length(CannotDelete) > ?MAX_LOG_SEGMENTS of
-            true ->
-                WarnLogs = lists:nthtail(?MAX_LOG_SEGMENTS, CannotDelete),
-
-                %% This shouldn't happen assuming snapshots are taken
-                %% regularly enough. But if it does, for the sake of
-                %% simplicity, we'll just wait until the next snapshot
-                %% (instead of requesting a snapshot explicitly).
-                ?WARNING("Can't delete some required log segments. "
-                         "Snapshot seqno ~p.~n"
-                         "All log segments:~n~p~n"
-                         "Extraneous log segments:~n~p",
-                         [SnapshotSeqno, LogSegments, WarnLogs]),
-
-                {CannotDelete, CanDelete};
-            false ->
-                lists:split(?MAX_LOG_SEGMENTS, LogSegments)
-        end,
-
+    {Keep, Delete} = classify_logs(SnapshotSeqno, LogSegments),
     case Delete of
         [] ->
             ok;
