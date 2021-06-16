@@ -41,9 +41,6 @@
 -define(RANGE_KEY, '$range').
 -define(SNAPSHOT_KEY, '$snapshot').
 
--define(LOG_MAX_SIZE,
-        chronicle_settings:get({storage, log_max_size}, 1024 * 1024)).
-
 -define(HISTO_METRIC(Op), {<<"chronicle_disk_latency">>, [{op, Op}]}).
 -define(HISTO_MAX, 5000).
 -define(HISTO_UNIT, millisecond).
@@ -236,14 +233,6 @@ try_delete_files(Paths) ->
                       ?WARNING("Failed to delete file ~p: ~p", [Path, Error])
               end
       end, Paths).
-
-maybe_rollover(#storage{current_log_data_size = LogDataSize} = Storage) ->
-    case LogDataSize > ?LOG_MAX_SIZE of
-        true ->
-            compact(rollover(Storage));
-        false ->
-            Storage
-    end.
 
 rollover(#storage{current_log = CurrentLog,
                   current_log_ix = CurrentLogIx,
@@ -555,7 +544,7 @@ store_meta(Updates, Storage) ->
             NewStorage0 = add_meta(Meta, Storage),
             NewStorage1 = compact_configs(NewStorage0),
             NewStorage = log_append({meta, Meta}, NewStorage1),
-            publish(maybe_rollover(sync(NewStorage)));
+            publish(sync(NewStorage));
         false ->
             Storage
     end.
@@ -578,7 +567,7 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     NewStorage0 = log_append(LogEntry, Storage),
     NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
                             Truncate, Entries, NewStorage0),
-    publish(maybe_rollover(sync(NewStorage1))).
+    publish(sync(NewStorage1)).
 
 do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -980,10 +969,11 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
     SnapshotsDir = snapshots_dir(DataDir),
     sync_dir(SnapshotsDir),
 
-    NewStorage0 = log_append(LogRecord, Storage),
-    NewStorage1 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage0),
-    publish_snapshot(NewStorage1),
-    publish(compact(sync(NewStorage1))).
+    NewStorage0 = rollover(Storage),
+    NewStorage1 = log_append(LogRecord, NewStorage0),
+    NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
+    publish_snapshot(NewStorage2),
+    publish(compact(sync(NewStorage2))).
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
