@@ -160,14 +160,16 @@ write_header(Fd, UserData) ->
     Header = <<?MAGIC/binary, ?LOG_VERSION:8>>,
     file:write(Fd, encode_term(UserData, Header)).
 
-append(#log{mode = write, fd = Fd}, Term) ->
-    Data = encode_term(Term),
-    case file:write(Fd, Data) of
-        ok ->
-            {ok, byte_size(Data)};
-        {error, _} = Error ->
-            Error
-    end.
+append(#log{mode = write, fd = Fd}, Terms) ->
+    encode_terms(Terms,
+                 fun (Data) ->
+                         case file:write(Fd, Data) of
+                             ok ->
+                                 {ok, byte_size(Data)};
+                             {error, _} = Error ->
+                                 Error
+                         end
+                 end).
 
 data_size(#log{fd = Fd, start_pos = HeaderSize}) ->
     case file:position(Fd, cur) of
@@ -179,8 +181,24 @@ data_size(#log{fd = Fd, start_pos = HeaderSize}) ->
             Error
     end.
 
-encode_term(Term) ->
-    encode_term(Term, <<>>).
+encode_terms(Terms, Fun) ->
+    encode_terms(Terms, <<>>, Fun).
+
+encode_terms([], AccData, Fun) ->
+    Fun(AccData);
+encode_terms([Term|Terms], AccData, Fun) ->
+    NewAccData = encode_term(Term, AccData),
+    case byte_size(NewAccData) >= ?WRITE_CHUNK_SIZE of
+        true ->
+            case Fun(NewAccData) of
+                ok ->
+                    encode_terms(Terms, <<>>, Fun);
+                Other ->
+                    Other
+            end;
+        false ->
+            encode_terms(Terms, NewAccData, Fun)
+    end.
 
 encode_term(Term, AccData) ->
     TermBinary = term_to_binary(Term),

@@ -764,7 +764,7 @@ log_path(DataDir, LogIndex) ->
 log_append(Record, #storage{current_log = Log,
                             current_log_data_size = LogDataSize} = Storage) ->
     Result = ?TIME(<<"append">>, {ok, _},
-                   chronicle_log:append(Log, Record)),
+                   chronicle_log:append(Log, [Record])),
     case Result of
         {ok, BytesWritten} ->
             NewLogDataSize = LogDataSize + BytesWritten,
