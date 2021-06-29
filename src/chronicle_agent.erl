@@ -1589,18 +1589,17 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 
-    {NewState, NewData} =
-        post_append(Term, NewCommittedSeqno, State, Data, NewData0),
+    {NewState, NewData} = post_append(NewCommittedSeqno, State, Data, NewData0),
 
     {next_state, NewState, NewData, {reply, From, ok}}.
 
-post_append(Term, NewCommittedSeqno, State, OldData, NewData) ->
+post_append(NewCommittedSeqno, State, OldData, NewData) ->
     publish_state(State, NewData),
 
     {FinalState, FinalData} =
         case State of
             provisioned ->
-                maybe_announce_term_established(Term, OldData),
+                maybe_announce_term_established(OldData, NewData),
                 check_new_config(OldData, NewData),
 
                 OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
@@ -1979,7 +1978,7 @@ handle_install_snapshot(HistoryId, Term,
                         end,
 
                     {NewState, NewData} =
-                        post_append(Term, SnapshotSeqno, State, Data, NewData0),
+                        post_append(SnapshotSeqno, State, Data, NewData0),
 
                     {next_state, NewState, NewData,
                      {reply, From, {ok, build_metadata(NewData)}}}
@@ -2258,13 +2257,14 @@ announce_new_history(Data) ->
     Metadata = build_metadata(Data),
     chronicle_events:sync_notify({new_history, HistoryId, Metadata}).
 
-maybe_announce_term_established(Term, Data) ->
-    OldTerm = get_meta(?META_TERM, Data),
-    case Term =:= OldTerm of
+maybe_announce_term_established(OldData, NewData) ->
+    OldTerm = get_meta(?META_TERM, OldData),
+    NewTerm = get_meta(?META_TERM, NewData),
+    case NewTerm =:= OldTerm of
         true ->
             ok;
         false ->
-            announce_term_established(Term)
+            announce_term_established(NewTerm)
     end.
 
 announce_term_established(State, Term) ->
