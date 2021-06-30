@@ -1589,11 +1589,11 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 
-    {NewState, NewData} = post_append(NewCommittedSeqno, State, Data, NewData0),
+    {NewState, NewData} = post_append(State, Data, NewData0),
 
     {next_state, NewState, NewData, {reply, From, ok}}.
 
-post_append(NewCommittedSeqno, State, OldData, NewData) ->
+post_append(State, OldData, NewData) ->
     publish_state(State, NewData),
 
     {FinalState, FinalData} =
@@ -1602,6 +1602,7 @@ post_append(NewCommittedSeqno, State, OldData, NewData) ->
                 maybe_announce_term_established(OldData, NewData),
                 check_new_config(OldData, NewData),
 
+                NewCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, NewData),
                 OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
                 case OldCommittedSeqno =:= NewCommittedSeqno of
                     true ->
@@ -1977,8 +1978,7 @@ handle_install_snapshot(HistoryId, Term,
                                 store_meta(Metadata, Data)
                         end,
 
-                    {NewState, NewData} =
-                        post_append(SnapshotSeqno, State, Data, NewData0),
+                    {NewState, NewData} = post_append(State, Data, NewData0),
 
                     {next_state, NewState, NewData,
                      {reply, From, {ok, build_metadata(NewData)}}}
