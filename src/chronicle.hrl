@@ -166,5 +166,7 @@
 -define(META_PENDING_BRANCH, pending_branch).
 -define(META_VERSION, version).
 
+-define(RSM_EVENTS, chronicle_rsm_events).
+
 -define(EXTERNAL_EVENTS, chronicle_external_events).
 -define(EXTERNAL_EVENTS_SERVER, ?SERVER_NAME(?EXTERNAL_EVENTS)).

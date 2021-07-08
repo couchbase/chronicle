@@ -22,7 +22,7 @@
 -export([start_link/4]).
 -export([command/2, command/3, query/2, query/3,
          get_local_revision/1, sync_revision/3, sync/2,
-         note_leader_status/2, note_seqno_committed/2, take_snapshot/2]).
+         note_leader_status/2]).
 
 -export([unpack_payload/1]).
 -export([format_snapshot/1]).
@@ -190,12 +190,6 @@ sync_revision_fast(Name, {RevHistoryId, RevSeqno}) ->
 note_leader_status(Pid, LeaderStatus) ->
     gen_statem:cast(Pid, {leader_status, LeaderStatus}).
 
-note_seqno_committed(Name, Seqno) ->
-    gen_statem:cast(?SERVER(Name), {seqno_committed, Seqno}).
-
-take_snapshot(Name, Seqno) ->
-    gen_statem:cast(?SERVER(Name), {take_snapshot, Seqno}).
-
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -300,6 +294,14 @@ init([Name, PeerId, Mod, ModArgs]) ->
                           mod = Mod,
                           mod_state = ModState,
                           mod_data = ModData},
+
+            Self = self(),
+            chronicle_events:subscribe(
+              ?RSM_EVENTS,
+              fun (Event) ->
+                      gen_statem:cast(Self, {event, Event})
+              end),
+
             Data = maybe_restore_snapshot(Data0),
             {State, Effects} = init_from_agent(Data0),
 
@@ -346,10 +348,13 @@ handle_event({call, From}, Call, State, Data) ->
     end;
 handle_event(cast, {leader_status, LeaderStatus}, State, Data) ->
     handle_leader_status(LeaderStatus, State, Data);
-handle_event(cast, {seqno_committed, Seqno}, State, Data) ->
-    handle_seqno_committed(Seqno, State, Data);
-handle_event(cast, {take_snapshot, Seqno}, State, Data) ->
-    handle_take_snapshot(Seqno, State, Data);
+handle_event(cast, {event, Event}, State, Data) ->
+    case Event of
+        {seqno_committed, Seqno} ->
+            handle_seqno_committed(Seqno, State, Data);
+        {take_snapshot, Seqno} ->
+            handle_take_snapshot(Seqno, State, Data)
+    end;
 handle_event(cast, {noop, PeerId, Incarnation, SeenSerial}, State, Data) ->
     handle_noop(PeerId, Incarnation, SeenSerial, State, Data);
 handle_event(cast, {leader_request, ReplyTo, Request}, State, Data) ->
@@ -1514,13 +1519,13 @@ init_from_agent(#data{name = Name} = Data) ->
 
     true = (Data#data.read_seqno =< CommittedSeqno),
 
-    Effects0 = [{next_event, cast, {seqno_committed, CommittedSeqno}}],
+    Effects0 = [{next_event, cast, {event, {seqno_committed, CommittedSeqno}}}],
     Effects1 =
         case maps:find(need_snapshot_seqno, Info) of
             {ok, SnapshotSeqno} ->
                 true = (SnapshotSeqno =< CommittedSeqno),
-                [{next_event, cast, {seqno_committed, SnapshotSeqno}},
-                 {next_event, cast, {take_snapshot, SnapshotSeqno}} |
+                [{next_event, cast, {event, {seqno_committed, SnapshotSeqno}}},
+                 {next_event, cast, {event, {take_snapshot, SnapshotSeqno}}} |
                  Effects0];
             error ->
                 Effects0

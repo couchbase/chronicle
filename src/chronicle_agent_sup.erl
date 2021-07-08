@@ -42,10 +42,16 @@ child_specs() ->
                     shutdown => brutal_kill,
                     type => worker},
 
+    RSMEvents = #{id => ?RSM_EVENTS,
+                  start => {chronicle_events, start_link, [?RSM_EVENTS]},
+                  restart => permanent,
+                  shutdown => 1000,
+                  type => worker},
+
     Agent = #{id => chronicle_agent,
               start => {chronicle_agent, start_link, []},
               restart => permanent,
               shutdown => 5000,
               type => worker},
 
-    [SnapshotMgr, Agent].
+    [SnapshotMgr, RSMEvents, Agent].

@@ -1054,18 +1054,6 @@ handle_snapshot_timeout(_State, #data{snapshot_state = SnapshotState} = Data) ->
 handle_retry_snapshot(_State, Data) ->
     {keep_state, retry_snapshot(Data)}.
 
-foreach_rsm(Fun, Data) ->
-    case get_config(Data) of
-        undefined ->
-            ok;
-        Config ->
-            RSMs = get_rsms(Config),
-            chronicle_utils:maps_foreach(
-              fun (Name, _) ->
-                      Fun(Name)
-              end, RSMs)
-    end.
-
 handle_reprovision(From, State, Data) ->
     case check_reprovision(State, Data) of
         {ok, OldPeer, Config} ->
@@ -1094,7 +1082,7 @@ handle_reprovision(From, State, Data) ->
             publish_state(State, NewData),
             announce_system_reprovisioned(NewData),
             handle_new_config(NewData),
-            announce_committed_seqno(Seqno, NewData),
+            announce_committed_seqno(Seqno),
 
             {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
@@ -1608,7 +1596,7 @@ post_append(State, OldData, NewData) ->
                     true ->
                         {State, NewData};
                     false ->
-                        announce_committed_seqno(NewCommittedSeqno, NewData),
+                        announce_committed_seqno(NewCommittedSeqno),
                         check_got_removed(State, OldData, NewData)
                 end;
             _ ->
@@ -1909,8 +1897,7 @@ handle_local_mark_committed(HistoryId, Term,
                             store_meta(#{?META_COMMITTED_SEQNO =>
                                              CommittedSeqno}, Data),
                         publish_state(State, NewData0),
-
-                        announce_committed_seqno(CommittedSeqno, NewData0),
+                        announce_committed_seqno(CommittedSeqno),
 
                         ?DEBUG("Marked ~p seqno committed", [CommittedSeqno]),
                         NewData0
@@ -2314,11 +2301,8 @@ announce_new_config(Data) ->
     Config = ConfigEntry#log_entry.value,
     chronicle_events:sync_notify({new_config, Config, Metadata}).
 
-announce_committed_seqno(CommittedSeqno, Data) ->
-    foreach_rsm(
-      fun (Name) ->
-              chronicle_rsm:note_seqno_committed(Name, CommittedSeqno)
-      end, Data).
+announce_committed_seqno(CommittedSeqno) ->
+    chronicle_events:notify(?RSM_EVENTS, {seqno_committed, CommittedSeqno}).
 
 announce_system_state(SystemState, Extra) ->
     chronicle_events:sync_notify({system_state, SystemState, Extra}),
@@ -2537,10 +2521,7 @@ initiate_snapshot(Data) ->
 
     RSMs = maps:keys(CommittedRSMs),
     chronicle_snapshot_mgr:pending_snapshot(CommittedSeqno, RSMs),
-    foreach_rsm(
-      fun (Name) ->
-              chronicle_rsm:take_snapshot(Name, CommittedSeqno)
-      end, Data),
+    chronicle_events:notify(?RSM_EVENTS, {take_snapshot, CommittedSeqno}),
 
     ?INFO("Taking snapshot at seqno ~p.~n"
           "Config:~n~p",

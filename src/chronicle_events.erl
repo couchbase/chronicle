@@ -21,22 +21,36 @@
 
 -define(SERVER, ?SERVER_NAME(?MODULE)).
 
--export([start_link/0]).
--export([notify/1, sync_notify/1, subscribe/1]).
+-export([start_link/0, start_link/1]).
+-export([notify/1, notify/2,
+         sync_notify/1, sync_notify/2,
+         subscribe/1, subscribe/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link() ->
-    gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [], []).
+    start_link(?MODULE).
+
+start_link(Name) ->
+    gen_server:start_link(?START_NAME(Name), ?MODULE, [], []).
 
 notify(Event) ->
-    gen_server:cast(?SERVER, {notify, Event}).
+    notify(?MODULE, Event).
+
+notify(Name, Event) ->
+    gen_server:cast(?SERVER_NAME(Name), {notify, Event}).
 
 sync_notify(Event) ->
-    gen_server:call(?SERVER, {sync_notify, Event}, infinity).
+    sync_notify(?MODULE, Event).
+
+sync_notify(Name, Event) ->
+    gen_server:call(?SERVER_NAME(Name), {sync_notify, Event}, infinity).
 
 subscribe(Handler) ->
-    gen_server:call(?SERVER, {subscribe, self(), Handler}, infinity).
+    subscribe(?MODULE, Handler).
+
+subscribe(Name, Handler) ->
+    gen_server:call(?SERVER_NAME(Name), {subscribe, self(), Handler}, infinity).
 
 %% callbacks
 init([]) ->
