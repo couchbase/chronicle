@@ -163,12 +163,7 @@ write_header(Fd, UserData) ->
 append(#log{mode = write, fd = Fd}, Terms) ->
     encode_terms(Terms,
                  fun (Data) ->
-                         case file:write(Fd, Data) of
-                             ok ->
-                                 {ok, byte_size(Data)};
-                             {error, _} = Error ->
-                                 Error
-                         end
+                         file:write(Fd, Data)
                  end).
 
 data_size(#log{fd = Fd, start_pos = HeaderSize}) ->
@@ -182,22 +177,28 @@ data_size(#log{fd = Fd, start_pos = HeaderSize}) ->
     end.
 
 encode_terms(Terms, Fun) ->
-    encode_terms(Terms, <<>>, Fun).
+    encode_terms(Terms, <<>>, 0, Fun).
 
-encode_terms([], AccData, Fun) ->
-    Fun(AccData);
-encode_terms([Term|Terms], AccData, Fun) ->
+encode_terms([], AccData, AccWritten, Fun) ->
+    case Fun(AccData) of
+        ok ->
+            {ok, byte_size(AccData) + AccWritten};
+        Other ->
+            Other
+    end;
+encode_terms([Term|Terms], AccData, AccWritten, Fun) ->
     NewAccData = encode_term(Term, AccData),
-    case byte_size(NewAccData) >= ?WRITE_CHUNK_SIZE of
+    Size = byte_size(NewAccData),
+    case Size >= ?WRITE_CHUNK_SIZE of
         true ->
             case Fun(NewAccData) of
                 ok ->
-                    encode_terms(Terms, <<>>, Fun);
+                    encode_terms(Terms, <<>>, AccWritten + Size, Fun);
                 Other ->
                     Other
             end;
         false ->
-            encode_terms(Terms, NewAccData, Fun)
+            encode_terms(Terms, NewAccData, AccWritten, Fun)
     end.
 
 encode_term(Term, AccData) ->
