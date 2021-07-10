@@ -17,7 +17,8 @@
 
 -include("chronicle.hrl").
 
--export([open/4, read_log/4, sync/1, close/1, create/2, append/2, data_size/1]).
+-export([open/1, open/4, read_log/4, sync/1,
+         close/1, create/2, append/2, data_size/1]).
 
 -define(MAGIC, <<"chronicle">>).
 -define(MAGIC_BYTES, 9).
@@ -35,6 +36,19 @@
 -record(log, { fd,
                mode,
                start_pos }).
+
+open(Path) ->
+    case open_int(Path, write) of
+        {ok, #log{fd = Fd} = Log, _} ->
+            case file:position(Fd, eof) of
+                {ok, _} ->
+                    {ok, Log};
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 open(Path, UserDataFun, LogEntryFun, State) ->
     case open_int(Path, write) of

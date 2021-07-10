@@ -35,6 +35,13 @@
          ensure_rsm_dir/1, snapshot_dir/1,
          map_append/2]).
 
+-ifdef(TEST).
+-define(WRITER, list_to_atom("chronicle_storage_writer-" ++
+                                 atom_to_list(vnet:vnode()))).
+-else.
+-define(WRITER, chronicle_storage_writer).
+-endif.
+
 -define(MEM_LOG_INFO_TAB, ?ETS_TABLE(chronicle_mem_log_info)).
 -define(MEM_LOG_TAB, ?ETS_TABLE(chronicle_mem_log)).
 
@@ -85,11 +92,11 @@
                    ?META_PENDING_BRANCH => undefined | #branch{},
                    ?META_VERSION => chronicle:compat_version() }.
 
--record(storage, { current_log,
-                   current_log_ix,
+-record(storage, { current_log_ix,
                    current_log_path,
                    current_log_start_seqno,
                    current_log_data_size,
+
                    low_seqno,
                    high_seqno,
                    meta,
@@ -106,7 +113,11 @@
                    log_info_tab,
                    log_tab,
 
-                   log_segments
+                   log_segments,
+
+                   writer,
+                   requests = [],
+                   rollover_pending = false
                   }).
 
 open() ->
@@ -121,28 +132,21 @@ open() ->
                         high_seqno = ?NO_SEQNO,
                         meta = #{}},
 
-    try
-        DataDir = chronicle_env:data_dir(),
-        maybe_complete_wipe(DataDir),
-        ensure_dirs(DataDir),
-        check_version(DataDir),
+    DataDir = chronicle_env:data_dir(),
+    maybe_complete_wipe(DataDir),
+    ensure_dirs(DataDir),
+    check_version(DataDir),
 
-        Storage1 = Storage0#storage{data_dir = DataDir},
-        Storage2 = compact(validate_state(open_logs(Storage1))),
+    Storage1 = Storage0#storage{data_dir = DataDir},
+    Storage2 = open_logs(Storage1),
+    validate_state(Storage2),
+    Storage3 = spawn_writer(Storage2),
+    Storage4 = compact(Storage3),
 
-        publish_snapshot(Storage2),
-        Storage3 = cleanup_snapshots(Storage2),
+    publish_snapshot(Storage4),
+    Storage5 = cleanup_snapshots(Storage4),
 
-        %% Sync storage to make sure that whatever state is exposed to the
-        %% outside world is durable: theoretically it's possible for agent to
-        %% crash after writing an update out to storage but before making it
-        %% durable. This is meant to deal with such possibility.
-        publish(sync(Storage3))
-    catch
-        T:E:Stack ->
-            close(Storage0),
-            erlang:raise(T, E, Stack)
-    end.
+    publish(Storage5).
 
 open_logs(#storage{data_dir = DataDir} = Storage) ->
     {Orphans, Sealed, Current} = find_logs(DataDir),
@@ -183,37 +187,39 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
           end, NewStorage0, Sealed),
 
     {CurrentLogIx, CurrentLogPath} = Current,
-    FinalStorage = open_current_log(CurrentLogIx, CurrentLogPath, NewStorage1),
+    Result = open_current_log(CurrentLogIx, CurrentLogPath, NewStorage1),
 
     maybe_delete_orphans(Orphans),
 
-    FinalStorage.
+    Result.
 
 open_current_log(LogIx, LogPath, Storage0) ->
     Storage = Storage0#storage{current_log_ix = LogIx,
                                current_log_path = LogPath},
-    NewStorage =
+    {Log, NewStorage} =
         case chronicle_log:open(LogPath,
                                 fun handle_user_data/2,
                                 fun handle_log_entry/2,
                                 Storage) of
-            {ok, Log, NewStorage0} ->
-                NewStorage0#storage{current_log = Log};
+            {ok, L, NewStorage0} ->
+                {L, NewStorage0};
             {error, Error} when Error =:= enoent;
                                 Error =:= no_header ->
                 ?INFO("Error while opening log file ~p: ~p", [LogPath, Error]),
                 #storage{meta = Meta,
                          config = Config,
                          high_seqno = HighSeqno} = Storage,
-                Log = create_log(Config, Meta, HighSeqno, LogPath),
-                Storage#storage{current_log = Log,
-                                current_log_start_seqno = HighSeqno + 1};
+                L = create_log(Config, Meta, HighSeqno, LogPath),
+                {L, Storage#storage{current_log_start_seqno = HighSeqno + 1}};
             {error, Error} ->
                 ?ERROR("Failed to open log ~p: ~p", [LogPath, Error]),
                 exit({failed_to_open_log, LogPath, Error})
         end,
 
-    {ok, DataSize} = chronicle_log:data_size(NewStorage#storage.current_log),
+    log_sync(Log),
+    {ok, DataSize} = chronicle_log:data_size(Log),
+    ok = chronicle_log:close(Log),
+
     NewStorage#storage{current_log_data_size = DataSize}.
 
 maybe_delete_orphans([]) ->
@@ -234,29 +240,17 @@ try_delete_files(Paths) ->
               end
       end, Paths).
 
-rollover(#storage{current_log = CurrentLog,
-                  current_log_ix = CurrentLogIx,
-                  current_log_path = CurrentLogPath,
-                  current_log_start_seqno = CurrentLogStartSeqno,
+rollover(#storage{rollover_pending = true} = Storage) ->
+    Storage;
+rollover(#storage{current_log_ix = CurrentLogIx,
                   data_dir = DataDir,
                   config = Config,
                   meta = Meta,
                   high_seqno = HighSeqno,
-                  log_segments = LogSegments} = Storage) ->
-    ok = chronicle_log:close(CurrentLog),
-
-    LogSegment = {CurrentLogPath, CurrentLogStartSeqno},
-    NewLogSegments = [LogSegment | LogSegments],
-
-    NewLogIx = CurrentLogIx + 1,
-    NewLogPath = log_path(DataDir, NewLogIx),
-    NewLog = create_log(Config, Meta, HighSeqno, NewLogPath),
-    Storage#storage{current_log = NewLog,
-                    current_log_ix = NewLogIx,
-                    current_log_path = NewLogPath,
-                    current_log_data_size = 0,
-                    current_log_start_seqno = HighSeqno + 1,
-                    log_segments = NewLogSegments}.
+                  writer = Writer} = Storage) ->
+    NewLogPath = log_path(DataDir, CurrentLogIx + 1),
+    Writer ! {rollover, Config, Meta, HighSeqno, NewLogPath},
+    Storage#storage{rollover_pending = true}.
 
 create_log(Config, Meta, HighSeqno, LogPath) ->
     ?INFO("Creating log file ~p.~n"
@@ -543,8 +537,7 @@ store_meta(Updates, Storage) ->
         true ->
             NewStorage0 = add_meta(Meta, Storage),
             NewStorage1 = compact_configs(NewStorage0),
-            NewStorage = log_append({meta, Meta}, NewStorage1),
-            publish(sync(NewStorage));
+            sync(log_append(make_ref(), {meta, Meta}, NewStorage1));
         false ->
             Storage
     end.
@@ -564,10 +557,10 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
     Meta = append_handle_meta(Opts, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
-    NewStorage0 = log_append(LogEntry, Storage),
-    NewStorage1 = do_append(StartSeqno, EndSeqno, Meta,
-                            Truncate, Entries, NewStorage0),
-    publish(sync(NewStorage1)).
+
+    NewStorage0 = log_append(make_ref(), LogEntry, Storage),
+    sync(do_append(StartSeqno, EndSeqno, Meta,
+                   Truncate, Entries, NewStorage0)).
 
 do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -608,27 +601,73 @@ append_handle_truncate(StartSeqno, Opts,
 
     Truncate.
 
-sync(#storage{current_log = Log} = Storage) ->
-    Result = ?TIME(<<"sync">>, chronicle_log:sync(Log)),
-    case Result of
-        ok ->
-            Storage;
-        {error, Error} ->
-            exit({sync_failed, Error})
+sync(#storage{requests = Requests} = Storage) ->
+    publish(sync_loop(lists:reverse(Requests), Storage#storage{requests = []})).
+
+sync_loop([], Storage) ->
+    Storage;
+sync_loop(Requests, Storage) ->
+    receive
+        {?MODULE, Event} ->
+            case handle_event(Event, Storage) of
+                {ok, NewStorage} ->
+                    sync_loop(Requests, NewStorage);
+                {ok, NewStorage, AckedRequests} ->
+                    NewRequests = Requests -- AckedRequests,
+                    [] = AckedRequests -- Requests,
+
+                    sync_loop(NewRequests, NewStorage)
+            end
     end.
 
-close(#storage{current_log = Log,
-               log_tab = LogTab,
-               log_info_tab = LogInfoTab}) ->
+close(#storage{log_tab = LogTab,
+               log_info_tab = LogInfoTab,
+               writer = Writer}) ->
     ets:delete(LogTab),
     ets:delete(LogInfoTab),
 
-    case Log of
+    case Writer of
         undefined ->
             ok;
         _ ->
-            ok = chronicle_log:close(Log)
+            chronicle_utils:terminate_linked_process(Writer, shutdown),
+            ?FLUSH({?MODULE, _}),
+            ok
     end.
+
+handle_event(Event, Storage) ->
+    case Event of
+        {append_done, BytesWritten, Requests} ->
+            handle_append_done(BytesWritten, Requests, Storage);
+        {rollover_done, HighSeqno} ->
+            handle_rollover_done(HighSeqno, Storage)
+    end.
+
+handle_append_done(BytesWritten, Requests,
+                   #storage{current_log_data_size = DataSize} = Storage) ->
+    NewDataSize = DataSize + BytesWritten,
+    NewStorage = Storage#storage{current_log_data_size = NewDataSize},
+    {ok, NewStorage, Requests}.
+
+handle_rollover_done(HighSeqno,
+                     #storage{data_dir = DataDir,
+
+                              current_log_path = CurrentLogPath,
+                              current_log_start_seqno = CurrentLogStartSeqno,
+                              current_log_ix = CurrentLogIx,
+                              log_segments = LogSegments} = Storage) ->
+    LogSegment = {CurrentLogPath, CurrentLogStartSeqno},
+    NewLogSegments = [LogSegment | LogSegments],
+
+    NewLogIx = CurrentLogIx + 1,
+    NewLogPath = log_path(DataDir, NewLogIx),
+    {ok, compact(Storage#storage{
+                   current_log_ix = NewLogIx,
+                   current_log_path = NewLogPath,
+                   current_log_data_size = 0,
+                   current_log_start_seqno = HighSeqno + 1,
+                   log_segments = NewLogSegments,
+                   rollover_pending = false})}.
 
 find_logs(DataDir) ->
     LogsDir = logs_dir(DataDir),
@@ -761,17 +800,10 @@ find_orphan_logs_test() ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Record, #storage{current_log = Log,
-                            current_log_data_size = LogDataSize} = Storage) ->
-    Result = ?TIME(<<"append">>, {ok, _},
-                   chronicle_log:append(Log, [Record])),
-    case Result of
-        {ok, BytesWritten} ->
-            NewLogDataSize = LogDataSize + BytesWritten,
-            Storage#storage{current_log_data_size = NewLogDataSize};
-        {error, Error} ->
-            exit({append_failed, Error})
-    end.
+log_append(Request, Record, #storage{writer = Writer,
+                                     requests = Requests} = Storage) ->
+    Writer ! {append, Request, Record},
+    Storage#storage{requests = [Request | Requests]}.
 
 truncate_configs(StartSeqno,
                  #storage{pending_configs = PendingConfigs,
@@ -970,10 +1002,11 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
     sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
-    NewStorage1 = log_append(LogRecord, NewStorage0),
+    NewStorage1 = sync(log_append(make_ref(), LogRecord, NewStorage0)),
     NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
     publish_snapshot(NewStorage2),
-    publish(compact(sync(NewStorage2))).
+
+    NewStorage2.
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
@@ -1159,9 +1192,7 @@ validate_state(#storage{low_seqno = LowSeqno,
             ?ERROR("Last snapshot at seqno ~p is below our low seqno ~p",
                    [SnapshotSeqno, LowSeqno]),
             exit({missing_snapshot, SnapshotSeqno, LowSeqno})
-    end,
-
-    Storage.
+    end.
 
 release_snapshot(Seqno, #storage{extra_snapshots = ExtraSnapshots} = Storage) ->
     case lists:keytake(Seqno, 1, ExtraSnapshots) of
@@ -1202,7 +1233,9 @@ compact(#storage{log_segments = LogSegments} = Storage) ->
     end.
 
 do_compact(#storage{low_seqno = LowSeqno,
-                    log_segments = LogSegments} = Storage) ->
+                    log_segments = LogSegments,
+
+                    writer = Writer} = Storage) ->
     SnapshotSeqno = get_current_snapshot_seqno(Storage),
 
     {Keep, Delete} = classify_logs(SnapshotSeqno, LogSegments),
@@ -1215,19 +1248,9 @@ do_compact(#storage{low_seqno = LowSeqno,
                    "~p",
                    [SnapshotSeqno, Delete]),
 
-            lists:foreach(
-              fun ({LogPath, _}) ->
-                      Result = ?TIME(<<"delete">>, file:delete(LogPath)),
-                      case Result of
-                          ok ->
-                              ?INFO("Deleted ~s", [LogPath]),
-                              true;
-                          {error, Error} ->
-                              ?ERROR("Failed to delete ~s: ~p",
-                                     [LogPath, Error]),
-                              error({compact_log_failed, LogPath, Error})
-                      end
-              end, Delete)
+            LogPaths = [LogPath || {LogPath, _} <- Delete],
+            Writer ! {delete_logs, LogPaths},
+            ok
     end,
 
     {_LogPath, LogStartSeqno} = lists:last(Keep),
@@ -1300,3 +1323,125 @@ check_version(DataDir) ->
                    [Version, ?VERSION]),
             exit({unsupported_storage_version, Version, ?VERSION})
     end.
+
+-record(writer, { parent,
+                  log,
+                  next_msg
+                }).
+
+spawn_writer(#storage{current_log_path = LogPath} = Storage) ->
+    Writer = #writer{parent = self()},
+    Pid = proc_lib:spawn_link(
+            fun () ->
+                    register(?WRITER, self()),
+                    process_flag(trap_exit, true),
+
+                    {ok, Log} = chronicle_log:open(LogPath),
+                    writer_loop(Writer#writer{log = Log})
+            end),
+
+    Storage#storage{writer = Pid}.
+
+writer_recv_msg(#writer{next_msg = NextMsg} = Writer) ->
+    case NextMsg of
+        undefined ->
+            Msg = receive M -> M end,
+            {Writer, Msg};
+        _ ->
+            {Writer#writer{next_msg = undefined}, NextMsg}
+    end.
+
+writer_unrecv_msg(Msg, #writer{next_msg = undefined} = Writer) ->
+    Writer#writer{next_msg = Msg}.
+
+writer_loop(Writer) ->
+    {NewWriter0, Msg} = writer_recv_msg(Writer),
+
+    NewWriter =
+        case Msg of
+            {append, Req, Record} ->
+                writer_handle_append([Req], [Record], NewWriter0);
+            {rollover, Config, Meta, HighSeqno, Path} ->
+                writer_handle_rollover(Config, Meta,
+                                       HighSeqno, Path, NewWriter0);
+            {delete_logs, Paths} ->
+                writer_handle_delete_logs(Paths, NewWriter0);
+            {'EXIT', Pid, Reason} ->
+                ?DEBUG("Got exit from ~w with reason ~w",
+                       [Pid, chronicle_utils:sanitize_reason(Reason)]),
+                exit(normal);
+            _ ->
+                exit({unexpected_message, Msg})
+        end,
+
+    writer_loop(NewWriter).
+
+writer_handle_append(Reqs, Batch, Writer) ->
+    receive
+        {append, Req, Record} ->
+            writer_handle_append([Req | Reqs], [Record | Batch], Writer);
+        Msg ->
+            NewWriter = writer_unrecv_msg(Msg, Writer),
+            writer_append_batch(Reqs, Batch, NewWriter)
+    after
+        0 ->
+            writer_append_batch(Reqs, Batch, Writer)
+    end.
+
+writer_append_batch(Requests0, Batch0,
+                    #writer{log = Log} = Writer) ->
+    Requests = lists:reverse(Requests0),
+    Batch = lists:reverse(Batch0),
+    BytesWritten = writer_log_append(Log, Batch),
+    log_sync(Log),
+    notify_parent({append_done, BytesWritten, Requests}, Writer),
+    Writer.
+
+writer_log_append(Log, Batch) ->
+    Result = ?TIME(<<"append">>, {ok, _}, chronicle_log:append(Log, Batch)),
+    case Result of
+        {ok, BytesWritten} ->
+            BytesWritten;
+        {error, Error} ->
+            exit({append_failed, Error})
+    end.
+
+log_sync(Log) ->
+    Result = ?TIME(<<"sync">>, chronicle_log:sync(Log)),
+    case Result of
+        ok ->
+            ok;
+        {error, Error} ->
+            exit({sync_failed, Error})
+    end.
+
+writer_handle_rollover(Config, Meta, HighSeqno, Path,
+                       #writer{log = Log} = Writer) ->
+    ok = chronicle_log:close(Log),
+    NewLog = create_log(Config, Meta, HighSeqno, Path),
+
+    notify_parent({rollover_done, HighSeqno}, Writer),
+    Writer#writer{log = NewLog}.
+
+writer_handle_delete_logs(Paths, Writer) ->
+    delete_logs(Paths),
+    Writer.
+
+notify_parent(Msg, #writer{parent = Parent}) ->
+    Parent ! {?MODULE, Msg},
+    ok.
+
+delete_logs(Paths) ->
+    lists:foreach(
+      fun (Path) ->
+              Result = ?TIME(<<"delete">>, file:delete(Path)),
+              case Result of
+                  ok ->
+                      ?INFO("Deleted ~s", [Path]),
+                      true;
+                  {error, Error} ->
+                      ?ERROR("Failed to delete ~s: ~p",
+                             [Path, Error]),
+                      error({delete_log_failed, Path, Error})
+              end
+      end, Paths).
