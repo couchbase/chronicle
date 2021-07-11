@@ -539,7 +539,7 @@ store_meta(Updates, Storage) ->
             NewStorage1 = compact_configs(NewStorage0),
             sync(log_append(make_ref(), {meta, Meta}, NewStorage1));
         false ->
-            Storage
+            sync(writer_sync(make_ref(), Storage))
     end.
 
 dedup_meta(Updates, #storage{meta = Meta}) ->
@@ -800,9 +800,16 @@ find_orphan_logs_test() ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Request, Record, #storage{writer = Writer,
-                                     requests = Requests} = Storage) ->
-    Writer ! {append, Request, Record},
+log_append(Request, Record, Storage) ->
+    writer_request(Request, {append, Request, Record}, Storage).
+
+writer_sync(Request, Storage) ->
+    writer_request(Request, {sync, Request}, Storage).
+
+writer_request(Request, Msg,
+               #storage{writer = Writer,
+                        requests = Requests} = Storage) ->
+    Writer ! Msg,
     Storage#storage{requests = [Request | Requests]}.
 
 truncate_configs(StartSeqno,
@@ -1361,6 +1368,8 @@ writer_loop(Writer) ->
         case Msg of
             {append, Req, Record} ->
                 writer_handle_append([Req], [Record], NewWriter0);
+            {sync, Req} ->
+                writer_handle_append([Req], [], NewWriter0);
             {rollover, Config, Meta, HighSeqno, Path} ->
                 writer_handle_rollover(Config, Meta,
                                        HighSeqno, Path, NewWriter0);
@@ -1380,6 +1389,8 @@ writer_handle_append(Reqs, Batch, Writer) ->
     receive
         {append, Req, Record} ->
             writer_handle_append([Req | Reqs], [Record | Batch], Writer);
+        {sync, Req} ->
+            writer_handle_append([Req | Reqs], Batch, Writer);
         Msg ->
             NewWriter = writer_unrecv_msg(Msg, Writer),
             writer_append_batch(Reqs, Batch, NewWriter)
@@ -1391,9 +1402,19 @@ writer_handle_append(Reqs, Batch, Writer) ->
 writer_append_batch(Requests0, Batch0,
                     #writer{log = Log} = Writer) ->
     Requests = lists:reverse(Requests0),
-    Batch = lists:reverse(Batch0),
-    BytesWritten = writer_log_append(Log, Batch),
-    log_sync(Log),
+
+    BytesWritten =
+        case Batch0 of
+            [] ->
+                %% sync-s only
+                0;
+            _ ->
+                Batch = lists:reverse(Batch0),
+                Written = writer_log_append(Log, Batch),
+                log_sync(Log),
+                Written
+        end,
+
     notify_parent({append_done, BytesWritten, Requests}, Writer),
     Writer.
 
