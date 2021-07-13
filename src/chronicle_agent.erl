@@ -2211,7 +2211,9 @@ check_log_range(StartSeqno, EndSeqno, Data) ->
     end.
 
 init_data() ->
-    pass_snapshot_to_mgr(#data{storage = storage_open()}).
+    Storage = chronicle_storage:open(),
+    Data = maybe_seed_storage(#data{storage = Storage}),
+    pass_snapshot_to_mgr(Data).
 
 pass_snapshot_to_mgr(Data) ->
     case get_current_snapshot(Data) of
@@ -2329,12 +2331,11 @@ announce_system_event(Event) ->
 announce_system_event(Event, Extra) ->
     chronicle_events:sync_notify({system_event, Event, Extra}).
 
-storage_open() ->
-    Storage = chronicle_storage:open(),
-    Meta = chronicle_storage:get_meta(Storage),
+maybe_seed_storage(Data) ->
+    Meta = get_meta(Data),
     case maps:size(Meta) > 0 of
         true ->
-            Storage;
+            Data;
         false ->
             SeedMeta = #{?META_STATE => not_provisioned,
                          ?META_PEER => ?NO_PEER,
@@ -2345,7 +2346,7 @@ storage_open() ->
                          ?META_PENDING_BRANCH => undefined},
             ?INFO("Found empty storage. "
                   "Seeding it with default metadata:~n~p", [SeedMeta]),
-            chronicle_storage:store_meta(SeedMeta, Storage)
+            store_meta(SeedMeta, Data)
     end.
 
 append_entry(Entry, Meta, Data) ->
