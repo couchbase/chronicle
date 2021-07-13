@@ -24,8 +24,8 @@
 -export([open/0, wipe/0,
          get_meta/1, get_high_seqno/1, get_high_term/1,
          get_config/1, get_committed_config/1,
-         store_meta/2, append/5, sync/1, close/1,
-         install_snapshot/6, record_snapshot/5, delete_snapshot/2,
+         store_meta/3, append/6, sync/1, close/1,
+         install_snapshot/7, record_snapshot/6, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_current_snapshot/1, get_current_snapshot_seqno/1,
@@ -557,18 +557,15 @@ get_pending_config(#storage{pending_configs = PendingConfigs} = Storage) ->
             Config
     end.
 
-store_meta(Updates, Storage) ->
-    store_meta(none, Updates, Storage).
-
 -spec store_meta(any(), meta(), #storage{}) -> #storage{}.
 store_meta(Opaque, Updates, Storage) ->
     Meta = dedup_meta(Updates, Storage),
     case maps:size(Meta) > 0 of
         true ->
             NewStorage = add_pending_meta(Meta, Storage),
-            sync(writer_append(Opaque, {meta, Meta}, NewStorage));
+            writer_append(Opaque, {meta, Meta}, NewStorage);
         false ->
-            sync(writer_sync(Opaque, Storage))
+            writer_sync(Opaque, Storage)
     end.
 
 dedup_meta(Updates, #storage{pending_meta = Meta}) ->
@@ -582,9 +579,6 @@ dedup_meta(Updates, #storage{pending_meta = Meta}) ->
               end
       end, Updates).
 
-append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
-    append(none, StartSeqno, EndSeqno, Entries, Opts, Storage).
-
 append(Opaque, StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
     Meta = append_handle_meta(Opts, Storage),
@@ -593,7 +587,7 @@ append(Opaque, StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     NewStorage = prepare_append(StartSeqno, EndSeqno,
                                 Meta, Truncate, Entries, Storage),
     AppendData = {append, EndSeqno, Meta, get_pending_config(NewStorage)},
-    sync(writer_append(Opaque, LogEntry, AppendData, NewStorage)).
+    writer_append(Opaque, LogEntry, AppendData, NewStorage).
 
 prepare_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -635,8 +629,7 @@ append_handle_truncate(StartSeqno, Opts,
     Truncate.
 
 sync(Storage) ->
-    {_, NewStorage} = sync_loop([], Storage),
-    NewStorage.
+    sync_loop([], Storage).
 
 sync_loop(Acc, #storage{requests = Requests} = Storage) ->
     case queue:is_empty(Requests) of
@@ -1073,9 +1066,6 @@ get_published_snapshot() ->
             {Seqno, Term}
     end.
 
-record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
-    record_snapshot(none, Seqno, HistoryId, Term, Config, Storage).
-
 record_snapshot(Opaque, Seqno, HistoryId, Term, Config, Storage) ->
     record_snapshot(Opaque, Seqno,
                     {snapshot, Seqno, HistoryId, Term, Config}, Storage).
@@ -1089,7 +1079,7 @@ record_snapshot(Opaque, Seqno, LogRecord,
     sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
-    sync(writer_append(Opaque, LogRecord, NewStorage0)).
+    writer_append(Opaque, LogRecord, NewStorage0).
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
@@ -1101,9 +1091,6 @@ publish_snapshot(Storage) ->
 
 publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
     ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
-
-install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage) ->
-    install_snapshot(none, Seqno, HistoryId, Term, Config, Meta, Storage).
 
 install_snapshot(Opaque, Seqno, HistoryId, Term, Config, Meta,
                  #storage{pending_meta = OldMeta,

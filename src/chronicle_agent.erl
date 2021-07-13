@@ -2354,21 +2354,26 @@ append_entry(Entry, Meta, Data) ->
     append_entries(Seqno, Seqno, [Entry], Meta, false, Data).
 
 store_meta(Meta, #data{storage = Storage} = Data) ->
-    NewStorage = chronicle_storage:store_meta(Meta, Storage),
+    NewStorage0 = chronicle_storage:store_meta(none, Meta, Storage),
+    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
     Data#data{storage = NewStorage}.
 
 append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
                #data{storage = Storage} = Data) ->
-    NewStorage = chronicle_storage:append(StartSeqno, EndSeqno,
-                                          Entries,
-                                          #{meta => Metadata,
-                                            truncate => Truncate}, Storage),
+    NewStorage0 = chronicle_storage:append(none,
+                                           StartSeqno, EndSeqno,
+                                           Entries,
+                                           #{meta => Metadata,
+                                             truncate => Truncate}, Storage),
+    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
     Data#data{storage = NewStorage}.
 
 record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
                 #data{storage = Storage} = Data) ->
-    NewStorage = chronicle_storage:record_snapshot(Seqno, HistoryId, Term,
-                                                   ConfigEntry, Storage),
+    NewStorage0 = chronicle_storage:record_snapshot(none,
+                                                    Seqno, HistoryId, Term,
+                                                    ConfigEntry, Storage),
+    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
     pass_snapshot_to_mgr(Data#data{storage = NewStorage}).
 
 install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
@@ -2381,10 +2386,12 @@ install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                                                   RSM, RSMSnapshot)
       end, maps:to_list(RSMSnapshots)),
 
-    NewStorage =
-        chronicle_storage:install_snapshot(SnapshotSeqno,
+    NewStorage0 =
+        chronicle_storage:install_snapshot(none,
+                                           SnapshotSeqno,
                                            SnapshotHistoryId, SnapshotTerm,
                                            SnapshotConfig, Metadata, Storage),
+    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
     pass_snapshot_to_mgr(Data#data{storage = NewStorage}).
 
 get_peer_name() ->
