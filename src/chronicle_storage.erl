@@ -629,7 +629,7 @@ append_handle_truncate(StartSeqno, Opts,
     Truncate.
 
 sync(Storage) ->
-    publish(sync_loop(Storage)).
+    sync_loop(Storage).
 
 sync_loop(#storage{requests = Requests} = Storage) ->
     case queue:is_empty(Requests) of
@@ -689,12 +689,12 @@ handle_append_done(BytesWritten, DoneRequests,
 handle_request_done(sync, Storage) ->
     Storage;
 handle_request_done({meta, Meta}, Storage) ->
-    compact_configs(add_meta(Meta, Storage));
+    publish(compact_configs(add_meta(Meta, Storage)));
 handle_request_done({append, HighSeqno, Meta, Config}, Storage) ->
     NewStorage0 = add_meta(Meta, Storage),
     NewStorage1 = NewStorage0#storage{high_seqno = HighSeqno,
                                       config = Config},
-    compact_configs(NewStorage1);
+    publish(compact_configs(NewStorage1));
 handle_request_done({snapshot, Seqno, HistoryId, Term, Config}, Storage) ->
     NewStorage = add_snapshot(Seqno, HistoryId, Term, Config, Storage),
     publish_snapshot(NewStorage),
@@ -707,7 +707,7 @@ handle_request_done({install_snapshot,
                                       config = Config},
     NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
     publish_snapshot(NewStorage2),
-    compact(compact_configs(NewStorage2)).
+    publish(compact(compact_configs(NewStorage2))).
 
 extract_requests(Requests, DoneRequests) ->
     extract_requests(Requests, DoneRequests, []).
