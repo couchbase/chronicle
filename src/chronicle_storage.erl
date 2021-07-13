@@ -101,6 +101,9 @@
                    high_seqno,
                    meta,
 
+                   pending_meta,
+                   pending_high_seqno,
+
                    config,
                    committed_config,
                    pending_configs,
@@ -116,7 +119,7 @@
                    log_segments,
 
                    writer,
-                   requests = [],
+                   requests = queue:new(),
                    rollover_pending = false
                   }).
 
@@ -127,10 +130,7 @@ open() ->
                 [protected, set, named_table,
                  {keypos, #log_entry.seqno}, {read_concurrency, true}]),
     Storage0 = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
-                        log_tab = ets:whereis(?MEM_LOG_TAB),
-                        low_seqno = ?NO_SEQNO + 1,
-                        high_seqno = ?NO_SEQNO,
-                        meta = #{}},
+                        log_tab = ets:whereis(?MEM_LOG_TAB)},
 
     DataDir = chronicle_env:data_dir(),
     maybe_complete_wipe(DataDir),
@@ -152,11 +152,13 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
     {Orphans, Sealed, Current} = find_logs(DataDir),
 
     NewStorage0 = Storage#storage{meta = #{},
+                                  pending_meta = #{},
                                   config = undefined,
                                   committed_config = undefined,
                                   pending_configs = [],
                                   low_seqno = ?NO_SEQNO + 1,
                                   high_seqno = ?NO_SEQNO,
+                                  pending_high_seqno = ?NO_SEQNO,
                                   current_snapshot = no_snapshot,
                                   extra_snapshots = [],
                                   log_segments = []},
@@ -244,10 +246,10 @@ rollover(#storage{rollover_pending = true} = Storage) ->
     Storage;
 rollover(#storage{current_log_ix = CurrentLogIx,
                   data_dir = DataDir,
-                  config = Config,
                   meta = Meta,
-                  high_seqno = HighSeqno,
+                  pending_high_seqno = HighSeqno,
                   writer = Writer} = Storage) ->
+    Config = get_pending_config(Storage),
     NewLogPath = log_path(DataDir, CurrentLogIx + 1),
     Writer ! {rollover, Config, Meta, HighSeqno, NewLogPath},
     Storage#storage{rollover_pending = true}.
@@ -369,14 +371,19 @@ handle_user_data(UserData, Storage) ->
     NewStorage = Storage#storage{current_log_start_seqno = HighSeqno + 1},
     case StorageConfig of
         undefined ->
-            NewStorage1 = NewStorage#storage{meta = Meta,
-                                             high_seqno = HighSeqno,
-                                             low_seqno = HighSeqno + 1},
+            NewStorage1 =
+                NewStorage#storage{meta = Meta,
+                                   pending_meta = Meta,
+                                   high_seqno = HighSeqno,
+                                   pending_high_seqno = HighSeqno,
+                                   low_seqno = HighSeqno + 1},
             case Config of
                 undefined ->
                     NewStorage1;
                 #log_entry{} ->
-                    append_configs([Config], NewStorage1)
+                    NewStorage2 = append_configs([Config], NewStorage1),
+                    NewStorage3 = compact_configs(NewStorage2),
+                    NewStorage3#storage{config = Config}
             end;
         _ ->
             case Config =:= StorageConfig
@@ -408,22 +415,25 @@ handle_log_entry(Entry, Storage) ->
             ets:delete_all_objects(Storage#storage.log_tab),
 
             #storage{meta = CurrentMeta} = Storage,
+            NewMeta = maps:merge(CurrentMeta, Meta),
             NewStorage = Storage#storage{low_seqno = Seqno + 1,
                                          high_seqno = Seqno,
+                                         pending_high_seqno = Seqno,
                                          config = Config,
                                          committed_config = Config,
                                          pending_configs = [],
-                                         meta = maps:merge(CurrentMeta, Meta)},
+                                         meta = NewMeta,
+                                         pending_meta = NewMeta},
             add_snapshot(Seqno, HistoryId, Term, Config, NewStorage)
     end.
 
 handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
                   #storage{low_seqno = LowSeqno,
                            high_seqno = HighSeqno} = Storage) ->
-    NewStorage =
+    NewStorage0 =
         case Truncate of
             true ->
-                %% Need to do this explicitly, since currently do_append()
+                %% Need to do this explicitly, since currently prepare_append()
                 %% doesn't truncate until publish() is called.
                 mem_log_delete_range(StartSeqno, HighSeqno, Storage),
 
@@ -448,10 +458,19 @@ handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
                 Storage
         end,
 
-    do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, NewStorage).
+    NewStorage1 = prepare_append(StartSeqno, EndSeqno, Meta,
+                                 Truncate, Entries, NewStorage0),
+    NewStorage2 = NewStorage1#storage{
+                    config = get_pending_config(NewStorage1),
+                    meta = NewStorage1#storage.pending_meta,
+                    high_seqno = NewStorage1#storage.pending_high_seqno},
+    compact_configs(NewStorage2).
 
 add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
     Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
+
+add_pending_meta(Meta, #storage{pending_meta = CurrentMeta} = Storage) ->
+    Storage#storage{pending_meta = maps:merge(CurrentMeta, Meta)}.
 
 add_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
     Snapshot = {Seqno, HistoryId, Term, Config},
@@ -530,19 +549,26 @@ get_config(Storage) ->
 get_committed_config(Storage) ->
     Storage#storage.committed_config.
 
+get_pending_config(#storage{pending_configs = PendingConfigs} = Storage) ->
+    case PendingConfigs of
+        [] ->
+            get_committed_config(Storage);
+        [Config|_] ->
+            Config
+    end.
+
 -spec store_meta(meta(), #storage{}) -> #storage{}.
 store_meta(Updates, Storage) ->
     Meta = dedup_meta(Updates, Storage),
     case maps:size(Meta) > 0 of
         true ->
-            NewStorage0 = add_meta(Meta, Storage),
-            NewStorage1 = compact_configs(NewStorage0),
-            sync(log_append(make_ref(), {meta, Meta}, NewStorage1));
+            NewStorage = add_pending_meta(Meta, Storage),
+            sync(writer_append({meta, Meta}, NewStorage));
         false ->
-            sync(writer_sync(make_ref(), Storage))
+            sync(writer_sync(Storage))
     end.
 
-dedup_meta(Updates, #storage{meta = Meta}) ->
+dedup_meta(Updates, #storage{pending_meta = Meta}) ->
     maps:filter(
       fun (Key, Value) ->
               case maps:find(Key, Meta) of
@@ -558,11 +584,12 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     Meta = append_handle_meta(Opts, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
 
-    NewStorage0 = log_append(make_ref(), LogEntry, Storage),
-    sync(do_append(StartSeqno, EndSeqno, Meta,
-                   Truncate, Entries, NewStorage0)).
+    NewStorage = prepare_append(StartSeqno, EndSeqno,
+                                Meta, Truncate, Entries, Storage),
+    AppendData = {append, EndSeqno, Meta, get_pending_config(NewStorage)},
+    sync(writer_append(LogEntry, AppendData, NewStorage)).
 
-do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
+prepare_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
         case Truncate of
             true ->
@@ -572,7 +599,7 @@ do_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
         end,
 
     NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
-    NewStorage2 = add_meta(Meta, NewStorage1),
+    NewStorage2 = add_pending_meta(Meta, NewStorage1),
     append_configs(Entries, NewStorage2).
 
 append_handle_meta(Opts, Storage) ->
@@ -584,9 +611,9 @@ append_handle_meta(Opts, Storage) ->
     end.
 
 append_handle_truncate(StartSeqno, Opts,
-                       #storage{meta = Meta,
+                       #storage{pending_meta = Meta,
                                 low_seqno = LowSeqno,
-                                high_seqno = HighSeqno}) ->
+                                pending_high_seqno = HighSeqno}) ->
     Truncate = maps:get(truncate, Opts, false),
     case Truncate of
         true ->
@@ -601,22 +628,22 @@ append_handle_truncate(StartSeqno, Opts,
 
     Truncate.
 
-sync(#storage{requests = Requests} = Storage) ->
-    publish(sync_loop(lists:reverse(Requests), Storage#storage{requests = []})).
+sync(Storage) ->
+    publish(sync_loop(Storage)).
 
-sync_loop([], Storage) ->
-    Storage;
-sync_loop(Requests, Storage) ->
-    receive
-        {?MODULE, Event} ->
-            case handle_event(Event, Storage) of
-                {ok, NewStorage} ->
-                    sync_loop(Requests, NewStorage);
-                {ok, NewStorage, AckedRequests} ->
-                    NewRequests = Requests -- AckedRequests,
-                    [] = AckedRequests -- Requests,
-
-                    sync_loop(NewRequests, NewStorage)
+sync_loop(#storage{requests = Requests} = Storage) ->
+    case queue:is_empty(Requests) of
+        true ->
+            Storage;
+        false ->
+            receive
+                {?MODULE, Event} ->
+                    case handle_event(Event, Storage) of
+                        {ok, NewStorage} ->
+                            sync_loop(NewStorage);
+                        {ok, NewStorage, _AckedRequests} ->
+                            sync_loop(NewStorage)
+                    end
             end
     end.
 
@@ -643,11 +670,53 @@ handle_event(Event, Storage) ->
             handle_rollover_done(HighSeqno, Storage)
     end.
 
-handle_append_done(BytesWritten, Requests,
-                   #storage{current_log_data_size = DataSize} = Storage) ->
+handle_append_done(BytesWritten, DoneRequests,
+                   #storage{current_log_data_size = DataSize,
+                            requests = Requests} = Storage) ->
     NewDataSize = DataSize + BytesWritten,
-    NewStorage = Storage#storage{current_log_data_size = NewDataSize},
-    {ok, NewStorage, Requests}.
+    {NewRequests, ReqDatas} = extract_requests(Requests, DoneRequests),
+
+    NewStorage0 = Storage#storage{requests = NewRequests,
+                                  current_log_data_size = NewDataSize},
+
+    NewStorage = lists:foldl(
+                   fun (Req, Acc) ->
+                           handle_request_done(Req, Acc)
+                   end, NewStorage0, ReqDatas),
+
+    {ok, NewStorage, DoneRequests}.
+
+handle_request_done(sync, Storage) ->
+    Storage;
+handle_request_done({meta, Meta}, Storage) ->
+    compact_configs(add_meta(Meta, Storage));
+handle_request_done({append, HighSeqno, Meta, Config}, Storage) ->
+    NewStorage0 = add_meta(Meta, Storage),
+    NewStorage1 = NewStorage0#storage{high_seqno = HighSeqno,
+                                      config = Config},
+    compact_configs(NewStorage1);
+handle_request_done({snapshot, Seqno, HistoryId, Term, Config}, Storage) ->
+    NewStorage = add_snapshot(Seqno, HistoryId, Term, Config, Storage),
+    publish_snapshot(NewStorage),
+    compact(NewStorage);
+handle_request_done({install_snapshot,
+                     Seqno, HistoryId, Term, Config, Meta}, Storage) ->
+    NewStorage0 = add_meta(Meta, Storage),
+    NewStorage1 = NewStorage0#storage{low_seqno = Seqno + 1,
+                                      high_seqno = Seqno,
+                                      config = Config},
+    NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
+    publish_snapshot(NewStorage2),
+    compact(compact_configs(NewStorage2)).
+
+extract_requests(Requests, DoneRequests) ->
+    extract_requests(Requests, DoneRequests, []).
+
+extract_requests(Requests, [], Acc) ->
+    {Requests, lists:reverse(Acc)};
+extract_requests(Requests, [Req|Rest], Acc) ->
+    {{value, {Req, ReqData}}, NewRequests} = queue:out(Requests),
+    extract_requests(NewRequests, Rest, [ReqData|Acc]).
 
 handle_rollover_done(HighSeqno,
                      #storage{data_dir = DataDir,
@@ -661,13 +730,13 @@ handle_rollover_done(HighSeqno,
 
     NewLogIx = CurrentLogIx + 1,
     NewLogPath = log_path(DataDir, NewLogIx),
-    {ok, compact(Storage#storage{
-                   current_log_ix = NewLogIx,
-                   current_log_path = NewLogPath,
-                   current_log_data_size = 0,
-                   current_log_start_seqno = HighSeqno + 1,
-                   log_segments = NewLogSegments,
-                   rollover_pending = false})}.
+    {ok, Storage#storage{
+           current_log_ix = NewLogIx,
+           current_log_path = NewLogPath,
+           current_log_data_size = 0,
+           current_log_start_seqno = HighSeqno + 1,
+           log_segments = NewLogSegments,
+           rollover_pending = false}}.
 
 find_logs(DataDir) ->
     LogsDir = logs_dir(DataDir),
@@ -800,31 +869,32 @@ find_orphan_logs_test() ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-log_append(Request, Record, Storage) ->
-    writer_request(Request, {append, Request, Record}, Storage).
+writer_append(Record, Storage) ->
+    writer_append(Record, Record, Storage).
 
-writer_sync(Request, Storage) ->
-    writer_request(Request, {sync, Request}, Storage).
+writer_append(Record, Data, Storage) ->
+    writer_request({append, Record}, Data, Storage).
 
-writer_request(Request, Msg,
+writer_sync(Storage) ->
+    writer_request(sync, sync, Storage).
+
+writer_request(Msg, RequestData,
                #storage{writer = Writer,
                         requests = Requests} = Storage) ->
-    Writer ! Msg,
-    Storage#storage{requests = [Request | Requests]}.
+    Ref = make_ref(),
+    NewRequests = queue:in({Ref, RequestData}, Requests),
+
+    Writer ! {Ref, Msg},
+    Storage#storage{requests = NewRequests}.
 
 truncate_configs(StartSeqno,
-                 #storage{pending_configs = PendingConfigs,
-                          committed_config = CommittedConfig} = Storage) ->
-    case lists:dropwhile(fun (#log_entry{seqno = Seqno}) ->
-                                 Seqno >= StartSeqno
-                         end, PendingConfigs) of
-        [] ->
-            Storage#storage{pending_configs = [],
-                            config = CommittedConfig};
-        [NewConfig|_] = NewPendingConfigs ->
-            Storage#storage{pending_configs = NewPendingConfigs,
-                            config = NewConfig}
-    end.
+                 #storage{pending_configs = PendingConfigs} = Storage) ->
+    NewPendingConfigs =
+        lists:dropwhile(fun (#log_entry{seqno = Seqno}) ->
+                                Seqno >= StartSeqno
+                        end, PendingConfigs),
+
+    Storage#storage{pending_configs = NewPendingConfigs}.
 
 append_configs(Entries, Storage) ->
     ConfigEntries = lists:filter(fun is_config_entry/1, Entries),
@@ -834,10 +904,7 @@ append_configs(Entries, Storage) ->
         _ ->
             PendingConfigs = Storage#storage.pending_configs,
             NewPendingConfigs = lists:reverse(ConfigEntries) ++ PendingConfigs,
-            [NewConfig|_] = NewPendingConfigs,
-            NewStorage = Storage#storage{config = NewConfig,
-                                         pending_configs = NewPendingConfigs},
-            compact_configs(NewStorage)
+            Storage#storage{pending_configs = NewPendingConfigs}
     end.
 
 compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
@@ -860,7 +927,7 @@ compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
 mem_log_append(EndSeqno, Entries,
                #storage{log_tab = LogTab} = Storage) ->
     ets:insert(LogTab, Entries),
-    Storage#storage{high_seqno = EndSeqno}.
+    Storage#storage{pending_high_seqno = EndSeqno}.
 
 mem_log_delete_range(FromSeqno, ToSeqno, #storage{log_tab = LogTab}) ->
     StartTS = erlang:monotonic_time(),
@@ -997,11 +1064,9 @@ get_published_snapshot() ->
     end.
 
 record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
-    record_snapshot(Seqno, HistoryId, Term, Config,
-                    {snapshot, Seqno, HistoryId, Term, Config}, Storage).
+    record_snapshot(Seqno, {snapshot, Seqno, HistoryId, Term, Config}, Storage).
 
-record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
-                #storage{data_dir = DataDir} = Storage) ->
+record_snapshot(Seqno, LogRecord, #storage{data_dir = DataDir} = Storage) ->
     LatestSnapshotSeqno = get_current_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
 
@@ -1009,11 +1074,7 @@ record_snapshot(Seqno, HistoryId, Term, Config, LogRecord,
     sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
-    NewStorage1 = sync(log_append(make_ref(), LogRecord, NewStorage0)),
-    NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
-    publish_snapshot(NewStorage2),
-
-    NewStorage2.
+    sync(writer_append(LogRecord, NewStorage0)).
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
@@ -1027,20 +1088,19 @@ publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
     ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
 
 install_snapshot(Seqno, HistoryId, Term, Config, Meta,
-                 #storage{meta = OldMeta} = Storage) ->
-    NewStorage = record_snapshot(Seqno, HistoryId, Term, Config,
-                                 {install_snapshot,
-                                  Seqno, HistoryId, Term, Config, Meta},
-                                 Storage),
-
+                 #storage{pending_meta = OldMeta,
+                          pending_configs = PendingConfigs} = Storage) ->
     %% TODO: move managing of this metadata to chronicle_storage
     Seqno = get_committed_seqno(Meta),
-    NewStorage#storage{meta = maps:merge(OldMeta, Meta),
-                       low_seqno = Seqno + 1,
-                       high_seqno = Seqno,
-                       config = Config,
-                       committed_config = Config,
-                       pending_configs = []}.
+    NewStorage = Storage#storage{
+                   pending_meta = maps:merge(OldMeta, Meta),
+                   pending_high_seqno = Seqno,
+                   pending_configs = [Config|PendingConfigs]},
+
+    record_snapshot(Seqno,
+                    {install_snapshot,
+                     Seqno, HistoryId, Term, Config, Meta},
+                    NewStorage).
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
@@ -1366,9 +1426,9 @@ writer_loop(Writer) ->
 
     NewWriter =
         case Msg of
-            {append, Req, Record} ->
+            {Req, {append, Record}} ->
                 writer_handle_append([Req], [Record], NewWriter0);
-            {sync, Req} ->
+            {Req, sync} ->
                 writer_handle_append([Req], [], NewWriter0);
             {rollover, Config, Meta, HighSeqno, Path} ->
                 writer_handle_rollover(Config, Meta,
@@ -1387,9 +1447,9 @@ writer_loop(Writer) ->
 
 writer_handle_append(Reqs, Batch, Writer) ->
     receive
-        {append, Req, Record} ->
+        {Req, {append, Record}} ->
             writer_handle_append([Req | Reqs], [Record | Batch], Writer);
-        {sync, Req} ->
+        {Req, sync} ->
             writer_handle_append([Req | Reqs], Batch, Writer);
         Msg ->
             NewWriter = writer_unrecv_msg(Msg, Writer),
