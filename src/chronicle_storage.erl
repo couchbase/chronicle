@@ -557,15 +557,18 @@ get_pending_config(#storage{pending_configs = PendingConfigs} = Storage) ->
             Config
     end.
 
--spec store_meta(meta(), #storage{}) -> #storage{}.
 store_meta(Updates, Storage) ->
+    store_meta(none, Updates, Storage).
+
+-spec store_meta(any(), meta(), #storage{}) -> #storage{}.
+store_meta(Opaque, Updates, Storage) ->
     Meta = dedup_meta(Updates, Storage),
     case maps:size(Meta) > 0 of
         true ->
             NewStorage = add_pending_meta(Meta, Storage),
-            sync(writer_append({meta, Meta}, NewStorage));
+            sync(writer_append(Opaque, {meta, Meta}, NewStorage));
         false ->
-            sync(writer_sync(Storage))
+            sync(writer_sync(Opaque, Storage))
     end.
 
 dedup_meta(Updates, #storage{pending_meta = Meta}) ->
@@ -580,6 +583,9 @@ dedup_meta(Updates, #storage{pending_meta = Meta}) ->
       end, Updates).
 
 append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
+    append(none, StartSeqno, EndSeqno, Entries, Opts, Storage).
+
+append(Opaque, StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
     Meta = append_handle_meta(Opts, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
@@ -587,7 +593,7 @@ append(StartSeqno, EndSeqno, Entries, Opts, Storage) ->
     NewStorage = prepare_append(StartSeqno, EndSeqno,
                                 Meta, Truncate, Entries, Storage),
     AppendData = {append, EndSeqno, Meta, get_pending_config(NewStorage)},
-    sync(writer_append(LogEntry, AppendData, NewStorage)).
+    sync(writer_append(Opaque, LogEntry, AppendData, NewStorage)).
 
 prepare_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage0 =
@@ -629,20 +635,21 @@ append_handle_truncate(StartSeqno, Opts,
     Truncate.
 
 sync(Storage) ->
-    sync_loop(Storage).
+    {_, NewStorage} = sync_loop([], Storage),
+    NewStorage.
 
-sync_loop(#storage{requests = Requests} = Storage) ->
+sync_loop(Acc, #storage{requests = Requests} = Storage) ->
     case queue:is_empty(Requests) of
         true ->
-            Storage;
+            {lists:append(lists:reverse(Acc)), Storage};
         false ->
             receive
                 {?MODULE, Event} ->
                     case handle_event(Event, Storage) of
                         {ok, NewStorage} ->
-                            sync_loop(NewStorage);
-                        {ok, NewStorage, _AckedRequests} ->
-                            sync_loop(NewStorage)
+                            sync_loop(Acc, NewStorage);
+                        {ok, NewStorage, Opaques} ->
+                            sync_loop([Opaques|Acc], NewStorage)
                     end
             end
     end.
@@ -670,11 +677,11 @@ handle_event(Event, Storage) ->
             handle_rollover_done(HighSeqno, Storage)
     end.
 
-handle_append_done(BytesWritten, DoneRequests,
+handle_append_done(BytesWritten, DoneRefs,
                    #storage{current_log_data_size = DataSize,
                             requests = Requests} = Storage) ->
     NewDataSize = DataSize + BytesWritten,
-    {NewRequests, ReqDatas} = extract_requests(Requests, DoneRequests),
+    {NewRequests, Opaques, ReqDatas} = extract_requests(Requests, DoneRefs),
 
     NewStorage0 = Storage#storage{requests = NewRequests,
                                   current_log_data_size = NewDataSize},
@@ -684,7 +691,7 @@ handle_append_done(BytesWritten, DoneRequests,
                            handle_request_done(Req, Acc)
                    end, NewStorage0, ReqDatas),
 
-    {ok, NewStorage, DoneRequests}.
+    {ok, NewStorage, Opaques}.
 
 handle_request_done(sync, Storage) ->
     Storage;
@@ -709,14 +716,17 @@ handle_request_done({install_snapshot,
     publish_snapshot(NewStorage2),
     publish(compact(compact_configs(NewStorage2))).
 
-extract_requests(Requests, DoneRequests) ->
-    extract_requests(Requests, DoneRequests, []).
+extract_requests(Requests, DoneRefs) ->
+    extract_requests(Requests, DoneRefs, [], []).
 
-extract_requests(Requests, [], Acc) ->
-    {Requests, lists:reverse(Acc)};
-extract_requests(Requests, [Req|Rest], Acc) ->
-    {{value, {Req, ReqData}}, NewRequests} = queue:out(Requests),
-    extract_requests(NewRequests, Rest, [ReqData|Acc]).
+extract_requests(Requests, [], AccOpaques, AccReqDatas) ->
+    {Requests,
+     lists:reverse(AccOpaques),
+     lists:reverse(AccReqDatas)};
+extract_requests(Requests, [Ref|Rest], AccOpaques, AccReqDatas) ->
+    {{value, {Ref, Opaque, ReqData}}, NewRequests} = queue:out(Requests),
+    extract_requests(NewRequests, Rest,
+                     [Opaque|AccOpaques], [ReqData|AccReqDatas]).
 
 handle_rollover_done(HighSeqno,
                      #storage{data_dir = DataDir,
@@ -869,20 +879,20 @@ find_orphan_logs_test() ->
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
 
-writer_append(Record, Storage) ->
-    writer_append(Record, Record, Storage).
+writer_append(Opaque, Record, Storage) ->
+    writer_append(Opaque, Record, Record, Storage).
 
-writer_append(Record, Data, Storage) ->
-    writer_request({append, Record}, Data, Storage).
+writer_append(Opaque, Record, Data, Storage) ->
+    writer_request(Opaque, {append, Record}, Data, Storage).
 
-writer_sync(Storage) ->
-    writer_request(sync, sync, Storage).
+writer_sync(Opaque, Storage) ->
+    writer_request(Opaque, sync, sync, Storage).
 
-writer_request(Msg, RequestData,
+writer_request(Opaque, Msg, RequestData,
                #storage{writer = Writer,
                         requests = Requests} = Storage) ->
     Ref = make_ref(),
-    NewRequests = queue:in({Ref, RequestData}, Requests),
+    NewRequests = queue:in({Ref, Opaque, RequestData}, Requests),
 
     Writer ! {Ref, Msg},
     Storage#storage{requests = NewRequests}.
@@ -1064,9 +1074,14 @@ get_published_snapshot() ->
     end.
 
 record_snapshot(Seqno, HistoryId, Term, Config, Storage) ->
-    record_snapshot(Seqno, {snapshot, Seqno, HistoryId, Term, Config}, Storage).
+    record_snapshot(none, Seqno, HistoryId, Term, Config, Storage).
 
-record_snapshot(Seqno, LogRecord, #storage{data_dir = DataDir} = Storage) ->
+record_snapshot(Opaque, Seqno, HistoryId, Term, Config, Storage) ->
+    record_snapshot(Opaque, Seqno,
+                    {snapshot, Seqno, HistoryId, Term, Config}, Storage).
+
+record_snapshot(Opaque, Seqno, LogRecord,
+                #storage{data_dir = DataDir} = Storage) ->
     LatestSnapshotSeqno = get_current_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
 
@@ -1074,7 +1089,7 @@ record_snapshot(Seqno, LogRecord, #storage{data_dir = DataDir} = Storage) ->
     sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
-    sync(writer_append(LogRecord, NewStorage0)).
+    sync(writer_append(Opaque, LogRecord, NewStorage0)).
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
@@ -1087,7 +1102,10 @@ publish_snapshot(Storage) ->
 publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
     ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
 
-install_snapshot(Seqno, HistoryId, Term, Config, Meta,
+install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage) ->
+    install_snapshot(none, Seqno, HistoryId, Term, Config, Meta, Storage).
+
+install_snapshot(Opaque, Seqno, HistoryId, Term, Config, Meta,
                  #storage{pending_meta = OldMeta,
                           pending_configs = PendingConfigs} = Storage) ->
     %% TODO: move managing of this metadata to chronicle_storage
@@ -1097,7 +1115,7 @@ install_snapshot(Seqno, HistoryId, Term, Config, Meta,
                    pending_high_seqno = Seqno,
                    pending_configs = [Config|PendingConfigs]},
 
-    record_snapshot(Seqno,
+    record_snapshot(Opaque, Seqno,
                     {install_snapshot,
                      Seqno, HistoryId, Term, Config, Meta},
                     NewStorage).
