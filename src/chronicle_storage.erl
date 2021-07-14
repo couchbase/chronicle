@@ -106,7 +106,9 @@
 
                    config,
                    committed_config,
+
                    pending_configs,
+                   pending_committed_config,
 
                    current_snapshot,
                    extra_snapshots,
@@ -382,8 +384,7 @@ handle_user_data(UserData, Storage) ->
                     NewStorage1;
                 #log_entry{} ->
                     NewStorage2 = append_configs([Config], NewStorage1),
-                    NewStorage3 = compact_configs(NewStorage2),
-                    NewStorage3#storage{config = Config}
+                    sync_pending(NewStorage2)
             end;
         _ ->
             case Config =:= StorageConfig
@@ -408,7 +409,7 @@ handle_log_entry(Entry, Storage) ->
             handle_log_append(StartSeqno, EndSeqno,
                               Meta, Truncate, Entries, Storage);
         {meta, Meta} ->
-            compact_configs(add_meta(Meta, Storage));
+            sync_pending(compact_configs(add_pending_meta(Meta, Storage)));
         {snapshot, Seqno, HistoryId, Term, Config} ->
             add_snapshot(Seqno, HistoryId, Term, Config, Storage);
         {install_snapshot, Seqno, HistoryId, Term, Config, Meta} ->
@@ -460,11 +461,16 @@ handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
 
     NewStorage1 = prepare_append(StartSeqno, EndSeqno, Meta,
                                  Truncate, Entries, NewStorage0),
-    NewStorage2 = NewStorage1#storage{
-                    config = get_pending_config(NewStorage1),
-                    meta = NewStorage1#storage.pending_meta,
-                    high_seqno = NewStorage1#storage.pending_high_seqno},
-    compact_configs(NewStorage2).
+    sync_pending(NewStorage1).
+
+sync_pending(#storage{
+                pending_meta = Meta,
+                pending_high_seqno = HighSeqno,
+                pending_committed_config = CommittedConfig} = Storage) ->
+    Storage#storage{meta = Meta,
+                    high_seqno = HighSeqno,
+                    config = get_pending_config(Storage),
+                    committed_config = CommittedConfig}.
 
 add_meta(Meta, #storage{meta = CurrentMeta} = Storage) ->
     Storage#storage{meta = maps:merge(CurrentMeta, Meta)}.
@@ -552,18 +558,24 @@ get_committed_config(Storage) ->
 get_pending_config(#storage{pending_configs = PendingConfigs} = Storage) ->
     case PendingConfigs of
         [] ->
-            get_committed_config(Storage);
+            get_pending_committed_config(Storage);
         [Config|_] ->
             Config
     end.
+
+get_pending_committed_config(Storage) ->
+    Storage#storage.pending_committed_config.
 
 -spec store_meta(any(), meta(), #storage{}) -> #storage{}.
 store_meta(Opaque, Updates, Storage) ->
     Meta = dedup_meta(Updates, Storage),
     case maps:size(Meta) > 0 of
         true ->
-            NewStorage = add_pending_meta(Meta, Storage),
-            writer_append(Opaque, {meta, Meta}, NewStorage);
+            NewStorage0 = add_pending_meta(Meta, Storage),
+            NewStorage = compact_configs(NewStorage0),
+            Record = {meta, Meta},
+            Data = {meta, Meta, get_pending_committed_config(NewStorage)},
+            writer_append(Opaque, Record, Data, NewStorage);
         false ->
             writer_sync(Opaque, Storage)
     end.
@@ -586,7 +598,11 @@ append(Opaque, StartSeqno, EndSeqno, Entries, Opts, Storage) ->
 
     NewStorage = prepare_append(StartSeqno, EndSeqno,
                                 Meta, Truncate, Entries, Storage),
-    AppendData = {append, EndSeqno, Meta, get_pending_config(NewStorage)},
+    AppendData = {append,
+                  EndSeqno, Meta,
+                  get_pending_config(NewStorage),
+                  get_pending_committed_config(NewStorage)},
+
     writer_append(Opaque, LogEntry, AppendData, NewStorage).
 
 prepare_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
@@ -688,13 +704,18 @@ handle_append_done(BytesWritten, DoneRefs,
 
 handle_request_done(sync, Storage) ->
     Storage;
-handle_request_done({meta, Meta}, Storage) ->
-    publish(compact_configs(add_meta(Meta, Storage)));
-handle_request_done({append, HighSeqno, Meta, Config}, Storage) ->
+handle_request_done({meta, Meta, CommittedConfig}, Storage) ->
+    NewStorage0 = add_meta(Meta, Storage),
+    NewStorage = NewStorage0#storage{committed_config = CommittedConfig},
+    publish(NewStorage);
+handle_request_done({append,
+                     HighSeqno, Meta,
+                     Config, CommittedConfig}, Storage) ->
     NewStorage0 = add_meta(Meta, Storage),
     NewStorage1 = NewStorage0#storage{high_seqno = HighSeqno,
-                                      config = Config},
-    publish(compact_configs(NewStorage1));
+                                      config = Config,
+                                      committed_config = CommittedConfig},
+    publish(NewStorage1);
 handle_request_done({snapshot, Seqno, HistoryId, Term, Config}, Storage) ->
     NewStorage = add_snapshot(Seqno, HistoryId, Term, Config, Storage),
     publish_snapshot(NewStorage),
@@ -704,10 +725,11 @@ handle_request_done({install_snapshot,
     NewStorage0 = add_meta(Meta, Storage),
     NewStorage1 = NewStorage0#storage{low_seqno = Seqno + 1,
                                       high_seqno = Seqno,
-                                      config = Config},
+                                      config = Config,
+                                      committed_config = Config},
     NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
     publish_snapshot(NewStorage2),
-    publish(compact(compact_configs(NewStorage2))).
+    publish(compact(NewStorage2)).
 
 extract_requests(Requests, DoneRefs) ->
     extract_requests(Requests, DoneRefs, [], []).
@@ -907,7 +929,8 @@ append_configs(Entries, Storage) ->
         _ ->
             PendingConfigs = Storage#storage.pending_configs,
             NewPendingConfigs = lists:reverse(ConfigEntries) ++ PendingConfigs,
-            Storage#storage{pending_configs = NewPendingConfigs}
+            NewStorage = Storage#storage{pending_configs = NewPendingConfigs},
+            compact_configs(NewStorage)
     end.
 
 compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
@@ -915,15 +938,16 @@ compact_configs(#storage{pending_configs = PendingConfigs} = Storage) ->
         [] ->
             Storage;
         _ ->
-            CommittedSeqno = get_committed_seqno(Storage#storage.meta),
+            CommittedSeqno = get_committed_seqno(Storage#storage.pending_meta),
             case lists:splitwith(fun (#log_entry{seqno = Seqno}) ->
                                          Seqno > CommittedSeqno
                                  end, PendingConfigs) of
                 {[_|_], []} ->
                     Storage;
                 {NewPendingConfigs, [NewCommittedConfig|_]} ->
-                    Storage#storage{pending_configs = NewPendingConfigs,
-                                    committed_config = NewCommittedConfig}
+                    Storage#storage{
+                      pending_configs = NewPendingConfigs,
+                      pending_committed_config = NewCommittedConfig}
             end
     end.
 
@@ -1100,7 +1124,8 @@ install_snapshot(Opaque, Seqno, HistoryId, Term, Config, Meta,
     NewStorage = Storage#storage{
                    pending_meta = maps:merge(OldMeta, Meta),
                    pending_high_seqno = Seqno,
-                   pending_configs = [Config|PendingConfigs]},
+                   pending_configs = [Config|PendingConfigs],
+                   pending_committed_config = Config},
 
     record_snapshot(Opaque, Seqno,
                     {install_snapshot,
