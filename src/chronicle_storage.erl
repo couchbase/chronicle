@@ -1515,11 +1515,12 @@ writer_append_batch(Requests0, Batch0, Size,
                 Written
         end,
 
-    report_batch_size(Size),
+    report_batch_stats(Size),
     notify_parent({append_done, BytesWritten, Requests}, Writer),
     Writer.
 
-report_batch_size(Size) ->
+report_batch_stats(Size) ->
+    chronicle_stats:report_counter(<<"chronicle_append_num">>, Size),
     chronicle_stats:report_max(<<"chronicle_append_batch_size_1m_max">>,
                                60000, 10000, Size).
 
