@@ -1467,9 +1467,9 @@ writer_loop(Writer) ->
     NewWriter =
         case Msg of
             {Req, {append, Record}} ->
-                writer_handle_append([Req], [Record], NewWriter0);
+                writer_handle_append([Req], [Record], 1, NewWriter0);
             {Req, sync} ->
-                writer_handle_append([Req], [], NewWriter0);
+                writer_handle_append([Req], [], 0, NewWriter0);
             {rollover, Config, Meta, HighSeqno, Path} ->
                 writer_handle_rollover(Config, Meta,
                                        HighSeqno, Path, NewWriter0);
@@ -1485,21 +1485,21 @@ writer_loop(Writer) ->
 
     writer_loop(NewWriter).
 
-writer_handle_append(Reqs, Batch, Writer) ->
+writer_handle_append(Reqs, Batch, N, Writer) ->
     receive
         {Req, {append, Record}} ->
-            writer_handle_append([Req | Reqs], [Record | Batch], Writer);
+            writer_handle_append([Req | Reqs], [Record | Batch], N + 1, Writer);
         {Req, sync} ->
-            writer_handle_append([Req | Reqs], Batch, Writer);
+            writer_handle_append([Req | Reqs], Batch, N, Writer);
         Msg ->
             NewWriter = writer_unrecv_msg(Msg, Writer),
-            writer_append_batch(Reqs, Batch, NewWriter)
+            writer_append_batch(Reqs, Batch, N, NewWriter)
     after
         0 ->
-            writer_append_batch(Reqs, Batch, Writer)
+            writer_append_batch(Reqs, Batch, N, Writer)
     end.
 
-writer_append_batch(Requests0, Batch0,
+writer_append_batch(Requests0, Batch0, Size,
                     #writer{log = Log} = Writer) ->
     Requests = lists:reverse(Requests0),
 
@@ -1515,8 +1515,13 @@ writer_append_batch(Requests0, Batch0,
                 Written
         end,
 
+    report_batch_size(Size),
     notify_parent({append_done, BytesWritten, Requests}, Writer),
     Writer.
+
+report_batch_size(Size) ->
+    chronicle_stats:report_max(<<"chronicle_append_batch_size_1m_max">>,
+                               60000, 10000, Size).
 
 writer_log_append(Log, Batch) ->
     Result = ?TIME(<<"append">>, {ok, _}, chronicle_log:append(Log, Batch)),

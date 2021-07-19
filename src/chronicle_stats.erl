@@ -17,7 +17,7 @@
 
 -include("chronicle.hrl").
 
--export([report_histo/4, report_counter/2, report_gauge/2]).
+-export([report_histo/4, report_counter/2, report_gauge/2, report_max/4]).
 -export([ignore_stats/1]).
 
 report_histo(Metric, Max, Unit, Value) ->
@@ -28,6 +28,9 @@ report_counter(Metric, By) ->
 
 report_gauge(Metric, Value) ->
     report({gauge, Metric, Value}).
+
+report_max(Metric, Window, Bucket, Value) ->
+    report({max, Metric, Window, Bucket, Value}).
 
 report(Event) ->
     try
