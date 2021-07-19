@@ -108,12 +108,14 @@
                           term,
                           config,
 
-                          waiters }).
+                          waiters,
+                          write_pending }).
 
 -record(prepare_join, { config }).
 -record(join_cluster, { from, config, seqno }).
 
 -record(data, { storage,
+                pending_appends = 0,
 
                 snapshot_attempts = 0,
                 snapshot_state :: undefined
@@ -795,6 +797,8 @@ handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
 handle_event(cast, prepare_wipe_done, State, Data) ->
     handle_prepare_wipe_done(State, Data);
+handle_event(info, {chronicle_storage, Event}, State, Data) ->
+    handle_storage_event(Event, State, Data);
 handle_event(info, snapshot_timeout, State, Data) ->
     handle_snapshot_timeout(State, Data);
 handle_event(info, retry_snapshot, State, Data) ->
@@ -834,7 +838,7 @@ handle_call({join_cluster, ClusterInfo}, From, State, Data) ->
     handle_join_cluster(ClusterInfo, From, State, Data);
 handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
-    Position = {get_high_term(Data), get_high_seqno(Data)},
+    Position = get_position(Data),
     handle_establish_term(HistoryId, Term, Position, From, State, Data);
 handle_call({establish_term, HistoryId, Term, Position}, From, State, Data) ->
     handle_establish_term(HistoryId, Term, Position, From, State, Data);
@@ -869,8 +873,8 @@ handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
 
-terminate(_Reason, _State, Data) ->
-    maybe_cancel_snapshot(Data).
+terminate(_Reason, State, Data) ->
+    maybe_cancel_snapshot(State, Data).
 
 %% internal
 publish_state(State, Data) ->
@@ -995,6 +999,7 @@ handle_snapshot_result(Seqno, Result, State,
     end.
 
 handle_snapshot_ok(_State, #data{snapshot_state = SnapshotState} = Data) ->
+    false = SnapshotState#snapshot_state.write_pending,
     #snapshot_state{tref = TRef,
                     seqno = Seqno,
                     history_id = HistoryId,
@@ -1006,11 +1011,10 @@ handle_snapshot_ok(_State, #data{snapshot_state = SnapshotState} = Data) ->
            [Seqno, Config]),
 
     cancel_snapshot_timer(TRef),
-    NewData = record_snapshot(Seqno, HistoryId, Term, Config,
-                              reset_snapshot_state(Data)),
 
-    %% Reply after the snapshot is persistently recorded.
-    reply_snapshot_ok(Seqno, Data),
+    NewSnapshotState = SnapshotState#snapshot_state{write_pending = true},
+    NewData = record_snapshot(Seqno, HistoryId, Term, Config,
+                              Data#data{snapshot_state = NewSnapshotState}),
 
     {keep_state, NewData}.
 
@@ -1018,6 +1022,7 @@ handle_snapshot_failed(_State,
                        #data{snapshot_state = SnapshotState,
                              snapshot_attempts = Attempts,
                              storage = Storage} = Data) ->
+    false = SnapshotState#snapshot_state.write_pending,
     #snapshot_state{seqno = Seqno} = SnapshotState,
 
     ?ERROR("Failed to take a snapshot at seqno ~b", [Seqno]),
@@ -1046,6 +1051,7 @@ handle_snapshot_failed(_State,
     end.
 
 handle_snapshot_timeout(_State, #data{snapshot_state = SnapshotState} = Data) ->
+    false = SnapshotState#snapshot_state.write_pending,
     reply_snapshot_failed(Data),
     #snapshot_state{seqno = Seqno} = SnapshotState,
     ?ERROR("Timeout while taking snapshot at seqno ~b.", [Seqno]),
@@ -1054,13 +1060,71 @@ handle_snapshot_timeout(_State, #data{snapshot_state = SnapshotState} = Data) ->
 handle_retry_snapshot(_State, Data) ->
     {keep_state, retry_snapshot(Data)}.
 
+handle_storage_event(Event, State, Data) ->
+    case chronicle_storage:handle_event(Event, Data#data.storage) of
+        {ok, NewStorage} ->
+            {keep_state, Data#data{storage = NewStorage}};
+        {ok, NewStorage, Requests} ->
+            NewData0 = Data#data{storage = NewStorage},
+            NewData = handle_completed_requests(Requests, State,
+                                                Data, NewData0),
+            {keep_state, NewData}
+    end.
+
+handle_completed_requests(Requests, State, OldData, NewData) ->
+    {Froms, Count, HaveSnapshot} =
+        lists:foldr(
+          fun (Request, {AccFroms, AccCount, AccSnapshot} = Acc) ->
+                  case Request of
+                      {append, From} ->
+                          {[From | AccFroms], AccCount + 1, AccSnapshot};
+                      {record_snapshot, Seqno} ->
+                          false = AccSnapshot,
+
+                          SnapshotState = NewData#data.snapshot_state,
+                          true = SnapshotState#snapshot_state.write_pending,
+                          true = (Seqno =:= SnapshotState#snapshot_state.seqno),
+                          {AccFroms, AccCount, true};
+                      none ->
+                          Acc
+                  end
+          end, {[], 0, false}, Requests),
+
+    FinalData =
+        case HaveSnapshot of
+            true ->
+                handle_snapshot_recorded(NewData);
+            false ->
+                NewData
+        end,
+
+    handle_completed_appends(Froms, Count, State, OldData, FinalData).
+
+handle_snapshot_recorded(#data{snapshot_state = SnapshotState} = Data) ->
+    Seqno = SnapshotState#snapshot_state.seqno,
+    ?DEBUG("Snapshot at seqno ~p recorded.", [Seqno]),
+    reply_snapshot_ok(Seqno, Data),
+    pass_snapshot_to_mgr(reset_snapshot_state(Data)).
+
+handle_completed_appends([], _Count, _State, _OldData, NewData) ->
+    NewData;
+handle_completed_appends(Froms, Count, State, OldData, NewData) ->
+    NewData0 = dec_pending_appends(Count, NewData),
+    NewData1 = post_append(State, OldData, NewData0),
+    lists:foreach(
+      fun (From) ->
+              gen_statem:reply(From, ok)
+      end, Froms),
+
+    NewData1.
+
 handle_reprovision(From, State, Data) ->
     case check_reprovision(State, Data) of
         {ok, OldPeer, Config} ->
             #{?META_HISTORY_ID := HistoryId,
-              ?META_TERM := Term} = get_meta(Data),
+              ?META_TERM := Term} = get_pending_meta(Data),
 
-            HighSeqno = get_high_seqno(Data),
+            HighSeqno = get_pending_high_seqno(Data),
             Peer = get_peer_name(),
             NewTerm = next_term(Term, Peer),
             NewConfig = chronicle_config:reinit(Peer, OldPeer, Config),
@@ -1077,7 +1141,7 @@ handle_reprovision(From, State, Data) ->
                                    #{?META_PEER => Peer,
                                      ?META_TERM => NewTerm,
                                      ?META_COMMITTED_SEQNO => Seqno},
-                                   Data),
+                                   State, Data),
 
             publish_state(State, NewData),
             announce_system_reprovisioned(NewData),
@@ -1092,8 +1156,8 @@ handle_reprovision(From, State, Data) ->
 check_reprovision(State, Data) ->
     case check_provisioned(State) of
         ok ->
-            Peer = get_meta(?META_PEER, Data),
-            ConfigEntry = get_config(Data),
+            Peer = get_pending_meta(?META_PEER, Data),
+            ConfigEntry = get_pending_config(Data),
             Config = ConfigEntry#log_entry.value,
             case chronicle_config:is_stable(Config) of
                 true ->
@@ -1140,7 +1204,7 @@ handle_provision(Machines, From, State, Data) ->
                                      ?META_HISTORY_ID => HistoryId,
                                      ?META_TERM => Term,
                                      ?META_COMMITTED_SEQNO => Seqno},
-                                   Data),
+                                   State, Data),
 
             publish_state(NewState, NewData),
 
@@ -1210,7 +1274,7 @@ handle_wipe(From, State, #data{wipe_state = WipeState} = Data) ->
                       end),
 
                     NewData = Data#data{wipe_state = {wiping, From}},
-                    {keep_state, maybe_cancel_snapshot(NewData)}
+                    {keep_state, maybe_cancel_snapshot(State, NewData)}
             end
     end.
 
@@ -1266,8 +1330,9 @@ handle_prepare_join(ClusterInfo, From, State, Data) ->
                      ?META_STATE => {?META_STATE_PREPARE_JOIN,
                                      #{config => Config}}},
 
+            NewData = store_meta(Meta, State, Data),
             NewState = #prepare_join{config = Config},
-            NewData = store_meta(Meta, Data),
+
             publish_state(NewState, NewData),
             announce_joining_cluster(HistoryId),
 
@@ -1301,7 +1366,7 @@ check_compat_version(#{compat_version := Version}) ->
 handle_join_cluster(ClusterInfo, From, State, Data) ->
     case check_join_cluster(ClusterInfo, State, Data) of
         {ok, Config, Seqno} ->
-            Peer = get_meta(?META_PEER, Data),
+            Peer = get_pending_meta(?META_PEER, Data),
             {ok, PeerId} =
                 chronicle_config:get_peer_id(Peer, Config#log_entry.value),
 
@@ -1309,7 +1374,8 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
                      ?META_STATE => {?META_STATE_JOIN_CLUSTER,
                                      #{seqno => Seqno,
                                        config => Config}}},
-            NewData0 = store_meta(Meta, Data),
+
+            NewData0 = store_meta(Meta, State, Data),
             NewState = #join_cluster{from = From,
                                      seqno = Seqno,
                                      config = Config},
@@ -1325,16 +1391,26 @@ handle_join_cluster(ClusterInfo, From, State, Data) ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
-handle_join_cluster_timeout(State, Data) ->
+handle_join_cluster_timeout(State,
+                            #data{pending_appends = PendingAppends} = Data) ->
     #join_cluster{from = From} = State,
 
-    ?ERROR("Join cluster made no progress for ~bms.",
-           [?JOIN_CLUSTER_NO_PROGRESS_TIMEOUT]),
-
-    NewState = State#join_cluster{from = undefined},
     NewData = Data#data{join_cluster_tref = undefined},
+    case PendingAppends =:= 0 of
+        true ->
+            ?ERROR("Join cluster made no progress for ~bms.",
+                   [?JOIN_CLUSTER_NO_PROGRESS_TIMEOUT]),
 
-    {next_state, NewState, NewData, {reply, From, {error, no_progress}}}.
+            NewState = State#join_cluster{from = undefined},
+
+            {next_state, NewState, NewData,
+             {reply, From, {error, no_progress}}};
+        false ->
+            %% There are still some appends pending. Don't interrupt join.
+            ?WARNING("Join cluster timeout "
+                     "when ~b appends are pending", [PendingAppends]),
+            {keep_state, NewData}
+    end.
 
 start_join_cluster_timer(State, Data) ->
     case State of
@@ -1391,7 +1467,7 @@ check_not_wipe_requested(Data) ->
 check_in_peers(#log_entry{value = Config}, Data) ->
     Peers = chronicle_config:get_peers(Config),
 
-    Peer = get_meta(?META_PEER, Data),
+    Peer = get_pending_meta(?META_PEER, Data),
     true = (Peer =/= ?NO_PEER),
 
     case lists:member(Peer, Peers) of
@@ -1413,12 +1489,13 @@ check_join_cluster_done(State, Data) ->
             %% super-annoying. Do something once there's more time.
             NotWipeRequested = not is_wipe_requested(Data),
 
-            CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            CommittedSeqno = get_pending_meta(?META_COMMITTED_SEQNO, Data),
             case CommittedSeqno >= WaitedSeqno andalso NotWipeRequested of
                 true ->
                     NewState = provisioned,
                     NewData = store_meta(#{?META_STATE =>
-                                               ?META_STATE_PROVISIONED}, Data),
+                                               ?META_STATE_PROVISIONED},
+                                         State, Data),
                     publish_state(NewState, NewData),
                     announce_system_state(provisioned, build_metadata(NewData)),
 
@@ -1443,7 +1520,7 @@ handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
 
     case check_establish_term(HistoryId, Term, Position, State, Data) of
         ok ->
-            NewData = store_meta(#{?META_TERM => Term}, Data),
+            NewData = store_meta(#{?META_TERM => Term}, State, Data),
             publish_state(State, NewData),
 
             announce_term_established(State, Term),
@@ -1462,7 +1539,7 @@ check_establish_term(HistoryId, Term, Position, State, Data) ->
            check_peer_current(Position, State, Data)).
 
 check_later_term(Term, Data) ->
-    CurrentTerm = get_meta(?META_TERM, Data),
+    CurrentTerm = get_pending_meta(?META_TERM, Data),
     case term_number(Term) > term_number(CurrentTerm) of
         true ->
             ok;
@@ -1483,8 +1560,8 @@ check_peer_current(Position, OurPosition) ->
     end.
 
 get_position(Data) ->
-    OurHighTerm = get_high_term(Data),
-    OurHighSeqno = get_high_seqno(Data),
+    OurHighTerm = get_pending_high_term(Data),
+    OurHighSeqno = get_pending_high_seqno(Data),
     {OurHighTerm, OurHighSeqno}.
 
 get_required_peer_position(State, Data) ->
@@ -1565,26 +1642,28 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
                 Metadata0
         end,
 
+    Request = {append, From},
     NewData0 =
         case Entries =/= [] orelse Truncate of
             true ->
-                append_entries(StartSeqno, EndSeqno,
-                               Entries, Metadata, Truncate, Data);
+                append_entries_async(Request,
+                                     StartSeqno, EndSeqno,
+                                     Entries, Metadata, Truncate, Data);
             false ->
-                store_meta(Metadata, Data)
+                store_meta_async(Request, Metadata, Data)
         end,
+    NewData1 = inc_pending_appends(NewData0),
 
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
 
-    {NewState, NewData} = post_append(State, Data, NewData0),
-
-    {next_state, NewState, NewData, {reply, From, ok}}.
+    {NewState, NewData} = check_state_transitions(State, Data, NewData1),
+    {next_state, NewState, NewData}.
 
 post_append(State, OldData, NewData) ->
     publish_state(State, NewData),
 
-    {FinalState, FinalData} =
+    FinalData =
         case State of
             provisioned ->
                 maybe_announce_term_established(OldData, NewData),
@@ -1594,17 +1673,16 @@ post_append(State, OldData, NewData) ->
                 OldCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, OldData),
                 case OldCommittedSeqno =:= NewCommittedSeqno of
                     true ->
-                        {State, NewData};
+                        ok;
                     false ->
-                        announce_committed_seqno(NewCommittedSeqno),
-                        check_got_removed(State, OldData, NewData)
-                end;
+                        announce_committed_seqno(NewCommittedSeqno)
+                end,
+                NewData;
             _ ->
-                NewData1 = start_join_cluster_timer(State, NewData),
-                check_state_transitions(State, NewData1)
+                start_join_cluster_timer(State, NewData)
         end,
 
-    {FinalState, maybe_initiate_snapshot(FinalState, FinalData)}.
+    maybe_initiate_snapshot(State, FinalData).
 
 check_append(HistoryId, Term, CommittedSeqno,
              AtTerm, AtSeqno, Entries, State, Data) ->
@@ -1615,7 +1693,7 @@ check_append(HistoryId, Term, CommittedSeqno,
                                   AtTerm, AtSeqno, Entries, Data)).
 
 check_append_history_invariants(HistoryId, Entries, Info, Data) ->
-    OldHistoryId = get_meta(?META_HISTORY_ID, Data),
+    OldHistoryId = get_pending_meta(?META_HISTORY_ID, Data),
     case HistoryId =:= OldHistoryId of
         true ->
             {ok, Info};
@@ -1651,12 +1729,12 @@ check_append_history_invariants(HistoryId, Entries, Info, Data) ->
 
 check_append_obsessive(HistoryId, Term,
                        CommittedSeqno, AtTerm, AtSeqno, Entries, Data) ->
-    OurHighSeqno = get_high_seqno(Data),
+    OurHighSeqno = get_pending_high_seqno(Data),
     case AtSeqno > OurHighSeqno of
         true ->
             {error, {missing_entries, build_metadata(Data)}};
         false ->
-            OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            OurCommittedSeqno = get_pending_meta(?META_COMMITTED_SEQNO, Data),
             case check_at_seqno(AtTerm, AtSeqno, OurCommittedSeqno, Data) of
                 ok ->
                     case preprocess_entries(HistoryId, AtSeqno, Entries,
@@ -1835,10 +1913,10 @@ check_committed_seqno(Term, CommittedSeqno, HighSeqno, Data) ->
            check_committed_seqno_rollback(Term, CommittedSeqno, Data)).
 
 check_committed_seqno_rollback(Term, CommittedSeqno, Data) ->
-    OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+    OurCommittedSeqno = get_pending_meta(?META_COMMITTED_SEQNO, Data),
     case CommittedSeqno < OurCommittedSeqno of
         true ->
-            HighTerm = get_high_term(Data),
+            HighTerm = get_pending_high_term(Data),
             case Term =:= HighTerm of
                 true ->
                     ?ERROR("Refusing to lower our committed "
@@ -1874,7 +1952,7 @@ check_committed_seqno_known(CommittedSeqno, HighSeqno, Data) ->
     end.
 
 check_not_earlier_term(Term, Data) ->
-    CurrentTerm = get_meta(?META_TERM, Data),
+    CurrentTerm = get_pending_meta(?META_TERM, Data),
     case term_number(Term) >= term_number(CurrentTerm) of
         true ->
             ok;
@@ -1888,28 +1966,37 @@ handle_local_mark_committed(HistoryId, Term,
                                     CommittedSeqno, State, Data) of
         ok ->
             OurCommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+            OurPendingCommittedSeqno =
+                get_pending_meta(?META_COMMITTED_SEQNO, Data),
+
             NewData =
-                case OurCommittedSeqno =:= CommittedSeqno of
-                    true ->
+                if
+                    OurCommittedSeqno =:= CommittedSeqno ->
                         Data;
-                    false ->
+                    OurPendingCommittedSeqno =:= CommittedSeqno ->
+                        %% The committed seqno update is in-flight. Need to
+                        %% wait before responding.
+                        sync_storage(State, Data);
+                    true ->
                         NewData0 =
                             store_meta(#{?META_COMMITTED_SEQNO =>
-                                             CommittedSeqno}, Data),
+                                             CommittedSeqno},
+                                       State, Data),
+
                         publish_state(State, NewData0),
                         announce_committed_seqno(CommittedSeqno),
 
-                        ?DEBUG("Marked ~p seqno committed", [CommittedSeqno]),
                         NewData0
                 end,
 
+            ?DEBUG("Marked seqno ~p committed", [CommittedSeqno]),
             {keep_state, NewData, {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
     end.
 
 check_local_mark_committed(HistoryId, Term, CommittedSeqno, State, Data) ->
-    HighSeqno = get_high_seqno(Data),
+    HighSeqno = get_pending_high_seqno(Data),
 
     ?CHECK(check_provisioned_or_removed(State),
            check_history_id(HistoryId, Data),
@@ -1934,8 +2021,11 @@ handle_install_snapshot(HistoryId, Term,
         ok ->
             case get_snapshot_action(SnapshotSeqno, SnapshotTerm, Data) of
                 skip ->
-                    {keep_state_and_data,
-                     {reply, From, {ok, build_metadata(Data)}}};
+                    %% Make sure the response is based on fully persisted state.
+                    NewData = sync_storage(State, Data),
+                    {keep_state,
+                     NewData,
+                     {reply, From, {ok, build_metadata(NewData)}}};
                 Action ->
                     Metadata0 = #{?META_TERM => Term,
                                   ?META_COMMITTED_SEQNO => SnapshotSeqno},
@@ -1957,15 +2047,18 @@ handle_install_snapshot(HistoryId, Term,
                                 maybe_cancel_snapshot(
                                   %% Reply with the installed snapshot seqno.
                                   {ok, SnapshotSeqno},
-                                  install_snapshot(
+                                  State,
+                                  do_install_snapshot(
                                     SnapshotSeqno, SnapshotHistoryId,
                                     SnapshotTerm, SnapshotConfig,
-                                    RSMSnapshots, Metadata, Data));
+                                    RSMSnapshots, Metadata, State, Data));
                             commit_seqno ->
-                                store_meta(Metadata, Data)
+                                store_meta(Metadata, State, Data)
                         end,
 
-                    {NewState, NewData} = post_append(State, Data, NewData0),
+                    {NewState, NewData1} =
+                        check_state_transitions(State, Data, NewData0),
+                    NewData = post_append(NewState, Data, NewData1),
 
                     {next_state, NewState, NewData,
                      {reply, From, {ok, build_metadata(NewData)}}}
@@ -1976,8 +2069,8 @@ handle_install_snapshot(HistoryId, Term,
 
 get_snapshot_action(SnapshotSeqno, SnapshotTerm,
                     #data{storage = Storage} = Data) ->
-    HighSeqno = get_high_seqno(Data),
-    CommittedSeqno = get_meta(?META_COMMITTED_SEQNO, Data),
+    HighSeqno = get_pending_high_seqno(Data),
+    CommittedSeqno = get_pending_meta(?META_COMMITTED_SEQNO, Data),
 
     if
         SnapshotSeqno > HighSeqno ->
@@ -2040,9 +2133,10 @@ handle_store_branch(Branch, From, State, Data) ->
                 check_branch_compatible(Branch, Data),
                 check_branch_peers(Branch, Data)) of
         ok ->
-            NewData = store_meta(#{?META_PENDING_BRANCH => Branch}, Data),
+            NewData = store_meta(#{?META_PENDING_BRANCH => Branch},
+                                 State, Data),
 
-            PendingBranch = get_meta(?META_PENDING_BRANCH, Data),
+            PendingBranch = get_pending_meta(?META_PENDING_BRANCH, Data),
             case PendingBranch of
                 undefined ->
                     ?DEBUG("Stored a branch record:~n~p", [Branch]);
@@ -2068,7 +2162,7 @@ check_branch_compatible(NewBranch, Data) ->
     check_committed_history_id(HistoryId, Data).
 
 check_branch_peers(Branch, Data) ->
-    Peer = get_meta(?META_PEER, Data),
+    Peer = get_pending_meta(?META_PEER, Data),
     Coordinator = Branch#branch.coordinator,
     Peers = Branch#branch.peers,
 
@@ -2088,7 +2182,8 @@ handle_undo_branch(BranchId, From, State, Data) ->
     assert_valid_history_id(BranchId),
     case check_branch_id(BranchId, Data) of
         ok ->
-            NewData = store_meta(#{?META_PENDING_BRANCH => undefined}, Data),
+            NewData = store_meta(#{?META_PENDING_BRANCH => undefined},
+                                 State, Data),
             publish_state(State, NewData),
             announce_new_history(NewData),
 
@@ -2101,7 +2196,7 @@ handle_undo_branch(BranchId, From, State, Data) ->
 handle_mark_removed(Peer, PeerId, From, State, Data) ->
     case check_mark_removed(Peer, PeerId, State, Data) of
         ok ->
-            {NewState, NewData} = mark_removed(Data),
+            {NewState, NewData} = do_mark_removed(State, Data),
             {next_state, NewState, NewData, {reply, From, ok}};
         {error, _} = Error ->
             {keep_state_and_data, {reply, From, Error}}
@@ -2114,7 +2209,7 @@ check_mark_removed(Peer, PeerId, State, Data) ->
 
 check_peer_and_id(Peer, PeerId, Data) ->
     #{?META_PEER := OurPeer,
-      ?META_PEER_ID := OurPeerId} = get_meta(Data),
+      ?META_PEER_ID := OurPeerId} = get_pending_meta(Data),
 
     Theirs = {Peer, PeerId},
     Ours = {OurPeer, OurPeerId},
@@ -2148,7 +2243,7 @@ check_force_snapshot(State, Data) ->
            check_not_wipe_requested(Data)).
 
 check_branch_id(BranchId, Data) ->
-    OurBranch = get_meta(?META_PENDING_BRANCH, Data),
+    OurBranch = get_pending_meta(?META_PENDING_BRANCH, Data),
     case OurBranch of
         undefined ->
             {error, no_branch};
@@ -2167,7 +2262,7 @@ check_history_id(HistoryId, Data) ->
     do_check_history_id(HistoryId, OurHistoryId).
 
 check_committed_history_id(HistoryId, Data) ->
-    OurHistoryId = get_meta(?META_HISTORY_ID, Data),
+    OurHistoryId = get_pending_meta(?META_HISTORY_ID, Data),
     true = (OurHistoryId =/= ?NO_HISTORY),
     do_check_history_id(HistoryId, OurHistoryId).
 
@@ -2181,7 +2276,7 @@ do_check_history_id(HistoryId, OurHistoryId) ->
 
 get_effective_history_id(Data) ->
     #{?META_HISTORY_ID := CommittedHistoryId,
-      ?META_PENDING_BRANCH := PendingBranch} = get_meta(Data),
+      ?META_PENDING_BRANCH := PendingBranch} = get_pending_meta(Data),
 
     case PendingBranch of
         undefined ->
@@ -2191,7 +2286,9 @@ get_effective_history_id(Data) ->
     end.
 
 check_same_term(Term, Data) ->
-    OurTerm = get_meta(?META_TERM, Data),
+    %% The caller must have waited for the term to be established. Hence,
+    %% get_meta() is used as opposed to get_pending_meta().
+    OurTerm = get_pending_meta(?META_TERM, Data),
     case Term =:= OurTerm of
         true ->
             ok;
@@ -2200,6 +2297,7 @@ check_same_term(Term, Data) ->
     end.
 
 check_log_range(StartSeqno, EndSeqno, Data) ->
+    %% Don't return entries that have not been persisted yet.
     HighSeqno = get_high_seqno(Data),
     case StartSeqno > HighSeqno
         orelse EndSeqno > HighSeqno
@@ -2346,38 +2444,50 @@ maybe_seed_storage(Data) ->
                          ?META_PENDING_BRANCH => undefined},
             ?INFO("Found empty storage. "
                   "Seeding it with default metadata:~n~p", [SeedMeta]),
-            store_meta(SeedMeta, Data)
+            NewData = store_meta_async(none, SeedMeta, Data),
+
+            %% There may not be any outstanding requests. So it's ok to sync
+            %% storage directly.
+            {[none], NewStorage} = chronicle_storage:sync(NewData#data.storage),
+            NewData#data{storage = NewStorage}
     end.
 
-append_entry(Entry, Meta, Data) ->
+append_entry(Entry, Meta, State, Data) ->
     Seqno = Entry#log_entry.seqno,
-    append_entries(Seqno, Seqno, [Entry], Meta, false, Data).
+    NewData = append_entries_async(none,
+                                   Seqno, Seqno,
+                                   [Entry], Meta, false, Data),
+    sync_storage(State, NewData).
 
-store_meta(Meta, #data{storage = Storage} = Data) ->
-    NewStorage0 = chronicle_storage:store_meta(none, Meta, Storage),
-    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
+store_meta_async(Request, Meta, #data{storage = Storage} = Data) ->
+    NewStorage = chronicle_storage:store_meta(Request, Meta, Storage),
     Data#data{storage = NewStorage}.
 
-append_entries(StartSeqno, EndSeqno, Entries, Metadata, Truncate,
-               #data{storage = Storage} = Data) ->
-    NewStorage0 = chronicle_storage:append(none,
-                                           StartSeqno, EndSeqno,
-                                           Entries,
-                                           #{meta => Metadata,
-                                             truncate => Truncate}, Storage),
-    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
+store_meta(Meta, State, Data) ->
+    NewData = store_meta_async(none, Meta, Data),
+    sync_storage(State, NewData).
+
+append_entries_async(Request,
+                     StartSeqno, EndSeqno, Entries, Metadata, Truncate,
+                     #data{storage = Storage} = Data) ->
+    NewStorage = chronicle_storage:append(Request,
+                                          StartSeqno, EndSeqno,
+                                          Entries,
+                                          #{meta => Metadata,
+                                            truncate => Truncate}, Storage),
     Data#data{storage = NewStorage}.
 
 record_snapshot(Seqno, HistoryId, Term, ConfigEntry,
                 #data{storage = Storage} = Data) ->
-    NewStorage0 = chronicle_storage:record_snapshot(none,
-                                                    Seqno, HistoryId, Term,
-                                                    ConfigEntry, Storage),
-    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
-    pass_snapshot_to_mgr(Data#data{storage = NewStorage}).
+    NewStorage = chronicle_storage:record_snapshot({record_snapshot, Seqno},
+                                                   Seqno, HistoryId, Term,
+                                                   ConfigEntry, Storage),
+    Data#data{storage = NewStorage}.
 
-install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
-                 RSMSnapshots, Metadata, #data{storage = Storage} = Data) ->
+do_install_snapshot(SnapshotSeqno, SnapshotHistoryId,
+                    SnapshotTerm, SnapshotConfig,
+                    RSMSnapshots, Metadata,
+                    State, #data{storage = Storage} = Data) ->
     ok = chronicle_storage:prepare_snapshot(SnapshotSeqno),
     lists:foreach(
       fun ({RSM, RSMSnapshotBinary}) ->
@@ -2386,13 +2496,18 @@ install_snapshot(SnapshotSeqno, SnapshotHistoryId, SnapshotTerm, SnapshotConfig,
                                                   RSM, RSMSnapshot)
       end, maps:to_list(RSMSnapshots)),
 
-    NewStorage0 =
-        chronicle_storage:install_snapshot(none,
-                                           SnapshotSeqno,
+    {Requests, NewStorage} =
+        chronicle_storage:install_snapshot(SnapshotSeqno,
                                            SnapshotHistoryId, SnapshotTerm,
                                            SnapshotConfig, Metadata, Storage),
-    {[none], NewStorage} = chronicle_storage:sync(NewStorage0),
-    pass_snapshot_to_mgr(Data#data{storage = NewStorage}).
+
+    %% install_snapshot() is synchronous to make the implementation of
+    %% chronicle_storage (slightly) simpler. So we need to process any
+    %% requests that might have completed.
+    NewData0 = Data#data{storage = NewStorage},
+    NewData = handle_completed_requests(Requests, State, Data, NewData0),
+
+    pass_snapshot_to_mgr(NewData).
 
 get_peer_name() ->
     Peer = ?PEER(),
@@ -2409,17 +2524,35 @@ get_meta(#data{storage = Storage}) ->
 get_meta(Key, Data) ->
     maps:get(Key, get_meta(Data)).
 
+get_pending_meta(#data{storage = Storage}) ->
+    chronicle_storage:get_pending_meta(Storage).
+
+get_pending_meta(Key, Data) ->
+    maps:get(Key, get_pending_meta(Data)).
+
 get_high_seqno(#data{storage = Storage}) ->
     chronicle_storage:get_high_seqno(Storage).
 
+get_pending_high_seqno(#data{storage = Storage}) ->
+    chronicle_storage:get_pending_high_seqno(Storage).
+
 get_high_term(#data{storage = Storage}) ->
     chronicle_storage:get_high_term(Storage).
+
+get_pending_high_term(#data{storage = Storage}) ->
+    chronicle_storage:get_pending_high_term(Storage).
 
 get_config(#data{storage = Storage}) ->
     chronicle_storage:get_config(Storage).
 
 get_committed_config(#data{storage = Storage}) ->
     chronicle_storage:get_committed_config(Storage).
+
+get_pending_config(#data{storage = Storage}) ->
+    chronicle_storage:get_pending_config(Storage).
+
+get_pending_committed_config(#data{storage = Storage}) ->
+    chronicle_storage:get_pending_committed_config(Storage).
 
 get_current_snapshot(#data{storage = Storage}) ->
     chronicle_storage:get_current_snapshot(Storage).
@@ -2525,7 +2658,8 @@ initiate_snapshot(Data) ->
                                     term = Term,
                                     seqno = CommittedSeqno,
                                     config = CommittedConfig,
-                                    waiters = []},
+                                    waiters = [],
+                                    write_pending = false},
 
     RSMs = maps:keys(CommittedRSMs),
     chronicle_snapshot_mgr:pending_snapshot(CommittedSeqno, RSMs),
@@ -2559,15 +2693,22 @@ cancel_snapshot_retry_timer(TRef) ->
     ?FLUSH(retry_snapshot),
     ok.
 
-maybe_cancel_snapshot(Data) ->
-    maybe_cancel_snapshot({error, snapshot_canceled}, Data).
+maybe_cancel_snapshot(State, Data) ->
+    maybe_cancel_snapshot({error, snapshot_canceled}, State, Data).
 
-maybe_cancel_snapshot(Reply, #data{snapshot_state = SnapshotState} = Data) ->
+maybe_cancel_snapshot(Reply, State,
+                      #data{snapshot_state = SnapshotState} = Data) ->
     case SnapshotState of
         undefined ->
             Data;
         {retry, _TRef} ->
             cancel_snapshot_retry(Data);
+        #snapshot_state{write_pending = true} ->
+            %% We've already issued a write to record the snapshot. This can't
+            %% be canceled. So we wait until the write goes through instead.
+            NewData = sync_storage(State, Data),
+            undefined = NewData#data.snapshot_state,
+            NewData;
         #snapshot_state{} ->
             reply_snapshot_waiters(Reply, Data),
             cancel_snapshot(Data)
@@ -2575,6 +2716,7 @@ maybe_cancel_snapshot(Reply, #data{snapshot_state = SnapshotState} = Data) ->
 
 cancel_snapshot(#data{snapshot_state = SnapshotState,
                       storage = Storage} = Data) ->
+    false = SnapshotState#snapshot_state.write_pending,
     #snapshot_state{tref = TRef,
                     seqno = SnapshotSeqno} = SnapshotState,
 
@@ -2602,8 +2744,8 @@ read_rsm_snapshot(Name, Seqno) ->
     end.
 
 check_got_removed(State, OldData, NewData) ->
-    OldConfig = get_committed_config(OldData),
-    NewConfig = get_committed_config(NewData),
+    OldConfig = get_pending_committed_config(OldData),
+    NewConfig = get_pending_committed_config(NewData),
 
     OldRevision = chronicle_utils:log_entry_revision(OldConfig),
     NewRevision = chronicle_utils:log_entry_revision(NewConfig),
@@ -2618,14 +2760,14 @@ check_got_removed(State, OldData, NewData) ->
 check_got_removed(State, Data) ->
     case State of
         provisioned ->
-            CommittedConfig = get_committed_config(Data),
+            CommittedConfig = get_pending_committed_config(Data),
             check_got_removed_with_config(CommittedConfig, State, Data);
         _ ->
             {State, Data}
     end.
 
 check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
-    #{?META_PEER := Peer, ?META_PEER_ID := PeerId} = get_meta(Data),
+    #{?META_PEER := Peer, ?META_PEER_ID := PeerId} = get_pending_meta(Data),
     case chronicle_config:is_peer(Peer, PeerId, Config) of
         true ->
             {State, Data};
@@ -2636,13 +2778,13 @@ check_got_removed_with_config(#log_entry{value = Config}, State, Data) ->
                            "Not changing the state."),
                     {State, Data};
                 false ->
-                    mark_removed(Data)
+                    do_mark_removed(State, Data)
             end
     end.
 
-mark_removed(Data) ->
+do_mark_removed(State, Data) ->
     NewState = removed,
-    NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, Data),
+    NewData = store_meta(#{?META_STATE => ?META_STATE_REMOVED}, State, Data),
     publish_state(NewState, NewData),
     announce_system_state(removed, build_metadata(NewData)),
     {NewState, NewData}.
@@ -2650,3 +2792,31 @@ mark_removed(Data) ->
 check_state_transitions(State, Data) ->
     {NewState, NewData} = check_join_cluster_done(State, Data),
     check_got_removed(NewState, NewData).
+
+check_state_transitions(State, OldData, NewData) ->
+    case State of
+        provisioned ->
+            OldSeqno = get_pending_meta(?META_COMMITTED_SEQNO, OldData),
+            NewSeqno = get_pending_meta(?META_COMMITTED_SEQNO, NewData),
+
+            case OldSeqno =:= NewSeqno of
+                true ->
+                    {State, NewData};
+                false ->
+                    check_got_removed(State, OldData, NewData)
+            end;
+        _ ->
+            check_state_transitions(State, NewData)
+    end.
+
+sync_storage(State, #data{storage = Storage} = Data) ->
+    {Requests, NewStorage} = chronicle_storage:sync(Storage),
+    NewData = Data#data{storage = NewStorage},
+    handle_completed_requests(Requests, State, Data, NewData).
+
+inc_pending_appends(#data{pending_appends = Count} = Data) ->
+    Data#data{pending_appends = Count + 1}.
+
+dec_pending_appends(By, #data{pending_appends = Count} = Data) ->
+    true = (Count >= By),
+    Data#data{pending_appends = Count - By}.

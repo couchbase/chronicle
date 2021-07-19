@@ -22,10 +22,13 @@
 -endif.
 
 -export([open/0, wipe/0,
-         get_meta/1, get_high_seqno/1, get_high_term/1,
-         get_config/1, get_committed_config/1,
+         get_meta/1, get_pending_meta/1,
+         get_high_seqno/1, get_pending_high_seqno/1,
+         get_high_term/1, get_pending_high_term/1,
+         get_config/1, get_pending_config/1,
+         get_committed_config/1, get_pending_committed_config/1,
          store_meta/3, append/6, sync/1, close/1,
-         install_snapshot/7, record_snapshot/6, delete_snapshot/2,
+         install_snapshot/6, record_snapshot/6, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
          get_current_snapshot/1, get_current_snapshot_seqno/1,
@@ -33,6 +36,7 @@
          get_term_for_committed_seqno/1, get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
          ensure_rsm_dir/1, snapshot_dir/1,
+         handle_event/2,
          map_append/2]).
 
 -ifdef(TEST).
@@ -101,8 +105,8 @@
                    high_seqno,
                    meta,
 
-                   pending_meta,
                    pending_high_seqno,
+                   pending_meta,
 
                    config,
                    committed_config,
@@ -248,7 +252,7 @@ rollover(#storage{rollover_pending = true} = Storage) ->
     Storage;
 rollover(#storage{current_log_ix = CurrentLogIx,
                   data_dir = DataDir,
-                  meta = Meta,
+                  pending_meta = Meta,
                   pending_high_seqno = HighSeqno,
                   writer = Writer} = Storage) ->
     Config = get_pending_config(Storage),
@@ -414,18 +418,7 @@ handle_log_entry(Entry, Storage) ->
             add_snapshot(Seqno, HistoryId, Term, Config, Storage);
         {install_snapshot, Seqno, HistoryId, Term, Config, Meta} ->
             ets:delete_all_objects(Storage#storage.log_tab),
-
-            #storage{meta = CurrentMeta} = Storage,
-            NewMeta = maps:merge(CurrentMeta, Meta),
-            NewStorage = Storage#storage{low_seqno = Seqno + 1,
-                                         high_seqno = Seqno,
-                                         pending_high_seqno = Seqno,
-                                         config = Config,
-                                         committed_config = Config,
-                                         pending_configs = [],
-                                         meta = NewMeta,
-                                         pending_meta = NewMeta},
-            add_snapshot(Seqno, HistoryId, Term, Config, NewStorage)
+            do_install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage)
     end.
 
 handle_log_append(StartSeqno, EndSeqno, Meta, Truncate, Entries,
@@ -500,6 +493,10 @@ is_config_entry(#log_entry{value = Value}) ->
 get_meta(Storage) ->
     Storage#storage.meta.
 
+-spec get_pending_meta(#storage{}) -> meta().
+get_pending_meta(Storage) ->
+    Storage#storage.pending_meta.
+
 get_committed_seqno(#{?META_COMMITTED_SEQNO := CommittedSeqno}) ->
     CommittedSeqno;
 get_committed_seqno(_) ->
@@ -508,8 +505,15 @@ get_committed_seqno(_) ->
 get_high_seqno(Storage) ->
     Storage#storage.high_seqno.
 
-get_high_term(#storage{high_seqno = HighSeqno} = Storage) ->
-    {ok, Term} = get_term_for_seqno(HighSeqno, Storage),
+get_pending_high_seqno(Storage) ->
+    Storage#storage.pending_high_seqno.
+
+get_high_term(Storage) ->
+    {ok, Term} = get_term_for_seqno(get_high_seqno(Storage), Storage),
+    Term.
+
+get_pending_high_term(Storage) ->
+    {ok, Term} = get_term_for_seqno(get_pending_high_seqno(Storage), Storage),
     Term.
 
 get_term_for_committed_seqno(?NO_SEQNO) ->
@@ -527,8 +531,8 @@ get_term_for_committed_seqno(Seqno) ->
             end
     end.
 
-get_term_for_seqno(Seqno, #storage{high_seqno = HighSeqno,
-                                   low_seqno = LowSeqno} = Storage) ->
+get_term_for_seqno(Seqno, #storage{low_seqno = LowSeqno,
+                                   pending_high_seqno = HighSeqno} = Storage) ->
     case Seqno =< HighSeqno of
         true ->
             if
@@ -719,17 +723,9 @@ handle_request_done({append,
 handle_request_done({snapshot, Seqno, HistoryId, Term, Config}, Storage) ->
     NewStorage = add_snapshot(Seqno, HistoryId, Term, Config, Storage),
     publish_snapshot(NewStorage),
-    compact(NewStorage);
-handle_request_done({install_snapshot,
-                     Seqno, HistoryId, Term, Config, Meta}, Storage) ->
-    NewStorage0 = add_meta(Meta, Storage),
-    NewStorage1 = NewStorage0#storage{low_seqno = Seqno + 1,
-                                      high_seqno = Seqno,
-                                      config = Config,
-                                      committed_config = Config},
-    NewStorage2 = add_snapshot(Seqno, HistoryId, Term, Config, NewStorage1),
-    publish_snapshot(NewStorage2),
-    publish(compact(NewStorage2)).
+    publish(compact(NewStorage));
+handle_request_done(none, Storage) ->
+    Storage.
 
 extract_requests(Requests, DoneRefs) ->
     extract_requests(Requests, DoneRefs, [], []).
@@ -893,9 +889,6 @@ find_orphan_logs_test() ->
 
 log_path(DataDir, LogIndex) ->
     filename:join(logs_dir(DataDir), integer_to_list(LogIndex) ++ ".log").
-
-writer_append(Opaque, Record, Storage) ->
-    writer_append(Opaque, Record, Record, Storage).
 
 writer_append(Opaque, Record, Data, Storage) ->
     writer_request(Opaque, {append, Record}, Data, Storage).
@@ -1094,7 +1087,10 @@ record_snapshot(Opaque, Seqno, HistoryId, Term, Config, Storage) ->
     record_snapshot(Opaque, Seqno,
                     {snapshot, Seqno, HistoryId, Term, Config}, Storage).
 
-record_snapshot(Opaque, Seqno, LogRecord,
+record_snapshot(Opaque, Seqno, LogRecord, Storage) ->
+    record_snapshot(Opaque, Seqno, LogRecord, LogRecord, Storage).
+
+record_snapshot(Opaque, Seqno, LogRecord, Data,
                 #storage{data_dir = DataDir} = Storage) ->
     LatestSnapshotSeqno = get_current_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
@@ -1103,7 +1099,7 @@ record_snapshot(Opaque, Seqno, LogRecord,
     sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
-    writer_append(Opaque, LogRecord, NewStorage0).
+    writer_append(Opaque, LogRecord, Data, NewStorage0).
 
 publish_snapshot(Storage) ->
     case get_current_snapshot(Storage) of
@@ -1116,21 +1112,35 @@ publish_snapshot(Storage) ->
 publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
     ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
 
-install_snapshot(Opaque, Seqno, HistoryId, Term, Config, Meta,
-                 #storage{pending_meta = OldMeta,
-                          pending_configs = PendingConfigs} = Storage) ->
+install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage) ->
     %% TODO: move managing of this metadata to chronicle_storage
     Seqno = get_committed_seqno(Meta),
-    NewStorage = Storage#storage{
-                   pending_meta = maps:merge(OldMeta, Meta),
-                   pending_high_seqno = Seqno,
-                   pending_configs = [Config|PendingConfigs],
-                   pending_committed_config = Config},
+    NewStorage0 = record_snapshot(none, Seqno,
+                                  {install_snapshot,
+                                   Seqno, HistoryId, Term, Config, Meta},
+                                  none,
+                                  Storage),
+    {DoneRequests, NewStorage1} = sync(NewStorage0),
+    none = lists:last(DoneRequests),
 
-    record_snapshot(Opaque, Seqno,
-                    {install_snapshot,
-                     Seqno, HistoryId, Term, Config, Meta},
-                    NewStorage).
+    NewStorage2 = do_install_snapshot(Seqno, HistoryId,
+                                      Term, Config, Meta, NewStorage1),
+    publish_snapshot(NewStorage2),
+    {lists:droplast(DoneRequests), publish(compact(NewStorage2))}.
+
+do_install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage) ->
+    #storage{meta = CurrentMeta} = Storage,
+    NewMeta = maps:merge(CurrentMeta, Meta),
+    NewStorage = Storage#storage{low_seqno = Seqno + 1,
+                                 high_seqno = Seqno,
+                                 pending_high_seqno = Seqno,
+                                 config = Config,
+                                 committed_config = Config,
+                                 pending_committed_config = Config,
+                                 pending_configs = [],
+                                 meta = NewMeta,
+                                 pending_meta = NewMeta},
+    add_snapshot(Seqno, HistoryId, Term, Config, NewStorage).
 
 rsm_snapshot_path(SnapshotDir, RSM) ->
     filename:join(SnapshotDir, [RSM, ".snapshot"]).
