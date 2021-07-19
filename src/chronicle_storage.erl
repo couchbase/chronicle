@@ -1090,13 +1090,9 @@ record_snapshot(Opaque, Seqno, HistoryId, Term, Config, Storage) ->
 record_snapshot(Opaque, Seqno, LogRecord, Storage) ->
     record_snapshot(Opaque, Seqno, LogRecord, LogRecord, Storage).
 
-record_snapshot(Opaque, Seqno, LogRecord, Data,
-                #storage{data_dir = DataDir} = Storage) ->
+record_snapshot(Opaque, Seqno, LogRecord, Data, Storage) ->
     LatestSnapshotSeqno = get_current_snapshot_seqno(Storage),
     true = (Seqno > LatestSnapshotSeqno),
-
-    SnapshotsDir = snapshots_dir(DataDir),
-    sync_dir(SnapshotsDir),
 
     NewStorage0 = rollover(Storage),
     writer_append(Opaque, LogRecord, Data, NewStorage0).
