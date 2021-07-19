@@ -261,10 +261,7 @@ rollover(#storage{current_log_ix = CurrentLogIx,
     Storage#storage{rollover_pending = true}.
 
 create_log(Config, Meta, HighSeqno, LogPath) ->
-    ?INFO("Creating log file ~p.~n"
-          "Config:~n~p~n"
-          "Metadata:~n~p",
-          [LogPath, Config, Meta]),
+    ?INFO("Creating log file ~s (high seqno = ~b)", [LogPath, HighSeqno]),
 
     LogData = #{config => Config, meta => Meta, high_seqno => HighSeqno},
     case chronicle_log:create(LogPath, LogData) of
