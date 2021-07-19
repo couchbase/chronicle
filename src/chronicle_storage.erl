@@ -21,7 +21,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--export([open/0, wipe/0,
+-export([open/1, wipe/0,
          get_meta/1, get_pending_meta/1,
          get_high_seqno/1, get_pending_high_seqno/1,
          get_high_term/1, get_pending_high_term/1,
@@ -126,17 +126,20 @@
 
                    writer,
                    requests = queue:new(),
-                   rollover_pending = false
+                   rollover_pending = false,
+
+                   publish_snapshot_fun
                   }).
 
-open() ->
+open(PublishSnapshotFun) ->
     _ = ets:new(?MEM_LOG_INFO_TAB,
                 [protected, set, named_table, {read_concurrency, true}]),
     _ = ets:new(?MEM_LOG_TAB,
                 [protected, set, named_table,
                  {keypos, #log_entry.seqno}, {read_concurrency, true}]),
     Storage0 = #storage{log_info_tab = ets:whereis(?MEM_LOG_INFO_TAB),
-                        log_tab = ets:whereis(?MEM_LOG_TAB)},
+                        log_tab = ets:whereis(?MEM_LOG_TAB),
+                        publish_snapshot_fun = PublishSnapshotFun},
 
     DataDir = chronicle_env:data_dir(),
     maybe_complete_wipe(DataDir),
@@ -1102,8 +1105,12 @@ publish_snapshot(Storage) ->
             publish_snapshot(Snapshot, Storage)
     end.
 
-publish_snapshot({Seqno, _, Term, _}, #storage{log_info_tab = LogInfoTab}) ->
-    ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}).
+publish_snapshot({Seqno, _, Term, _} = Snapshot,
+                 #storage{log_info_tab = LogInfoTab,
+                          publish_snapshot_fun = PublishSnapshotFun}) ->
+    ets:insert(LogInfoTab, {?SNAPSHOT_KEY, Seqno, Term}),
+    PublishSnapshotFun(Snapshot),
+    ok.
 
 install_snapshot(Seqno, HistoryId, Term, Config, Meta, Storage) ->
     %% TODO: move managing of this metadata to chronicle_storage

@@ -1104,7 +1104,7 @@ handle_snapshot_recorded(#data{snapshot_state = SnapshotState} = Data) ->
     Seqno = SnapshotState#snapshot_state.seqno,
     ?DEBUG("Snapshot at seqno ~p recorded.", [Seqno]),
     reply_snapshot_ok(Seqno, Data),
-    pass_snapshot_to_mgr(reset_snapshot_state(Data)).
+    reset_snapshot_state(Data).
 
 handle_completed_appends([], _Count, _State, _OldData, NewData) ->
     NewData;
@@ -2309,19 +2309,9 @@ check_log_range(StartSeqno, EndSeqno, Data) ->
     end.
 
 init_data() ->
-    Storage = chronicle_storage:open(),
-    Data = maybe_seed_storage(#data{storage = Storage}),
-    pass_snapshot_to_mgr(Data).
-
-pass_snapshot_to_mgr(Data) ->
-    case get_current_snapshot(Data) of
-        no_snapshot ->
-            ok;
-        Snapshot ->
-            chronicle_snapshot_mgr:store_snapshot(Snapshot)
-    end,
-
-    Data.
+    Storage = chronicle_storage:open(
+                fun chronicle_snapshot_mgr:store_snapshot/1),
+    maybe_seed_storage(#data{storage = Storage}).
 
 assert_valid_history_id(HistoryId) ->
     true = is_binary(HistoryId).
@@ -2505,9 +2495,7 @@ do_install_snapshot(SnapshotSeqno, SnapshotHistoryId,
     %% chronicle_storage (slightly) simpler. So we need to process any
     %% requests that might have completed.
     NewData0 = Data#data{storage = NewStorage},
-    NewData = handle_completed_requests(Requests, State, Data, NewData0),
-
-    pass_snapshot_to_mgr(NewData).
+    handle_completed_requests(Requests, State, Data, NewData0).
 
 get_peer_name() ->
     Peer = ?PEER(),
@@ -2553,9 +2541,6 @@ get_pending_config(#data{storage = Storage}) ->
 
 get_pending_committed_config(#data{storage = Storage}) ->
     chronicle_storage:get_pending_committed_config(Storage).
-
-get_current_snapshot(#data{storage = Storage}) ->
-    chronicle_storage:get_current_snapshot(Storage).
 
 get_current_snapshot_seqno(#data{storage = Storage}) ->
     chronicle_storage:get_current_snapshot_seqno(Storage).
