@@ -756,10 +756,12 @@ sanitize_event({call, _} = Type,
 sanitize_event({call, _} = Type,
                {install_snapshot,
                 HistoryId, Term,
-                SnapshotSeqno, SnapshotTerm, SnapshotConfig, _}) ->
+                SnapshotSeqno, SnapshotHistoryId,
+                SnapshotTerm, SnapshotConfig, _}) ->
     {Type, {install_snapshot,
             HistoryId, Term,
-            SnapshotSeqno, SnapshotTerm, SnapshotConfig, '...'}};
+            SnapshotSeqno, SnapshotHistoryId,
+            SnapshotTerm, SnapshotConfig, '...'}};
 sanitize_event(Type, Event) ->
     {Type, Event}.
 
