@@ -2364,11 +2364,14 @@ check_new_config(OldData, NewData) ->
     end.
 
 get_config_revision(Data) ->
-    Config = get_config(Data),
-    #log_entry{history_id = HistoryId,
-               term = Term,
-               seqno = Seqno} = Config,
-    {HistoryId, Term, Seqno}.
+    case get_config(Data) of
+        undefined ->
+            undefined;
+        #log_entry{history_id = HistoryId,
+                   term = Term,
+                   seqno = Seqno} ->
+            {HistoryId, Term, Seqno}
+    end.
 
 handle_new_config(Data) ->
     publish_settings(Data),
