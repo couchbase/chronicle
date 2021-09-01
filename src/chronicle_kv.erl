@@ -239,19 +239,30 @@ txn(Name, Fun) ->
 
 -spec txn(name(), txn_fun(txn_opaque()), txn_options()) -> txn_result().
 txn(Name, Fun, Opts) ->
+    BuildTxn = fun (TRef, TxnOpts) ->
+                       case prepare_txn(Name, Fun, TRef, TxnOpts) of
+                           {ok, {TxnResult, Conditions, _Revision}} ->
+                               {ok, {TxnResult, Conditions}};
+                           Other ->
+                               Other
+                       end
+               end,
+    perform_txn(Name, BuildTxn, Opts).
+
+perform_txn(Name, BuildTxn, Opts) ->
     TRef = start_timeout(get_timeout(Opts)),
     Retries = maps:get(retries, Opts, ?TXN_RETRIES),
-    txn_loop(Name, Fun, Opts, TRef, Retries).
+    txn_loop(Name, BuildTxn, Opts, TRef, Retries).
 
-txn_loop(Name, Fun, Opts, TRef, Retries) ->
-    case prepare_txn(Name, Fun, TRef, Opts) of
-        {ok, {TxnResult, Conditions, _Revision}} ->
+txn_loop(Name, BuildTxn, Opts, TRef, Retries) ->
+    case BuildTxn(TRef, Opts) of
+        {ok, {TxnResult, Conditions}} ->
             case TxnResult of
                 {commit, Updates} ->
-                    txn_loop_commit(Name, Fun, Opts, TRef, Retries,
+                    txn_loop_commit(Name, BuildTxn, Opts, TRef, Retries,
                                     Updates, Conditions, no_extra);
                 {commit, Updates, Extra} ->
-                    txn_loop_commit(Name, Fun, Opts, TRef, Retries,
+                    txn_loop_commit(Name, BuildTxn, Opts, TRef, Retries,
                                     Updates, Conditions, {extra, Extra});
                 {abort, Result} ->
                     Result
@@ -260,7 +271,8 @@ txn_loop(Name, Fun, Opts, TRef, Retries) ->
             erlang:raise(T, E, Stack)
     end.
 
-txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
+txn_loop_commit(Name, BuildTxn, Opts, TRef,
+                Retries, Updates, Conditions, Extra) ->
     case submit_transaction(Name, Conditions, Updates, TRef) of
         {ok, Revision} = Ok ->
             case Extra of
@@ -275,7 +287,7 @@ txn_loop_commit(Name, Fun, Opts, TRef, Retries, Updates, Conditions, Extra) ->
                     %% Don't trigger extra synchronization when retrying.
                     NewOpts = Opts#{read_consistency => local},
 
-                    txn_loop(Name, Fun, NewOpts,
+                    txn_loop(Name, BuildTxn, NewOpts,
                              TRef, Retries - 1);
                 false ->
                     {error, exceeded_retries}
@@ -378,19 +390,16 @@ get_fast_path(Name, Key) ->
         delete.
 -type rewrite_fun() :: fun ((key(), value()) -> rewrite_fun_result()).
 
--spec rewrite(name(), rewrite_fun()) -> op_result().
+-spec rewrite(name(), rewrite_fun()) -> txn_result().
 rewrite(Name, Fun) ->
     rewrite(Name, Fun, #{}).
 
--spec rewrite(name(), rewrite_fun(), options()) -> op_result().
+-spec rewrite(name(), rewrite_fun(), txn_options()) -> txn_result().
 rewrite(Name, Fun, Opts) ->
-    TRef = start_timeout(get_timeout(Opts)),
-    case submit_query(Name, {rewrite, Fun}, TRef, Opts) of
-        {ok, Conditions, Updates} ->
-            submit_transaction(Name, Conditions, Updates, TRef);
-        {error, _} = Error ->
-            Error
-    end.
+    BuildTxn = fun (TRef, TxnOpts) ->
+                       submit_query(Name, {rewrite, Fun}, TRef, TxnOpts)
+               end,
+    perform_txn(Name, BuildTxn, Opts).
 
 -type get_snapshot_result() :: {ok, {snapshot(), revision()}}.
 
@@ -643,7 +652,7 @@ handle_rewrite(Fun, StateRevision, State, Data) ->
           end, [], State),
 
     Conditions = [{state_revision, StateRevision}],
-    {reply, {ok, Conditions, Updates}, Data}.
+    {reply, {ok, {{commit, Updates}, Conditions}}, Data}.
 
 handle_get(Key, State, Data) ->
     Reply =
