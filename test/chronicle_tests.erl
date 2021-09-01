@@ -452,6 +452,41 @@ reprovision_test_loop(I) ->
 
     reprovision_test_loop(I - 1).
 
+reprovision_rewrite_test_() ->
+    Nodes = [a],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 20, fun reprovision_rewrite_test__/0}}.
+
+reprovision_rewrite_test__() ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines),
+                          {ok, _} = chronicle_kv:set(kv, a, 42),
+                          ok
+                  end),
+    reprovision_rewrite_test_loop(100).
+
+reprovision_rewrite_test_loop(0) ->
+    ok;
+reprovision_rewrite_test_loop(I) ->
+    ok = rpc_node(
+           a,
+           fun () ->
+                   ok = chronicle:reprovision(),
+
+                   {ok, _} =
+                       chronicle_kv:rewrite(
+                         kv,
+                         fun (_Key, Value) ->
+                                 {update, Value + 1}
+                         end),
+                   ok
+           end),
+    reprovision_rewrite_test_loop(I - 1).
+
 partition_test_() ->
     Nodes = [a, b, c, d],
 
