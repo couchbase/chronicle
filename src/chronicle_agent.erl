@@ -2652,6 +2652,8 @@ initiate_snapshot(Data) ->
                                     write_pending = false},
 
     RSMs = maps:keys(CommittedRSMs),
+
+    ok = chronicle_storage:prepare_snapshot(CommittedSeqno),
     chronicle_snapshot_mgr:pending_snapshot(CommittedSeqno, RSMs),
     chronicle_events:notify(?RSM_EVENTS, {take_snapshot, CommittedSeqno}),
 
