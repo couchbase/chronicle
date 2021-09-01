@@ -630,29 +630,38 @@ submit_command(Name, Command, Timeout) ->
     end.
 
 handle_rewrite(Fun, StateRevision, State, Data) ->
-    Updates =
-        maps:fold(
-          fun (Key, {Value, _Rev}, Acc) ->
-                  case Fun(Key, Value) of
-                      {update, NewValue} ->
-                          [{set, Key, NewValue} | Acc];
-                      {update, NewKey, NewValue} ->
-                          case Key =:= NewKey of
-                              true ->
-                                  [{set, Key, NewValue} | Acc];
-                              false ->
-                                  [{delete, Key},
-                                   {set, NewKey, NewValue} | Acc]
-                          end;
-                      keep ->
-                          Acc;
-                      delete ->
-                          [{delete, Key} | Acc]
-                  end
-          end, [], State),
+    Reply =
+        try build_rewrite_updates(Fun, State) of
+            Updates ->
+                Conditions = [{state_revision, StateRevision}],
+                {ok, {{commit, Updates}, Conditions}}
+        catch
+            T:E:Stack ->
+                {error, {raised, T, E, sanitize_stacktrace(Stack)}}
+        end,
 
-    Conditions = [{state_revision, StateRevision}],
-    {reply, {ok, {{commit, Updates}, Conditions}}, Data}.
+    {reply, Reply, Data}.
+
+build_rewrite_updates(Fun, State) ->
+    maps:fold(
+      fun (Key, {Value, _Rev}, Acc) ->
+              case Fun(Key, Value) of
+                  {update, NewValue} ->
+                      [{set, Key, NewValue} | Acc];
+                  {update, NewKey, NewValue} ->
+                      case Key =:= NewKey of
+                          true ->
+                              [{set, Key, NewValue} | Acc];
+                          false ->
+                              [{delete, Key},
+                               {set, NewKey, NewValue} | Acc]
+                      end;
+                  keep ->
+                      Acc;
+                  delete ->
+                      [{delete, Key} | Acc]
+              end
+      end, [], State).
 
 handle_get(Key, State, Data) ->
     Reply =

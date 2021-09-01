@@ -487,6 +487,37 @@ reprovision_rewrite_test_loop(I) ->
            end),
     reprovision_rewrite_test_loop(I - 1).
 
+rewrite_raise_test_() ->
+    Nodes = [a],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 5, fun rewrite_raise_test__/0}}.
+
+rewrite_raise_test__() ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines),
+                          {ok, _} = chronicle_kv:set(kv, a, 42),
+
+                          Pid = whereis(kv),
+                          ?assertError(crash,
+                                       chronicle_kv:rewrite(
+                                         kv,
+                                         fun (_Key, Value) ->
+                                                 case Value of
+                                                     42 ->
+                                                         error(crash);
+                                                     _ ->
+                                                         keep
+                                                 end
+                                         end)),
+                          NewPid = whereis(kv),
+                          ?assertEqual(NewPid, Pid),
+                          ok
+                  end).
+
 partition_test_() ->
     Nodes = [a, b, c, d],
 
