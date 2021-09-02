@@ -1147,7 +1147,7 @@ rsm_snapshot_path(SnapshotDir, RSM) ->
 
 prepare_snapshot(Seqno) ->
     SnapshotDir = snapshot_dir(Seqno),
-    chronicle_utils:mkdir_p(SnapshotDir).
+    ?TIME(<<"prepare_snapshot">>, chronicle_utils:mkdir_p(SnapshotDir)).
 
 copy_snapshot(Path, Seqno, Config) ->
     SnapshotDir = snapshot_dir(Seqno),
@@ -1313,7 +1313,9 @@ release_snapshot(Seqno, #storage{extra_snapshots = ExtraSnapshots} = Storage) ->
 delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
     SnapshotDir = snapshot_dir(DataDir, SnapshotSeqno),
     ?INFO("Deleting snapshot at seqno ~p: ~s", [SnapshotSeqno, SnapshotDir]),
-    case chronicle_utils:delete_recursive(SnapshotDir) of
+    Result = ?TIME(<<"delete_snapshot">>,
+                   chronicle_utils:delete_recursive(SnapshotDir)),
+    case Result of
         ok ->
             ok;
         {error, Error} ->
