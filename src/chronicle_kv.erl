@@ -48,9 +48,8 @@
          handle_config/5,
          terminate/4]).
 
-%% TODO: make configurable
 -define(DEFAULT_TIMEOUT, 15000).
--define(TXN_RETRIES, 10).
+-define(DEFAULT_RETRIES, 10).
 
 -type name() :: atom().
 -type key() :: any().
@@ -89,7 +88,8 @@ add(Name, Key, Value) ->
 
 -spec add(name(), key(), value(), options()) -> op_result().
 add(Name, Key, Value, Opts) ->
-    submit_command(Name, {add, Key, Value}, get_timeout(Opts)).
+    submit_command(Name, {add, Key, Value},
+                   get_timeout(Name, Opts)).
 
 -spec set(name(), key(), value()) -> op_result().
 set(Name, Key, Value) ->
@@ -103,7 +103,7 @@ set(Name, Key, Value, ExpectedRevision) ->
 set(Name, Key, Value, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {set, Key, Value, ExpectedRevision},
-                   get_timeout(Opts)).
+                   get_timeout(Name, Opts)).
 
 -type update_result() :: {ok, revision()}
                        | {error, not_found | exceeded_retries}.
@@ -137,7 +137,7 @@ delete(Name, Key, ExpectedRevision) ->
 delete(Name, Key, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
-                   get_timeout(Opts)).
+                   get_timeout(Name, Opts)).
 
 -type multi_ops() :: [multi_op()].
 -type multi_op() :: {add, key(), value()}
@@ -153,7 +153,8 @@ multi(Name, Updates) ->
 -spec multi(name(), multi_ops(), options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
-    submit_transaction(Name, TxnConditions, TxnUpdates, get_timeout(Opts)).
+    submit_transaction(Name, TxnConditions, TxnUpdates,
+                       get_timeout(Name, Opts)).
 
 multi_to_txn(Updates) ->
     multi_to_txn_loop(Updates, [], []).
@@ -250,8 +251,8 @@ txn(Name, Fun, Opts) ->
     perform_txn(Name, BuildTxn, Opts).
 
 perform_txn(Name, BuildTxn, Opts) ->
-    TRef = start_timeout(get_timeout(Opts)),
-    Retries = maps:get(retries, Opts, ?TXN_RETRIES),
+    TRef = start_timeout(get_timeout(Name, Opts)),
+    Retries = get_retries(Name, Opts),
     txn_loop(Name, BuildTxn, Opts, TRef, Retries).
 
 txn_loop(Name, BuildTxn, Opts, TRef, Retries) ->
@@ -334,7 +335,7 @@ ro_txn(Name, Fun) ->
 
 -spec ro_txn(name(), ro_txn_fun(), options()) -> ro_txn_result().
 ro_txn(Name, Fun, Opts) ->
-    TRef = start_timeout(get_timeout(Opts)),
+    TRef = start_timeout(get_timeout(Name, Opts)),
     case prepare_txn(Name, Fun, TRef, Opts) of
         {ok, {TxnResult, _Conditions, Revision}} ->
             {ok, {TxnResult, Revision}};
@@ -351,7 +352,7 @@ get(Name, Key) ->
 -spec get(name(), key(), options()) -> get_result().
 get(Name, Key, Opts) ->
     optimistic_query(
-      Name, {get, Key}, get_timeout(Opts), Opts,
+      Name, {get, Key}, get_timeout(Name, Opts), Opts,
       fun () ->
               case get_fast_path(Name, Key) of
                   {ok, _} = Ok ->
@@ -409,7 +410,7 @@ get_full_snapshot(Name) ->
 
 -spec get_full_snapshot(name(), options()) -> get_snapshot_result().
 get_full_snapshot(Name, Opts) ->
-    submit_query(Name, get_full_snapshot, get_timeout(Opts), Opts).
+    submit_query(Name, get_full_snapshot, get_timeout(Name, Opts), Opts).
 
 -spec get_snapshot(name(), [key()]) -> get_snapshot_result().
 get_snapshot(Name, Keys) ->
@@ -418,7 +419,7 @@ get_snapshot(Name, Keys) ->
 -spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
     optimistic_query(
-      Name, {get_snapshot, Keys}, get_timeout(Opts), Opts,
+      Name, {get_snapshot, Keys}, get_timeout(Name, Opts), Opts,
       fun () ->
               get_snapshot_fast_path(Name, Keys)
       end).
@@ -476,7 +477,7 @@ get_revision(Name) ->
 
 -spec sync(name()) -> ok.
 sync(Name) ->
-    sync(Name, ?DEFAULT_TIMEOUT).
+    sync(Name, get_opt_default(Name, timeout, ?DEFAULT_TIMEOUT)).
 
 -spec sync(name(), timeout()) -> ok.
 sync(Name, Timeout) ->
@@ -596,8 +597,22 @@ terminate(_Reason, _StateRevision, _State, _Data) ->
     ok.
 
 %% internal
-get_timeout(Opts) ->
-    maps:get(timeout, Opts, ?DEFAULT_TIMEOUT).
+get_opt(RSMName, OptName, Opts, Default) ->
+    case maps:find(OptName, Opts) of
+        {ok, Value} ->
+            Value;
+        error ->
+            get_opt_default(RSMName, OptName, Default)
+    end.
+
+get_opt_default(RSMName, OptName, Default) ->
+    chronicle_settings:get({chronicle_kv, RSMName, OptName}, Default).
+
+get_timeout(Name, Opts) ->
+    get_opt(Name, timeout, Opts, ?DEFAULT_TIMEOUT).
+
+get_retries(Name, Opts) ->
+    get_opt(Name, retries, Opts, ?DEFAULT_RETRIES).
 
 optimistic_query(Name, Query, Timeout, Opts, Body) ->
     TRef = start_timeout(Timeout),
