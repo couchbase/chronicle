@@ -6,6 +6,7 @@
 /cluster/
 /priv/
 /c_src/*.d
+/c_src/*.o
 /tmp/
 
 # rebar2
