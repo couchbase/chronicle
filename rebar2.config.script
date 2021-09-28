@@ -1,0 +1,12 @@
+Release = erlang:system_info(otp_release),
+try list_to_integer(Release) of
+    R when R > 22 ->
+        PortEnv = proplists:get_value(port_env, CONFIG, []),
+        NewPortEnv = [{"ERL_LDFLAGS", "-L$ERL_EI_LIBDIR -lei"} | PortEnv],
+        lists:keystore(port_env, 1, CONFIG, {port_env, NewPortEnv});
+    _ ->
+        CONFIG
+catch
+    error:badarg ->
+        CONFIG
+end.
