@@ -203,8 +203,8 @@ handle_event(enter, OldState, State, Data) ->
     handle_state_enter(State, NewData1);
 handle_event(info, {nodeup, _, _}, _State, Data) ->
     {keep_state, refresh_live_peers(Data)};
-handle_event(info, {nodedown, _, _}, _State, Data) ->
-    {keep_state, refresh_live_peers(Data)};
+handle_event(info, {nodedown, Node, _}, State, Data) ->
+    handle_nodedown(Node, State, Data);
 handle_event(info, {chronicle_event, Event}, State, Data) ->
     handle_chronicle_event(Event, State, Data);
 handle_event(info, {heartbeat, LeaderInfo}, State, Data) ->
@@ -420,6 +420,34 @@ is_interesting_event({new_config, _, _}) ->
     true;
 is_interesting_event(_) ->
     false.
+
+handle_nodedown(DownPeer, State, Data) ->
+    NewData = refresh_live_peers(Data),
+
+    %% If the leader disconnected, become an observer immediately. This has
+    %% multiple effects:
+    %%   - If the disconnect is permanent, we'll start an election sooner.
+    %%   - If the disconnect is intermittent, we'll notify chronicle_rsm-s, so
+    %%   they can retry any pending commands immediately after the node
+    %%   reconnects back to us.
+    ResetState =
+        case State of
+            #follower{leader = Peer} ->
+                Peer =:= DownPeer;
+            #voted_for{peer = Peer} ->
+                Peer =:= DownPeer;
+            _ ->
+                false
+        end,
+
+    case ResetState of
+        true ->
+            ?INFO("Peer ~p disconnected when state was ~p. "
+                  "Becoming observer.", [DownPeer, state_name(State)]),
+            {next_state, make_observer(NewData), NewData};
+        false ->
+            {keep_state, NewData}
+    end.
 
 handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
