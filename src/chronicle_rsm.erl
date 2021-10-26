@@ -37,8 +37,8 @@
 %% bug.
 -define(INIT_TIMEOUT, chronicle_settings:get({rsm, init_timeout}, 60000)).
 
--define(RETRY_AFTER, chronicle_settings:get({rsm, retry_after}, 2000)).
--define(MAX_BACKOFF, chronicle_settings:get({rsm, max_backoff}, 4)).
+-define(RETRY_AFTER, chronicle_settings:get({rsm, retry_after}, 100)).
+-define(MAX_BACKOFF, chronicle_settings:get({rsm, max_backoff}, 32)).
 -define(DOWN_INTERVAL, chronicle_settings:get({rsm, down_interval}, 10000)).
 -define(NOOP_INTERVAL, chronicle_settings:get({rsm, noop_interval}, 10000)).
 
