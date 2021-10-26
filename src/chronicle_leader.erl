@@ -201,8 +201,8 @@ handle_event(enter, OldState, State, Data) ->
     NewData0 = maybe_publish_leader(OldState, State, Data),
     NewData1 = handle_state_leave(OldState, NewData0),
     handle_state_enter(State, NewData1);
-handle_event(info, {nodeup, _, _}, _State, Data) ->
-    {keep_state, refresh_live_peers(Data)};
+handle_event(info, {nodeup, Node, _}, State, Data) ->
+    handle_nodeup(Node, State, Data);
 handle_event(info, {nodedown, Node, _}, State, Data) ->
     handle_nodedown(Node, State, Data);
 handle_event(info, {chronicle_event, Event}, State, Data) ->
@@ -420,6 +420,15 @@ is_interesting_event({new_config, _, _}) ->
     true;
 is_interesting_event(_) ->
     false.
+
+handle_nodeup(Peer, State, Data) ->
+    case State of
+        #leader{} ->
+            send_heartbeat_to_peer(Peer, State);
+        _ ->
+            ok
+    end,
+    {keep_state, refresh_live_peers(Data)}.
 
 handle_nodedown(DownPeer, State, Data) ->
     NewData = refresh_live_peers(Data),
@@ -975,12 +984,20 @@ handle_send_heartbeat(State, Data) ->
     send_heartbeat(State, Data),
     {keep_state, schedule_send_heartbeat(Data)}.
 
-send_heartbeat(#leader{} = State, Data) ->
+make_heartbeat(#leader{} = State) ->
     {leader, LeaderInfo} = state_leader_info(State),
-    Heartbeat = {heartbeat, LeaderInfo},
-    send_msg_to_live_peers(Heartbeat, Data).
+    {heartbeat, LeaderInfo}.
+
+send_heartbeat(State, Data) ->
+    send_msg_to_live_peers(make_heartbeat(State), Data).
+
+send_heartbeat_to_peer(Peer, State) ->
+    send_msg(Peer, make_heartbeat(State)).
 
 send_msg_to_live_peers(Msg, #data{live_peers = Peers}) ->
+    send_msg_to_peers(Peers, Msg).
+
+send_msg_to_peers(Peers, Msg) ->
     lists:foreach(
       fun (Peer) ->
               send_msg(Peer, Msg)
