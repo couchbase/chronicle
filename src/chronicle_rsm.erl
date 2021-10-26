@@ -693,7 +693,7 @@ handle_leader_down(State, #data{leader_last_retry = LastRetry,
                 SinceRetry = Now - LastRetry,
                 case SinceRetry < ?DOWN_INTERVAL of
                     true ->
-                        Data#data.leader_backoff * 2;
+                        min(?MAX_BACKOFF, Data#data.leader_backoff * 2);
                     false ->
                         1
                 end
