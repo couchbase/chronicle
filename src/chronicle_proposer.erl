@@ -128,7 +128,17 @@ start_link(HistoryId, Term) ->
                           ?MODULE, [Self, HistoryId, Term], []).
 
 stop(Pid) ->
-    gen_statem:call(Pid, stop, ?STOP_TIMEOUT).
+    {_, true} = process_info(self(), trap_exit),
+    gen_statem:cast(Pid, stop),
+    receive
+        {'EXIT', Pid, Reason} ->
+            ?INFO("Proposer ~w stopped: ~w",
+                  [Pid, chronicle_utils:sanitize_reason(Reason)]),
+            ok
+    after
+        ?STOP_TIMEOUT ->
+            exit({proposer_failed_to_terminate, Pid})
+    end.
 
 sync_quorum(Pid, ReplyTo) ->
     gen_statem:cast(Pid, {sync_quorum, ReplyTo}).
@@ -240,8 +250,8 @@ handle_event(cast, {cas_config, NewConfig, Revision} = Request, State, Data) ->
     end;
 handle_event(cast, {append_commands, Commands}, State, Data) ->
     handle_append_commands(Commands, State, Data);
-handle_event({call, From}, stop, State, Data) ->
-    handle_stop(From, State, Data);
+handle_event(cast, stop, State, Data) ->
+    handle_stop(State, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, [{reply, From, nack}]};
 handle_event(Type, Event, _State, _Data) ->
@@ -1276,15 +1286,12 @@ check_cas_config(NewConfig, CasRevision, #data{config = ConfigEntry}) ->
             {error, {cas_failed, ConfigRevision}}
     end.
 
-handle_stop(From, State,
-            #data{history_id = HistoryId, term = Term} = Data) ->
+handle_stop(State, #data{history_id = HistoryId, term = Term} = Data) ->
     ?INFO("Proposer for term ~w "
           "in history ~p is terminating.", [Term, HistoryId]),
     case State of
         {stopped, Reason} ->
-            {stop_and_reply,
-             {shutdown, Reason},
-             {reply, From, ok}};
+            {stop, {shutdown, Reason}};
         _ ->
             stop(stop, [postpone], State, Data)
     end.
