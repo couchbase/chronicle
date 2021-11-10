@@ -272,25 +272,9 @@ handle_process_exit(Pid, Reason, State, #data{proposer = Proposer} = Data) ->
             {stop, {linked_process_died, Pid, Reason}}
     end.
 
-handle_proposer_exit(Pid, Reason, #leader{status = Status}, Data) ->
-    ?INFO("Proposer ~w terminated:~n~p",
-          [Pid, sanitize_reason(Reason)]),
-
-    NewData = Data#data{proposer = undefined},
-    case Status of
-        not_ready ->
-            %% The proposer terminated before fully initializing, and before
-            %% any requests were sent to it. This is not abnormal and may
-            %% happen if the proposer fails to get enough votes when
-            %% establishing the term. There's no reason to terminate
-            %% chronicle_server in such case.
-            {next_state, #no_leader{}, NewData};
-        ready ->
-            %% Some requests may have never been processed by the proposer and
-            %% the only way to indicate to the callers that something went
-            %% wrong is to terminate chronicle_server.
-            {stop, proposer_terminated, NewData}
-    end.
+handle_proposer_exit(Pid, Reason, #leader{}, Data) ->
+    ?INFO("Proposer ~w terminated:~n~p", [Pid, sanitize_reason(Reason)]),
+    {next_state, #no_leader{}, Data#data{proposer = undefined}}.
 
 handle_proposer_msg({proposer_ready, HistoryId, Term}, State, Data) ->
     handle_proposer_ready(HistoryId, Term, State, Data);
@@ -449,13 +433,16 @@ terminate_proposer(#data{proposer = Proposer} = Data) ->
 cleanup_after_proposer(#data{commands_batch = CommandsBatch,
                              syncs_batch = SyncsBatch} = Data) ->
     ?FLUSH({proposer_msg, _}),
-    {PendingCommands, _} = chronicle_utils:batch_flush(CommandsBatch),
-    {PendingSyncs, _} = chronicle_utils:batch_flush(SyncsBatch),
 
-    lists:foreach(
-      fun ({ReplyTo, _Command}) ->
-              reply_not_leader(ReplyTo)
-      end, PendingSyncs ++ PendingCommands),
+    %% Commands don't expect any response.
+    %%
+    %% Sync requests do expect a response, but it's possible that they've
+    %% already been responded to by the proposer. It's ok not to send any
+    %% response to those that the proposer didn't respond to: the RSM on the
+    %% leader will clean up once it realizes that the node is not leader
+    %% anymore; the RSM on the follower will retry once new leader is known.
+    _ = chronicle_utils:batch_flush(CommandsBatch),
+    _ = chronicle_utils:batch_flush(SyncsBatch),
 
     Data#data{syncs_batch = undefined,
               commands_batch = undefined}.
