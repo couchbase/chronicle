@@ -578,3 +578,79 @@ partition_test__(Nodes) ->
                   end),
 
     ok.
+
+proposer_crash_test_() ->
+    Nodes = [a,b,c,d,e],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 20, fun () ->
+                           proposer_crash_test__(Nodes)
+                   end}}.
+
+proposer_crash_test__(Nodes) ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines)
+                  end),
+
+    add_voters(a, Nodes -- [a]),
+
+    NodeBody =
+        fun (N) ->
+                Pids = [spawn_link(
+                          fun () ->
+                                  timer:sleep(rand:uniform(500)),
+                                  {ok, _} = chronicle_kv:set(kv, {N, I}, 2*I)
+                          end) || I <- lists:seq(1, 2000)],
+
+                lists:foreach(
+                  fun (Pid) ->
+                          ok = chronicle_utils:wait_for_process(
+                                 Pid, 100000)
+                  end, Pids)
+        end,
+
+    Pids = lists:map(
+             fun (N) ->
+                     spawn_link(
+                       fun () ->
+                               ok = rpc_node(
+                                      N,
+                                      fun () ->
+                                              NodeBody(N)
+                                      end)
+                       end)
+             end, Nodes),
+
+    Crasher = spawn_link(
+                fun R() ->
+                        timer:sleep(rand:uniform(250)),
+                        lists:foreach(
+                          fun (N) ->
+                                  Name = {N, chronicle_proposer},
+                                  case vnet:whereis_name(Name) of
+                                      undefined ->
+                                          ok;
+                                      Pid ->
+                                          %% Make sure chronicle_proposer
+                                          %% entered gen_statem
+                                          %% loop. Otherwise we may kill it
+                                          %% when chronicle_server is still
+                                          %% waiting for
+                                          %% chronicle_proposer:start_link()
+                                          %% to return.
+                                          _ = (catch sys:get_state(Pid)),
+                                          exit(Pid, crash)
+                                  end
+                          end, Nodes),
+                        R()
+                end),
+
+    lists:foreach(
+      fun (Pid) ->
+              ok = chronicle_utils:wait_for_process(Pid, 100000)
+      end, Pids),
+
+    chronicle_utils:terminate_linked_process(Crasher, shutdown).
