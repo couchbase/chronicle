@@ -201,13 +201,8 @@ handle_event(enter, _OldState, NewState, Data) ->
 handle_event(state_timeout, establish_term_timeout, State, Data) ->
     handle_establish_term_timeout(State, Data);
 handle_event(info, check_peers, State, Data) ->
-    case State of
-        _ when State =:= recovery;
-               State =:= proposing ->
-            {keep_state, check_peers(Data)};
-        {stopped, _} ->
-            keep_state_and_data
-    end;
+    true = State =:= recovery orelse State =:= proposing,
+    {keep_state, check_peers(Data)};
 handle_event(info, {check_quorum, CommittedSeqno, SyncRound}, State, Data) ->
     handle_check_quorum(CommittedSeqno, SyncRound, State, Data);
 handle_event(info, {{agent_response, Ref, Peer, Request}, Result}, State,
@@ -238,16 +233,12 @@ handle_event(info, {'DOWN', MRef, process, Pid, Reason}, State, Data) ->
 handle_event(cast, {sync_quorum, ReplyTo}, State, Data) ->
     handle_sync_quorum(ReplyTo, State, Data);
 handle_event(cast, {cas_config, NewConfig, Revision} = Request, State, Data) ->
-    case State of
-        proposing ->
-            maybe_postpone_config_request(
-              Request, Data,
-              fun () ->
-                      handle_cas_config(NewConfig, Revision, State, Data)
-              end);
-        {stopped, _} ->
-            keep_state_and_data
-    end;
+    proposing = State,
+    maybe_postpone_config_request(
+      Request, Data,
+      fun () ->
+              handle_cas_config(NewConfig, Revision, State, Data)
+      end);
 handle_event(cast, {append_commands, Commands}, State, Data) ->
     handle_append_commands(Commands, State, Data);
 handle_event(cast, stop, State, Data) ->
@@ -277,7 +268,7 @@ handle_state_enter(establish_term = State,
                           "We're not a voting member anymore.~n"
                           "Peers: ~w",
                           [Term, HistoryId, Peers]),
-                    stop_now({not_voter, Peers}, State)
+                    stop({not_voter, Peers}, State, Data)
             end;
         {error, Error} ->
             ?DEBUG("Error trying to establish local term. Stepping down.~n"
@@ -285,8 +276,8 @@ handle_state_enter(establish_term = State,
                    "Term: ~w~n"
                    "Error: ~w",
                    [HistoryId, Term, Error]),
-            stop_now({local_establish_term_failed,
-                      HistoryId, Term, Error}, State)
+            stop({local_establish_term_failed,
+                  HistoryId, Term, Error}, State, Data)
     end;
 handle_state_enter(recovery,
                    #data{history_id = HistoryId, term = Term} = Data) ->
@@ -304,8 +295,6 @@ handle_state_enter(proposing,
     ?DEBUG("Proposer for term ~w in history ~p is ready. Committed seqno: ~b",
            [Term, HistoryId, CommittedSeqno]),
     announce_proposer_ready(Data),
-    keep_state_and_data;
-handle_state_enter({stopped, _}, _Data) ->
     keep_state_and_data.
 
 start_catchup_process(#data{peer = Self,
@@ -428,15 +417,16 @@ establish_term_init(Metadata, State,
                      "Busy peers: ~w~n"
                      "Quorum: ~w",
                      [Term, HistoryId, QuorumPeers, BusyPeers, Quorum]),
-            stop_now(no_quorum, State)
+            stop(no_quorum, State, NewData1)
     end.
 
 establish_term_timeout(Timeout) ->
     {state_timeout, Timeout, establish_term_timeout}.
 
-handle_establish_term_timeout(establish_term = State, #data{term = Term}) ->
+handle_establish_term_timeout(State, #data{term = Term} = Data) ->
+    establish_term = State,
     ?ERROR("Failed to establish term ~w", [Term]),
-    stop_now(establish_term_timeout, State).
+    stop(establish_term_timeout, State, Data).
 
 check_peers(#data{peers = Peers,
                   sync_round = SyncRound,
@@ -485,18 +475,14 @@ check_down_peers(#data{peers = Peers} = Data) ->
 handle_check_quorum(OldCommittedSeqno, OldSyncRound, State,
                     #data{acked_sync_round = SyncRound,
                           committed_seqno = CommittedSeqno} = Data) ->
-    case State of
-        _ when State =:= recovery;
-               State =:= proposing ->
-            case SyncRound =:= OldSyncRound
-                andalso CommittedSeqno =:= OldCommittedSeqno of
-                true ->
-                    stop(no_quorum, State, Data);
-                false ->
-                    {keep_state, schedule_check_quorum(Data)}
-            end;
-        {stopped, _} ->
-            keep_state_and_data
+    true = State =:= recovery orelse State =:= proposing,
+
+    case SyncRound =:= OldSyncRound
+        andalso CommittedSeqno =:= OldCommittedSeqno of
+        true ->
+            stop(no_quorum, State, Data);
+        false ->
+            {keep_state, schedule_check_quorum(Data)}
     end.
 
 schedule_check_quorum(#data{sync_round = SyncRound,
@@ -1122,8 +1108,6 @@ handle_nodeup(Peer, _Info, State, #data{peers = Peers} = Data) ->
             %%  term. This will trigger another election and once and if we're
             %%  elected again, we'll retry with a new set of live peers.
             keep_state_and_data;
-        {stopped, _} ->
-            keep_state_and_data;
         _ when State =:= proposing;
                State =:= recovery ->
             case lists:member(Peer, Peers) of
@@ -1191,9 +1175,6 @@ handle_down_establish_term(Peer,
             establish_term_handle_vote(Peer, failed, State, Data)
     end.
 
-handle_append_commands(_Commands, {stopped, _}, _Data) ->
-    %% Proposer has stopped. Reject any incoming commands.
-    keep_state_and_data;
 handle_append_commands(_Commands, State, #data{being_removed = true})
   when State =:= proposing;
        State =:= recovery ->
@@ -1235,9 +1216,6 @@ handle_command({rsm_command, Command}, Seqno,
             {reject, {error, {unknown_rsm, RSMName}}}
     end.
 
-handle_sync_quorum(ReplyTo, {stopped, _}, _Data) ->
-    reply_not_leader(ReplyTo),
-    keep_state_and_data;
 handle_sync_quorum(ReplyTo, proposing,
                    #data{history_id = HistoryId,
                          committed_seqno = CommittedSeqno} = Data) ->
@@ -1289,12 +1267,7 @@ check_cas_config(NewConfig, CasRevision, #data{config = ConfigEntry}) ->
 handle_stop(State, #data{history_id = HistoryId, term = Term} = Data) ->
     ?INFO("Proposer for term ~w "
           "in history ~p is terminating.", [Term, HistoryId]),
-    case State of
-        {stopped, Reason} ->
-            {stop, {shutdown, Reason}};
-        _ ->
-            stop(stop, [postpone], State, Data)
-    end.
+    stop(stop, State, Data).
 
 make_log_entry(Seqno, Value, #data{history_id = HistoryId, term = Term}) ->
     #log_entry{history_id = HistoryId,
@@ -2084,26 +2057,10 @@ deduce_quorum_value_test() ->
                             {d, 3}, {e, 1}], JointQuorum)).
 -endif.
 
-stop_now(Reason, State) ->
-    establish_term = State,
-    {stop, {shutdown, Reason}}.
-
 stop(Reason, State, Data) ->
-    stop(Reason, [], State, Data).
-
-stop(Reason, ExtraEffects, State,
-     #data{parent = Pid, peers = Peers} = Data)
-  when State =:= establish_term;
-       State =:= proposing;
-       State =:= recovery ->
-    {NewData0, Effects} = unpostpone_config_requests(Data),
-
-    %% Demonitor all agents so we don't process any more requests from them.
-    NewData1 = demonitor_agents(Peers, NewData0),
-
     %% Reply to all in-flight sync_quorum requests
-    NewData2 = sync_quorum_reply_not_leader(NewData1),
-    NewData3 =
+    NewData1 = sync_quorum_reply_not_leader(Data),
+    NewData2 =
         case State =/= establish_term of
             true ->
                 %% Make an attempt to notify local agent about the latest
@@ -2113,16 +2070,13 @@ stop(Reason, ExtraEffects, State,
                 %% But this can be and needs to be done only if we've
                 %% established the term on a quorum of nodes (that is, our
                 %% state is 'proposing').
-                sync_local_agent(NewData2),
-                stop_catchup_process(NewData2);
+                sync_local_agent(NewData1),
+                stop_catchup_process(NewData1);
             false ->
-                NewData2
+                NewData1
         end,
 
-    chronicle_server:proposer_stopping(Pid, Reason),
-    {next_state, {stopped, Reason}, NewData3, Effects ++ ExtraEffects};
-stop(_Reason, ExtraEffects, {stopped, _}, Data) ->
-    {keep_state, Data, ExtraEffects}.
+    {stop, {shutdown, Reason}, NewData2}.
 
 sync_local_agent(#data{history_id = HistoryId,
                        term = Term,

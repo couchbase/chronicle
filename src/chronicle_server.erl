@@ -21,7 +21,7 @@
 
 -export([start_link/0]).
 -export([register_rsm/2, cas_config/2, sync_quorum/3, rsm_command/3,
-         proposer_ready/3, proposer_stopping/2, reply_request/2]).
+         proposer_ready/3, reply_request/2]).
 
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
@@ -66,10 +66,6 @@ rsm_command(HistoryId, Term, Command) ->
 %% Meant to only be used by chronicle_proposer.
 proposer_ready(Pid, HistoryId, Term) ->
     Pid ! {proposer_msg, {proposer_ready, HistoryId, Term}},
-    ok.
-
-proposer_stopping(Pid, Reason) ->
-    Pid ! {proposer_msg, {proposer_stopping, Reason}},
     ok.
 
 reply_request(ReplyTo, Reply) ->
@@ -277,9 +273,7 @@ handle_proposer_exit(Pid, Reason, #leader{}, Data) ->
     {next_state, #no_leader{}, Data#data{proposer = undefined}}.
 
 handle_proposer_msg({proposer_ready, HistoryId, Term}, State, Data) ->
-    handle_proposer_ready(HistoryId, Term, State, Data);
-handle_proposer_msg({proposer_stopping, Reason}, State, Data) ->
-    handle_proposer_stopping(Reason, State, Data).
+    handle_proposer_ready(HistoryId, Term, State, Data).
 
 handle_proposer_ready(HistoryId, Term,
                       #leader{history_id = HistoryId,
@@ -288,13 +282,6 @@ handle_proposer_ready(HistoryId, Term,
                       Data) ->
     NewState = State#leader{status = ready},
     {next_state, NewState, Data}.
-
-handle_proposer_stopping(Reason,
-                         #leader{history_id = HistoryId, term = Term},
-                         #data{proposer = Proposer} = Data) ->
-    ?INFO("Proposer ~w for term ~w in history ~p is terminating:~n~p",
-          [Proposer, Term, HistoryId, sanitize_reason(Reason)]),
-    {next_state, #no_leader{}, Data}.
 
 reply_not_leader(ReplyTo) ->
     reply_request(ReplyTo, {error, {leader_error, not_leader}}).
