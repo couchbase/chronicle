@@ -1645,16 +1645,19 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
         end,
 
     Request = {append, From},
-    NewData0 =
-        case Entries =/= [] orelse Truncate of
-            true ->
+    NewData0 = inc_pending_appends(Data),
+    NewData1 =
+        if
+            Truncate ->
+                truncate_append(Request, StartSeqno, EndSeqno,
+                                Entries, Metadata, State, NewData0);
+            Entries =/= [] ->
                 append_entries_async(Request,
                                      StartSeqno, EndSeqno,
-                                     Entries, Metadata, Truncate, Data);
-            false ->
-                store_meta_async(Request, Metadata, Data)
+                                     Entries, Metadata, NewData0);
+            true ->
+                store_meta_async(Request, Metadata, NewData0)
         end,
-    NewData1 = inc_pending_appends(NewData0),
 
     %% TODO: in-progress snapshots might need to be canceled if any of the
     %% state machines get deleted.
@@ -2449,9 +2452,7 @@ maybe_seed_storage(Data) ->
 
 append_entry(Entry, Meta, State, Data) ->
     Seqno = Entry#log_entry.seqno,
-    NewData = append_entries_async(none,
-                                   Seqno, Seqno,
-                                   [Entry], Meta, false, Data),
+    NewData = append_entries_async(none, Seqno, Seqno, [Entry], Meta, Data),
     sync_storage(State, NewData).
 
 store_meta_async(Request, Meta, #data{storage = Storage} = Data) ->
@@ -2462,14 +2463,22 @@ store_meta(Meta, State, Data) ->
     NewData = store_meta_async(none, Meta, Data),
     sync_storage(State, NewData).
 
-append_entries_async(Request,
-                     StartSeqno, EndSeqno, Entries, Metadata, Truncate,
+truncate_append(Request, StartSeqno,
+                EndSeqno, Entries, Metadata, State,
+                #data{storage = Storage} = Data) ->
+    {DoneRequests, NewStorage} =
+        chronicle_storage:truncate_append(Request, StartSeqno,
+                                          EndSeqno, Entries,
+                                          Metadata, Storage),
+    NewData = Data#data{storage = NewStorage},
+    handle_completed_requests(DoneRequests, State, Data, NewData).
+
+append_entries_async(Request, StartSeqno, EndSeqno, Entries, Metadata,
                      #data{storage = Storage} = Data) ->
     NewStorage = chronicle_storage:append(Request,
                                           StartSeqno, EndSeqno,
                                           Entries,
-                                          #{meta => Metadata,
-                                            truncate => Truncate}, Storage),
+                                          Metadata, Storage),
     Data#data{storage = NewStorage}.
 
 record_snapshot(Seqno, HistoryId, Term, ConfigEntry,

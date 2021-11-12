@@ -27,7 +27,7 @@
          get_high_term/1, get_pending_high_term/1,
          get_config/1, get_pending_config/1,
          get_committed_config/1, get_pending_committed_config/1,
-         store_meta/3, append/6, sync/1, close/1,
+         store_meta/3, truncate_append/6, append/6, sync/1, close/1,
          install_snapshot/6, record_snapshot/6, delete_snapshot/2,
          prepare_snapshot/1, copy_snapshot/3,
          read_rsm_snapshot/1, read_rsm_snapshot/2, save_rsm_snapshot/3,
@@ -595,9 +595,29 @@ dedup_meta(Updates, #storage{pending_meta = Meta}) ->
               end
       end, Updates).
 
-append(Opaque, StartSeqno, EndSeqno, Entries, Opts, Storage) ->
-    Truncate = append_handle_truncate(StartSeqno, Opts, Storage),
-    Meta = append_handle_meta(Opts, Storage),
+truncate_append(Opaque, StartSeqno, EndSeqno, Entries, Meta, Storage) ->
+    CommittedSeqno = get_committed_seqno(Storage#storage.pending_meta),
+
+    true = (StartSeqno > CommittedSeqno),
+    true = (StartSeqno =< Storage#storage.pending_high_seqno + 1),
+    true = (StartSeqno >= Storage#storage.low_seqno),
+
+    NewStorage = append(Opaque, StartSeqno,
+                        EndSeqno, Entries, Meta, true, Storage),
+
+    %% Truncating overwrites in-memory entries for some seqno-s that are lower
+    %% than high_seqno. This makes the view of the persisted log inconsistent,
+    %% so it may not be exposed to outside consumers. This is why truncates
+    %% are made synchronous. This should be a relatively rare situation: this
+    %% requires a leader change.
+    sync(NewStorage).
+
+append(Opaque, StartSeqno, EndSeqno, Entries, Meta, Storage) ->
+    true = (StartSeqno =:= Storage#storage.pending_high_seqno + 1),
+    append(Opaque, StartSeqno, EndSeqno, Entries, Meta, false, Storage).
+
+append(Opaque, StartSeqno, EndSeqno, Entries, Meta0, Truncate, Storage) ->
+    Meta = dedup_meta(Meta0, Storage),
     LogEntry = {append, StartSeqno, EndSeqno, Meta, Truncate, Entries},
 
     NewStorage = prepare_append(StartSeqno, EndSeqno,
@@ -621,32 +641,6 @@ prepare_append(StartSeqno, EndSeqno, Meta, Truncate, Entries, Storage) ->
     NewStorage1 = mem_log_append(EndSeqno, Entries, NewStorage0),
     NewStorage2 = add_pending_meta(Meta, NewStorage1),
     append_configs(Entries, NewStorage2).
-
-append_handle_meta(Opts, Storage) ->
-    case maps:find(meta, Opts) of
-        {ok, Meta} ->
-            dedup_meta(Meta, Storage);
-        error ->
-            #{}
-    end.
-
-append_handle_truncate(StartSeqno, Opts,
-                       #storage{pending_meta = Meta,
-                                low_seqno = LowSeqno,
-                                pending_high_seqno = HighSeqno}) ->
-    Truncate = maps:get(truncate, Opts, false),
-    case Truncate of
-        true ->
-            CommittedSeqno = get_committed_seqno(Meta),
-
-            true = (StartSeqno > CommittedSeqno),
-            true = (StartSeqno =< HighSeqno + 1),
-            true = (StartSeqno >= LowSeqno);
-        false ->
-            true = (StartSeqno =:= HighSeqno + 1)
-    end,
-
-    Truncate.
 
 sync(Storage) ->
     sync_loop([], Storage).
