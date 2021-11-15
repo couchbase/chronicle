@@ -949,6 +949,7 @@ sanitize_stacktrace(Stacktrace) ->
 
 sanitize_reason({Reason, Stack} = Pair) ->
     Sanitize =
+        %% https://www.erlang.org/doc/reference_manual/errors.html#exit-reasons
         case Reason of
             {badmatch, _} ->
                 true;
