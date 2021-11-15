@@ -25,7 +25,7 @@
          note_leader_status/2]).
 
 -export([unpack_payload/1]).
--export([format_snapshot/1]).
+-export([map_snapshot/2, format_snapshot/1]).
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
@@ -210,6 +210,9 @@ format_status(Opt, [_PDict, State, Data]) ->
                      Data
              end}
     end.
+
+map_snapshot(Fun, #snapshot{mod = Mod, mod_state = ModState} = Snapshot) ->
+   Snapshot#snapshot{mod_state = Fun(Mod, ModState)}.
 
 format_snapshot(#snapshot{applied_history_id = HistoryId,
                           applied_seqno = Seqno,

@@ -38,11 +38,26 @@ parse_args_loop([Arg|Args], AccArgs, AccOptions, Spec) ->
                     parse_args_loop(Args, AccArgs,
                                     AccOptions#{Opt => true},
                                     Spec);
+                {ok, {option, Fun}} ->
+                    parse_args_option(Arg, Option, Fun,
+                                      Args, AccArgs, AccOptions, Spec);
                 error ->
                     usage("unknown option '~s'", [Arg])
             end;
         _ ->
             parse_args_loop(Args, [Arg | AccArgs], AccOptions, Spec)
+    end.
+
+parse_args_option(Option, _Name, _Fun, [], _AccArgs, _AccOption, _Spec) ->
+    usage("argument required for '~s'", [Option]);
+parse_args_option(Option, Name, Fun, [Arg|Args], AccArgs, AccOptions, Spec) ->
+    case Fun(Arg) of
+        {ok, Result} ->
+            NewAccOptions = AccOptions#{list_to_atom(Name) => Result},
+            parse_args_loop(Args, AccArgs, NewAccOptions, Spec);
+        {error, Error} ->
+            usage("invalid argument '~s' for '~s': ~w",
+                  [Arg, Option, Error])
     end.
 
 dump_logs(Args) ->
@@ -98,8 +113,26 @@ unpack_entry(Entry) ->
               end
       end, Entry).
 
+sanitize_opt(Value) ->
+    case string:split(Value, ":", all) of
+        [Module, Function] ->
+            M = list_to_atom(Module),
+            F = list_to_atom(Function),
+            A = 2,
+            case chronicle_utils:is_function_exported(M, F, A) of
+                true ->
+                    {ok, fun M:F/A};
+                false ->
+                    {error, not_exported}
+            end;
+        _ ->
+            {error, invalid_function}
+    end.
+
 dump_snapshots(Args) ->
-    {Paths, Options} = parse_args(Args, #{raw => flag}),
+    {Paths, Options} = parse_args(Args,
+                                  #{raw => flag,
+                                    sanitize => {option, fun sanitize_opt/1}}),
     dump_many(Paths,
               fun (Path) ->
                       dump_snapshot(Path, Options)
@@ -114,12 +147,22 @@ dump_many([Path|Rest], Fun) ->
     ?fmt("~n"),
     dump_many(Rest, Fun).
 
+sanitize_snapshot(Snapshot, Options) ->
+    case maps:find(sanitize, Options) of
+        {ok, Fun} ->
+            chronicle_rsm:map_snapshot(Fun, Snapshot);
+        error ->
+            Snapshot
+    end.
+
 dump_snapshot(Path, Options) ->
     case chronicle_storage:read_rsm_snapshot(Path) of
-        {ok, Snapshot} ->
+        {ok, RawSnapshot} ->
             ?fmt("Dumping '~s'~n", [Path]),
 
             try
+                Snapshot = sanitize_snapshot(RawSnapshot, Options),
+
                 case maps:get(raw, Options, false) of
                     true ->
                         dump_term(Snapshot);
@@ -222,7 +265,7 @@ type(Term) ->
 usage() ->
     ?fmt("Usage: ~s [COMMAND]", [escript:script_name()]),
     ?fmt("Commands:"),
-    ?fmt("    snapshot [--raw] [FILE]..."),
+    ?fmt("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
     ?fmt("         log [FILE]..."),
     erlang:halt(1).
 
