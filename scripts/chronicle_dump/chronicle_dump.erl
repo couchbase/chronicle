@@ -66,7 +66,8 @@ dump_log(Path, _Options) ->
         T:E:Stacktrace ->
             ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
                  "~p",
-                 [T, E, Stacktrace])
+                 [T, E,
+                  chronicle_utils:sanitize_stacktrace(Stacktrace)])
     end.
 
 dump_log_header(Header, header) ->
@@ -130,7 +131,8 @@ dump_snapshot(Path, Options) ->
                 T:E:Stacktrace ->
                     ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
                          "~p",
-                         [T, E, Stacktrace])
+                         [T, E,
+                          chronicle_utils:sanitize_stacktrace(Stacktrace)])
             end;
         {error, Error} ->
             ?fmt("Couldn't read snapshot '~s': ~w", [Path, Error])
