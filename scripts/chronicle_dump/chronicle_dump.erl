@@ -61,17 +61,28 @@ parse_args_option(Option, Name, Fun, [Arg|Args], AccArgs, AccOptions, Spec) ->
     end.
 
 dump_logs(Args) ->
-    {Paths, Options} = parse_args(Args, #{}),
+    {Paths, Options} = parse_args(Args,
+                                  #{sanitize => {option, fun sanitize_opt/1}}),
     dump_many(Paths,
               fun (Path) ->
                       dump_log(Path, Options)
               end).
 
-dump_log(Path, _Options) ->
+dump_log(Path, Options) ->
     ?fmt("Dumping '~s'~n", [Path]),
+    SanitizeFun =
+        case maps:find(sanitize, Options) of
+            {ok, Fun} ->
+                Fun;
+            error ->
+                fun (_, V) -> V end
+        end,
+
     try chronicle_log:read_log(Path,
                                fun dump_log_header/2,
-                               fun dump_log_entry/2,
+                               fun (Entry, State) ->
+                                       dump_log_entry(SanitizeFun, Entry, State)
+                               end,
                                header) of
         {ok, _} ->
             ok;
@@ -90,7 +101,7 @@ dump_log_header(Header, header) ->
     dump_term(indent(), Header),
     first.
 
-dump_log_entry(Entry, State) ->
+dump_log_entry(SanitizeFun, Entry, State) ->
     case State of
         first ->
             ?fmt("~nEntries:");
@@ -98,16 +109,20 @@ dump_log_entry(Entry, State) ->
             ok
     end,
 
-    dump_term(indent(), unpack_entry(Entry)),
+    dump_term(indent(), unpack_entry(SanitizeFun, Entry)),
     rest.
 
-unpack_entry(Entry) ->
+unpack_entry(SanitizeFun, Entry) ->
     chronicle_storage:map_append(
       fun (#log_entry{value = Value} = LogEntry) ->
               case Value of
-                  #rsm_command{} ->
-                      LogEntry#log_entry{
-                        value = chronicle_rsm:unpack_payload(Value)};
+                  #rsm_command{rsm_name = Name} ->
+                      Sanitized = chronicle_rsm:unpack_payload(
+                                    fun (Payload) ->
+                                            SanitizeFun(Name, Payload)
+                                    end, Value),
+
+                      LogEntry#log_entry{value = Sanitized};
                   _ ->
                       LogEntry
               end
@@ -266,7 +281,7 @@ usage() ->
     ?fmt("Usage: ~s [COMMAND]", [escript:script_name()]),
     ?fmt("Commands:"),
     ?fmt("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
-    ?fmt("         log [FILE]..."),
+    ?fmt("         log [--sanitize <Mod:Fun>] [FILE]..."),
     erlang:halt(1).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
