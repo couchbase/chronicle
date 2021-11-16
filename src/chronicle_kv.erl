@@ -20,6 +20,7 @@
 -import(chronicle_utils, [start_timeout/1,
                           sanitize_stacktrace/1]).
 
+-export([sanitize_state/2]).
 -export([format_state/1]).
 
 %% APIs
@@ -74,6 +75,12 @@
 -else.
 -type event_manager_name() :: any().
 -endif.
+
+sanitize_state(Fun, State) ->
+    maps:map(
+      fun (Key, {Value, Rev}) ->
+              {Fun(Key, Value), Rev}
+      end, State).
 
 format_state(State) ->
     chronicle_dump:raw(maps:to_list(State)).
