@@ -20,7 +20,7 @@
 -import(chronicle_utils, [start_timeout/1,
                           sanitize_stacktrace/1]).
 
--export([sanitize_state/2]).
+-export([sanitize_state/2, sanitize_command/2]).
 -export([format_state/1]).
 
 %% APIs
@@ -81,6 +81,27 @@ sanitize_state(Fun, State) ->
       fun (Key, {Value, Rev}) ->
               {Fun(Key, Value), Rev}
       end, State).
+
+sanitize_command(Fun, Command) ->
+    case Command of
+        {add, Key, Value} ->
+            {add, Key, Fun(Key, Value)};
+        {set, Key, Value, ExpectedRevision} ->
+            {set, Key, Fun(Key, Value), ExpectedRevision};
+        {transaction, Conditions, Updates} ->
+            {transaction, Conditions,
+             lists:map(
+               fun (Update) ->
+                       case Update of
+                           {set, Key, Value} ->
+                               {set, Key, Fun(Key, Value)};
+                           _ ->
+                               Update
+                       end
+               end, Updates)};
+        _ ->
+            Command
+    end.
 
 format_state(State) ->
     chronicle_dump:raw(maps:to_list(State)).
