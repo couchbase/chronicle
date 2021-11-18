@@ -14,6 +14,10 @@
 
 -define(RAW_TAG, '$chronicle_dump_raw').
 
+-define(STATUS_OK, 0).
+-define(STATUS_FATAL, 1).
+-define(STATUS_ERROR, 2).
+
 raw(Term) ->
     {?RAW_TAG, Term}.
 
@@ -87,9 +91,11 @@ dump_log(Path, Options) ->
         {ok, _} ->
             ok;
         {error, Error} ->
+            set_error(),
             ?error("Error while dumping '~s': ~w", [Path, Error])
     catch
         T:E:Stacktrace ->
+            set_error(),
             ?error("Unexpected exception: ~p:~p. Stacktrace:~n"
                    "~p",
                    [T, E,
@@ -187,12 +193,14 @@ dump_snapshot(Path, Options) ->
                 end
             catch
                 T:E:Stacktrace ->
+                    set_error(),
                     ?error("Unexpected exception: ~p:~p. Stacktrace:~n"
                            "~p",
                            [T, E,
                             chronicle_utils:sanitize_stacktrace(Stacktrace)])
             end;
         {error, Error} ->
+            set_error(),
             ?error("Couldn't read snapshot '~s': ~w", [Path, Error])
     end.
 
@@ -282,21 +290,36 @@ usage() ->
     ?error("Commands:"),
     ?error("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
     ?error("         log [--sanitize <Mod:Fun>] [FILE]..."),
-    stop(1).
+    stop(?STATUS_FATAL).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
 usage(Fmt, Args) ->
     ?error("~s: " ++ Fmt, [escript:script_name() | Args]),
     usage().
 
--spec stop() -> no_return().
-stop() ->
-    stop(0).
-
 -spec stop(non_neg_integer()) -> no_return().
 stop(Status) ->
     catch logger_std_h:filesync(default),
     erlang:halt(Status).
+
+status() ->
+    case erlang:get(status) of
+        undefined ->
+            ?STATUS_OK;
+        Status ->
+            Status
+    end.
+
+set_status(Status) ->
+    case status() of
+        ?STATUS_OK ->
+            erlang:put(status, Status);
+        _ ->
+            ok
+    end.
+
+set_error() ->
+    set_status(?STATUS_ERROR).
 
 setup_logger() ->
     ok = chronicle_env:setup_logger(),
@@ -328,4 +351,4 @@ main(Args) ->
             usage()
     end,
 
-    stop().
+    stop(status()).
