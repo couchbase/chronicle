@@ -20,6 +20,9 @@
 -export([data_dir/0]).
 -export([setup/0]).
 
+%% For use by chronicle_dump.
+-export([setup_logger/0]).
+
 -ifdef(TEST).
 -export([set_env/2]).
 -endif.

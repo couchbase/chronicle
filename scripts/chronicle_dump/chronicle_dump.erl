@@ -6,11 +6,7 @@
 -export([raw/1]).
 
 -define(fmt(Msg), ?fmt(Msg, [])).
--define(fmt(Fmt, Args),
-        begin
-            io:format(Fmt, Args),
-            io:nl()
-        end).
+-define(fmt(Fmt, Args), io:format(Fmt ++ "~n", Args)).
 
 -define(RAW_TAG, '$chronicle_dump_raw').
 
@@ -289,8 +285,20 @@ usage(Fmt, Args) ->
     ?fmt("~s: " ++ Fmt, [escript:script_name() | Args]),
     usage().
 
+setup_logger() ->
+    ok = chronicle_env:setup_logger(),
+    ok = logger:remove_handler(default),
+
+    FormatterConfig = #{single_line => true,
+                        template => [level, ": ", msg, "\n"]},
+    Formatter = {logger_formatter, FormatterConfig},
+    ok = logger:add_handler(default, logger_std_h,
+                            #{config => #{type => standard_error},
+                              formatter => Formatter}).
+
 main(Args) ->
     persistent_term:put(?CHRONICLE_LOAD_NIFS, false),
+    setup_logger(),
 
     case Args of
         [Command | RestArgs] ->
