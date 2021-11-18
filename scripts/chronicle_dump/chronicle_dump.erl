@@ -6,7 +6,11 @@
 -export([raw/1]).
 
 -define(fmt(Msg), ?fmt(Msg, [])).
--define(fmt(Fmt, Args), io:format(Fmt ++ "~n", Args)).
+-define(fmt(Fmt, Args), ?fmt(group_leader(), Fmt, Args)).
+-define(fmt(IoDevice, Fmt, Args), io:format(IoDevice, Fmt ++ "~n", Args)).
+
+-define(error(Msg), ?error(Msg, [])).
+-define(error(Fmt, Args), ?fmt(standard_error, Fmt, Args)).
 
 -define(RAW_TAG, '$chronicle_dump_raw').
 
@@ -83,13 +87,13 @@ dump_log(Path, Options) ->
         {ok, _} ->
             ok;
         {error, Error} ->
-            ?fmt("Error while dumping '~s': ~w", [Path, Error])
+            ?error("Error while dumping '~s': ~w", [Path, Error])
     catch
         T:E:Stacktrace ->
-            ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
-                 "~p",
-                 [T, E,
-                  chronicle_utils:sanitize_stacktrace(Stacktrace)])
+            ?error("Unexpected exception: ~p:~p. Stacktrace:~n"
+                   "~p",
+                   [T, E,
+                    chronicle_utils:sanitize_stacktrace(Stacktrace)])
     end.
 
 dump_log_header(Header, header) ->
@@ -183,13 +187,13 @@ dump_snapshot(Path, Options) ->
                 end
             catch
                 T:E:Stacktrace ->
-                    ?fmt("Unexpected exception: ~p:~p. Stacktrace:~n"
-                         "~p",
-                         [T, E,
-                          chronicle_utils:sanitize_stacktrace(Stacktrace)])
+                    ?error("Unexpected exception: ~p:~p. Stacktrace:~n"
+                           "~p",
+                           [T, E,
+                            chronicle_utils:sanitize_stacktrace(Stacktrace)])
             end;
         {error, Error} ->
-            ?fmt("Couldn't read snapshot '~s': ~w", [Path, Error])
+            ?error("Couldn't read snapshot '~s': ~w", [Path, Error])
     end.
 
 dump_props(Props) ->
@@ -274,15 +278,15 @@ type(Term) ->
 
 -spec usage() -> no_return().
 usage() ->
-    ?fmt("Usage: ~s [COMMAND]", [escript:script_name()]),
-    ?fmt("Commands:"),
-    ?fmt("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
-    ?fmt("         log [--sanitize <Mod:Fun>] [FILE]..."),
+    ?error("Usage: ~s [COMMAND]", [escript:script_name()]),
+    ?error("Commands:"),
+    ?error("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
+    ?error("         log [--sanitize <Mod:Fun>] [FILE]..."),
     stop(1).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
 usage(Fmt, Args) ->
-    ?fmt("~s: " ++ Fmt, [escript:script_name() | Args]),
+    ?error("~s: " ++ Fmt, [escript:script_name() | Args]),
     usage().
 
 -spec stop() -> no_return().
