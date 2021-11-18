@@ -10,7 +10,7 @@ import time
 ROOT_DIR = path.dirname(__file__)
 DEFAULT_DATA_DIR = path.join(ROOT_DIR, 'cluster')
 DEFAULT_PROFILE = 'default'
-DEFAULT_HOSTNAME = 'localhost@localdomain'
+DEFAULT_HOSTNAME = 'localhost.localdomain'
 
 PROFILE_DEFAULT = 'default'
 PROFILE_EXAMPLES = 'examples'
