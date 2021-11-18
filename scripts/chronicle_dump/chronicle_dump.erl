@@ -278,12 +278,21 @@ usage() ->
     ?fmt("Commands:"),
     ?fmt("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
     ?fmt("         log [--sanitize <Mod:Fun>] [FILE]..."),
-    erlang:halt(1).
+    stop(1).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
 usage(Fmt, Args) ->
     ?fmt("~s: " ++ Fmt, [escript:script_name() | Args]),
     usage().
+
+-spec stop() -> no_return().
+stop() ->
+    stop(0).
+
+-spec stop(non_neg_integer()) -> no_return().
+stop(Status) ->
+    catch logger_std_h:filesync(default),
+    erlang:halt(Status).
 
 setup_logger() ->
     ok = chronicle_env:setup_logger(),
@@ -296,6 +305,7 @@ setup_logger() ->
                             #{config => #{type => standard_error},
                               formatter => Formatter}).
 
+-spec main(list()) -> no_return().
 main(Args) ->
     persistent_term:put(?CHRONICLE_LOAD_NIFS, false),
     setup_logger(),
@@ -312,4 +322,6 @@ main(Args) ->
             end;
         _ ->
             usage()
-    end.
+    end,
+
+    stop().
