@@ -33,7 +33,8 @@
 -define(TERM_SIZE_MAX, (1 bsl ?TERM_SIZE_BITS) - 1).
 -define(TERM_HEADER_BYTES, (?CRC_BYTES + ?TERM_SIZE_BYTES)).
 
--record(log, { fd,
+-record(log, { path,
+               fd,
                mode,
                start_pos }).
 
@@ -74,7 +75,7 @@ open_int(Path, Mode) ->
         {ok, Fd} ->
             case read_header(Fd) of
                 {ok, UserData} ->
-                    {ok, make_log(Fd, Mode), UserData};
+                    {ok, make_log(Path, Fd, Mode), UserData};
                 {error, _} = Error ->
                     ok = file:close(Fd),
                     Error
@@ -111,7 +112,7 @@ create(Path, UserData) ->
             ok = write_header(Fd, UserData),
             ok = file:sync(Fd),
             ok = chronicle_utils:sync_dir(filename:dirname(Path)),
-            {ok, make_log(Fd, Mode)};
+            {ok, make_log(Path, Fd, Mode)};
         {error, _} = Error ->
             Error
     end.
@@ -230,9 +231,9 @@ encode_term(Term, AccData) ->
       TermCrc:?CRC_BITS,
       TermBinary/binary>>.
 
-make_log(Fd, Mode) ->
+make_log(Path, Fd, Mode) ->
     {ok, Pos} = file:position(Fd, cur),
-    #log{fd = Fd, mode = Mode, start_pos = Pos}.
+    #log{path = Path, fd = Fd, mode = Mode, start_pos = Pos}.
 
 truncate(Fd, Pos) ->
     case file:position(Fd, Pos) of
@@ -245,42 +246,55 @@ truncate(Fd, Pos) ->
 scan(Log, Fun, State) ->
     scan(Log, Fun, State, #{}).
 
-scan(#log{fd = Fd, start_pos = Pos}, Fun, State, Opts) ->
+scan(#log{path = Path, fd = Fd, start_pos = Pos}, Fun, State, Opts) ->
     case file:position(Fd, Pos) of
         {ok, ActualPos} ->
             true = (Pos =:= ActualPos),
-            scan_loop(Fd, Pos, <<>>, Fun, State, Opts);
+            scan_loop(Path, Fd, Pos, <<>>, Fun, State, Opts);
         {error, _} = Error ->
             Error
     end.
 
-scan_loop(Fd, Pos, AccData, Fun, State, Opts) ->
+scan_loop(Path, Fd, Pos, AccData, Fun, State, Opts) ->
     case file:read(Fd, ?READ_CHUNK_SIZE) of
         {ok, ReadData} ->
             Data = <<AccData/binary, ReadData/binary>>,
             case scan_chunk(Pos, Data, Fun, State) of
                 {ok, NewPos, DataLeft, NewState} ->
-                    scan_loop(Fd, NewPos, DataLeft, Fun, NewState, Opts);
+                    scan_loop(Path, Fd, NewPos, DataLeft, Fun, NewState, Opts);
                 {error, _} = Error ->
                     Error
             end;
         eof ->
-            Repair = maps:get(repair, Opts, false),
             case AccData of
                 <<>> ->
                     {ok, State};
-                _ when Repair ->
-                    case truncate(Fd, Pos) of
-                        ok ->
-                            {ok, State};
-                        {error, Error} ->
-                            {error, {truncate_failed, Error}}
-                    end;
                 _ ->
-                    {error, {unexpected_eof, Pos}}
+                    maybe_repair(Path, Fd, Pos, State, Opts)
             end;
         {error, _} = Error ->
             Error
+    end.
+
+maybe_repair(Path, Fd, Pos, State, Opts) ->
+    {ok, CurPos} = file:position(Fd, cur),
+
+    ?WARNING("Unexpected end of file in '~s' at ~b.", [Path, CurPos]),
+
+    case maps:get(repair, Opts, false) of
+        true ->
+            case truncate(Fd, Pos) of
+                ok ->
+                    ?INFO("Truncated '~s' to ~b", [Path, Pos]),
+                    {ok, State};
+                {error, Error} ->
+                    ?ERROR("Could not truncate '~s' to ~b: ~p",
+                           [Path, Pos, Error]),
+                    {error, {truncate_failed, Error}}
+            end;
+        false ->
+            ?ERROR("Not attempting to repair '~s'.", [Path]),
+            {error, {unexpected_eof, Pos}}
     end.
 
 scan_chunk(Pos, Data, Fun, State) ->
