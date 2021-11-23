@@ -115,7 +115,13 @@ get_env(Parameter) ->
 -else.
 
 peer_param(Parameter) ->
-    list_to_atom(atom_to_list(?PEER()) ++ "-" ++ atom_to_list(Parameter)).
+    case whereis(vnet) of
+        undefined ->
+            Parameter;
+        Pid when is_pid(Pid) ->
+            list_to_atom(atom_to_list(?PEER()) ++ "-" ++
+                             atom_to_list(Parameter))
+    end.
 
 get_env(Parameter) ->
     application:get_env(chronicle, peer_param(Parameter)).
