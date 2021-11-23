@@ -43,12 +43,13 @@
          unset_setting/1, unset_setting/2,
          replace_settings/1, replace_settings/2]).
 
--export_type([uuid/0, peer/0, peer_id/0,
-              history_id/0, history_log/0,
+-export_type([uuid/0, peer/0, peer_id/0, peers/0, peers_and_roles/0,
+              history_id/0, history_log/0, compat_version/0,
               leader_term/0, seqno/0, peer_position/0,
               revision/0,
               serial/0, incarnation/0,
-              cluster_info/0]).
+              cluster_info/0,
+              lock/0, lockreq/0, role/0]).
 
 -define(DEFAULT_TIMEOUT, 15000).
 
