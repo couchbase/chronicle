@@ -93,8 +93,7 @@
                    ?META_HISTORY_ID => chronicle:history_id(),
                    ?META_TERM => chronicle:leader_term(),
                    ?META_COMMITTED_SEQNO => chronicle:seqno(),
-                   ?META_PENDING_BRANCH => undefined | #branch{},
-                   ?META_VERSION => chronicle:compat_version() }.
+                   ?META_PENDING_BRANCH => undefined | #branch{} }.
 
 -record(storage, { current_log_ix,
                    current_log_path,

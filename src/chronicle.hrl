@@ -164,7 +164,6 @@
 -define(META_TERM, term).
 -define(META_COMMITTED_SEQNO, committed_seqno).
 -define(META_PENDING_BRANCH, pending_branch).
--define(META_VERSION, version).
 
 -define(RSM_EVENTS, chronicle_rsm_events).
 
