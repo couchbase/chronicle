@@ -38,7 +38,6 @@
 -define(NO_SEQNO, 0).
 
 -define(COMPAT_VERSION, 0).
--define(VERSION, 0).
 
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).

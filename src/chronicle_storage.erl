@@ -39,6 +39,8 @@
          handle_event/2,
          map_append/2]).
 
+-define(VERSION, 0).
+
 -ifdef(TEST).
 -define(WRITER, list_to_atom("chronicle_storage_writer-" ++
                                  atom_to_list(vnet:vnode()))).
