@@ -17,6 +17,10 @@
 
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -export([get_system_state/0]).
 -export([force_snapshot/0, export_snapshot/1]).
 -export([check_quorum/0, check_quorum/1]).
@@ -36,6 +40,7 @@
 -export([set_peer_role/2, set_peer_role/3, set_peer_role/4,
          set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
 -export([switch_compat_version/0, switch_compat_version/1]).
+-export([compare_revisions/2]).
 
 %% For internal use only currently. Changing these may render chronicle
 %% unusable.
@@ -394,3 +399,37 @@ switch_compat_version(Lock) ->
         {error, Failed} ->
             {error, {get_peer_infos_failed, Failed}}
     end.
+
+-spec compare_revisions(revision(), revision()) -> eq | gt | lt | incompatible.
+compare_revisions(RevA, RevB) ->
+    {AUUID, ASeqno} = RevA,
+    {BUUID, BSeqno} = RevB,
+
+    case AUUID =:= BUUID of
+        true ->
+            if
+                ASeqno > BSeqno ->
+                    gt;
+                BSeqno > ASeqno ->
+                    lt;
+                true ->
+                    eq
+            end;
+        false ->
+            incompatible
+    end.
+
+-ifdef(TEST).
+compare_revisions_test() ->
+    eq = compare_revisions({<<"a">>, 42}, {<<"a">>, 42}),
+    lt = compare_revisions({<<"a">>, 22}, {<<"a">>, 42}),
+    gt = compare_revisions({<<"a">>, 42}, {<<"a">>, 22}),
+
+    incompatible = compare_revisions({<<"a">>, 42}, {<<"b">>, 42}),
+    incompatible = compare_revisions({<<"a">>, 22}, {<<"b">>, 42}),
+    incompatible = compare_revisions({<<"a">>, 42}, {<<"b">>, 22}),
+
+    incompatible = compare_revisions({<<"b">>, 42}, {<<"a">>, 42}),
+    incompatible = compare_revisions({<<"b">>, 22}, {<<"a">>, 42}),
+    incompatible = compare_revisions({<<"b">>, 42}, {<<"a">>, 22}).
+-endif.
