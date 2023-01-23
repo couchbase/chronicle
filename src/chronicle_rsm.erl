@@ -948,6 +948,8 @@ record_delayed_reply({PeerId, Incarnation, Serial}, Reply,
                     Data
             end;
         stale ->
+            Data;
+        not_found ->
             Data
     end.
 
