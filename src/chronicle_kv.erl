@@ -40,6 +40,7 @@
 
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
 -export([txn_get/2, txn_get_many/2]).
+-export([get_txn_default_timeout/0]).
 
 %% callbacks
 -export([specs/2,
@@ -261,6 +262,10 @@ txn_get_many(Keys, Txn) ->
         {txn_slow, Map} ->
             txn_get_from_map_many(Keys, Map)
     end.
+
+-spec get_txn_default_timeout() -> pos_integer().
+get_txn_default_timeout() ->
+    ?DEFAULT_TIMEOUT.
 
 -spec txn(name(), txn_fun(txn_opaque())) -> txn_result().
 txn(Name, Fun) ->
