@@ -29,6 +29,7 @@
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
+-export([get_histo_name/0, get_histo_max/0, get_histo_unit/0]).
 
 -import(chronicle_utils, [call/2, call/3, call/4,
                           read_deadline/1, start_timeout/1]).
@@ -141,9 +142,11 @@ sync(Name, Timeout) ->
 
 leader_request(Name, Request, TRef) ->
     Deadline = read_deadline(TRef),
-    case call(?SERVER(Name),
-              {leader_request, Request, Deadline}, leader_request,
-              infinity) of
+    Result = ?TIME(<<"leader_request">>, {ok, _},
+                   call(?SERVER(Name),
+                        {leader_request, Request, Deadline}, leader_request,
+                        infinity)),
+    case Result of
         ok ->
             ok;
         {ok, Reply} ->
@@ -1597,3 +1600,12 @@ get_incarnation(RSMDir) ->
 
     ok = chronicle_utils:store_int_to_file(Path, Incarnation),
     Incarnation.
+
+get_histo_name() ->
+    <<"chronicle_rsm">>.
+
+get_histo_max() ->
+    15000.
+
+get_histo_unit() ->
+    millisecond.
