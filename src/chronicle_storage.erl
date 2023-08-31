@@ -148,8 +148,22 @@ open(PublishSnapshotFun) ->
     check_version(DataDir),
 
     Storage1 = Storage0#storage{data_dir = DataDir},
-    Storage2 = open_logs(Storage1),
-    validate_state(Storage2),
+    {Orphans, Sealed, Current} = find_logs(DataDir),
+
+    Storage2 =
+        try open_logs(Sealed, Current, Storage1) of
+            S -> S
+        catch
+            exit:E when Sealed =/= [] ->
+                ?WARNING("Failed to read log files ~p with error ~p.~n"
+                         "Will try to read just ~p",
+                         [[Current | Sealed], E, Current]),
+                ets:delete_all_objects(Storage1#storage.log_tab),
+                ets:delete_all_objects(Storage1#storage.log_info_tab),
+                open_logs([], Current, Storage1)
+        end,
+
+    maybe_delete_orphans(Orphans),
     Storage3 = spawn_writer(Storage2),
     Storage4 = compact(Storage3),
 
@@ -158,25 +172,25 @@ open(PublishSnapshotFun) ->
 
     publish(Storage5).
 
-open_logs(#storage{data_dir = DataDir} = Storage) ->
-    {Orphans, Sealed, Current} = find_logs(DataDir),
+%% Opens, reads and validates the supplied chronicle log files exiting if
+%% there is a problem. Upon successful return of this function
+%% (or a trapped exit) the log_tab and log_info_tab ets tables will be
+%% populated with relevant information.
+open_logs(Sealed, Current, Storage) ->
+    ?INFO("Reading log files ~p", [[Current | Sealed]]),
+    Storage0 = Storage#storage{meta = #{},
+                               pending_meta = #{},
+                               config = undefined,
+                               committed_config = undefined,
+                               pending_configs = [],
+                               low_seqno = ?NO_SEQNO + 1,
+                               high_seqno = ?NO_SEQNO,
+                               pending_high_seqno = ?NO_SEQNO,
+                               current_snapshot = no_snapshot,
+                               extra_snapshots = [],
+                               log_segments = []},
 
-    NewStorage0 = Storage#storage{meta = #{},
-                                  pending_meta = #{},
-                                  config = undefined,
-                                  committed_config = undefined,
-                                  pending_configs = [],
-                                  low_seqno = ?NO_SEQNO + 1,
-                                  high_seqno = ?NO_SEQNO,
-                                  pending_high_seqno = ?NO_SEQNO,
-                                  current_snapshot = no_snapshot,
-                                  extra_snapshots = [],
-                                  log_segments = []},
-
-    %% TODO: Be more robust when dealing with corrupt log files. As long as a
-    %% consistent state can be recovered, corrupt logs should not be a fatal
-    %% error.
-    NewStorage1 =
+    Storage1 =
         lists:foldl(
           fun ({_LogIx, LogPath}, Acc0) ->
                   Acc = Acc0#storage{current_log_path = LogPath},
@@ -196,14 +210,12 @@ open_logs(#storage{data_dir = DataDir} = Storage) ->
                           ?ERROR("Failed to read log ~p: ~p", [LogPath, Error]),
                           exit({failed_to_read_log, LogPath, Error})
                   end
-          end, NewStorage0, Sealed),
+          end, Storage0, Sealed),
 
     {CurrentLogIx, CurrentLogPath} = Current,
-    Result = open_current_log(CurrentLogIx, CurrentLogPath, NewStorage1),
-
-    maybe_delete_orphans(Orphans),
-
-    Result.
+    Storage2 = open_current_log(CurrentLogIx, CurrentLogPath, Storage1),
+    validate_state(Storage2),
+    Storage2.
 
 open_current_log(LogIx, LogPath, Storage0) ->
     Storage = Storage0#storage{current_log_ix = LogIx,
