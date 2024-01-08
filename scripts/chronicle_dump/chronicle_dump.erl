@@ -150,6 +150,51 @@ sanitize_opt(Value) ->
             {error, invalid_function}
     end.
 
+output_item(Binary) when is_binary(Binary) -> Binary;
+output_item(Atom) when is_atom(Atom) -> atom_to_binary(Atom, latin1);
+output_item(Int) when is_integer(Int) -> integer_to_list(Int);
+output_item(String) when is_list(String) -> String.
+
+dump_guts(Args) ->
+    {Path, _Options} = parse_args(Args, #{}),
+    Guts = dump_guts_inner(Path),
+    Items = [E || {K, V} <- Guts, E <- [K, V]],
+    ?fmt("~s", [[[output_item(Item) | <<0:8>>] || Item <- Items]]).
+
+dump_guts_inner(Path) ->
+    case chronicle_storage:read_rsm_snapshot(Path) of
+        {ok, Snapshot} ->
+            try
+                Props0 = chronicle_rsm:format_snapshot(Snapshot),
+                Props1 = proplists:get_value("RSM state", Props0),
+                {?RAW_TAG, Props} = Props1,
+
+                CompatVer = get_value(cluster_compat_version, Props),
+                BucketNames = get_value(bucket_names, Props),
+
+                [{cluster_compat_version,
+                  iolist_to_binary(io_lib:format("~p", [CompatVer]))},
+                 {bucket_names, string:join(BucketNames, ",")},
+                 {rebalance_type, get_value(rebalance_type, Props)}]
+            catch
+                T:E:Stacktrace ->
+                    ?error("Unexpected exception: ~p:~p. Stacktrace:~n"
+                           "~p",
+                           [T, E,
+                            chronicle_utils:sanitize_stacktrace(Stacktrace)])
+            end;
+        {error, Error} ->
+            ?error("Couldn't read snapshot '~s': ~w", [Path, Error])
+    end.
+
+get_value(Key, Props) ->
+    case proplists:get_value(Key, Props) of
+        {Value, _ChronicleMeta} ->
+            Value;
+        _ ->
+            undefined
+    end.
+
 dump_snapshots(Args) ->
     {Paths, Options} = parse_args(Args,
                                   #{raw => flag,
@@ -289,6 +334,7 @@ usage() ->
     ?error("Usage: ~s [COMMAND]", [escript:script_name()]),
     ?error("Commands:"),
     ?error("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
+    ?error("    dumpguts [FILE]"),
     ?error("         log [--sanitize <Mod:Fun>] [FILE]..."),
     stop(?STATUS_FATAL).
 
@@ -344,6 +390,8 @@ main(Args) ->
                     dump_snapshots(RestArgs);
                 "log" ->
                     dump_logs(RestArgs);
+                "dumpguts" ->
+                    dump_guts(RestArgs);
                 _ ->
                     usage("unknown command '~s'", [Command])
             end;
