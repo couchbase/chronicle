@@ -191,7 +191,7 @@ get_value(Key, Props) ->
     case proplists:get_value(Key, Props) of
         {Value, _ChronicleMeta} ->
             Value;
-        _ ->
+        undefined ->
             undefined
     end.
 
