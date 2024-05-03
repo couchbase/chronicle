@@ -24,7 +24,7 @@
          get_local_revision/1, sync_revision/3, sync/2,
          note_leader_status/2]).
 
--export([unpack_payload/2]).
+-export([unpack_payload/2, unpack_command/1, pack_command/1]).
 -export([map_snapshot/2, format_snapshot/1]).
 -export([callback_mode/0,
          format_status/2, sanitize_event/2,
@@ -1569,9 +1569,11 @@ apply_snapshot(Seqno, Config, Snapshot, Data) ->
 peer_ids(Config) ->
     sets:from_list(chronicle_config:get_peer_ids(Config)).
 
+-spec pack_command(term()) -> binary().
 pack_command(Command) ->
     term_to_binary(Command, [{compressed, 1}]).
 
+-spec unpack_command(binary()) -> term().
 unpack_command(PackedCommand) ->
     binary_to_term(PackedCommand).
 
