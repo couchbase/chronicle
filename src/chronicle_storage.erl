@@ -1195,7 +1195,7 @@ save_rsm_snapshot(Seqno, RSM, RSMState) ->
     SnapshotDir = snapshot_dir(Seqno),
 
     Path = rsm_snapshot_path(SnapshotDir, RSM),
-    Data = term_to_binary(RSMState, [{compressed, 9}]),
+    Data = ?ENCRYPT(term_to_binary(RSMState, [{compressed, 9}])),
     Crc = erlang:crc32(Data),
 
     %% We don't really care about atomicity that much here. But it also
@@ -1258,7 +1258,12 @@ read_rsm_snapshot(RSM, Seqno) ->
 read_rsm_snapshot(Path) ->
     case read_rsm_snapshot_data(Path) of
         {ok, Data} ->
-            {ok, binary_to_term(Data)};
+            case ?DECRYPT(Data) of
+                {ok, DecryptedData} ->
+                    {ok, binary_to_term(DecryptedData)};
+                {error, decrypt_error} ->
+                    {error, {invalid_snapshot, decrypt_error}}
+            end;
         {error, _} = Error ->
             Error
     end.

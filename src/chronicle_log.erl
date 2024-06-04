@@ -217,7 +217,7 @@ encode_terms([Term|Terms], AccData, AccWritten, Fun) ->
     end.
 
 encode_term(Term, AccData) ->
-    TermBinary = term_to_binary(Term),
+    TermBinary = ?ENCRYPT(term_to_binary(Term)),
     Size = byte_size(TermBinary),
     true = (Size =< ?TERM_SIZE_MAX),
 
@@ -333,8 +333,13 @@ decode_entry_size(Data) ->
 decode_entry_term(Data, Size) ->
     case get_crc_data(Data, Size) of
         {ok, TermBinary, Consumed, NewData} ->
-            Term = binary_to_term(TermBinary),
-            {ok, Term, Consumed, NewData};
+            case ?DECRYPT(TermBinary) of
+                {ok, DecryptedTermBinary} ->
+                    Term = binary_to_term(DecryptedTermBinary),
+                    {ok, Term, Consumed, NewData};
+                {error, decrypt_error} ->
+                    {error, corrupt}
+            end;
         Error ->
             Error
     end.

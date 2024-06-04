@@ -112,6 +112,8 @@
 
 -define(CHRONICLE_LOGGER, '$chronicle_logger').
 -define(CHRONICLE_STATS, '$chronicle_stats').
+-define(CHRONICLE_ENCRYPT, '$chronicle_encrypt').
+-define(CHRONICLE_DECRYPT, '$chronicle_decrypt').
 
 -define(LOG(Level, Fmt, Args),
         (persistent_term:get(?CHRONICLE_LOGGER))(
@@ -121,6 +123,9 @@
             module => ?MODULE,
             function => ?FUNCTION_NAME,
             arity => ?FUNCTION_ARITY})).
+
+-define(ENCRYPT(Data), (persistent_term:get(?CHRONICLE_ENCRYPT))(Data)).
+-define(DECRYPT(Data), (persistent_term:get(?CHRONICLE_DECRYPT))(Data)).
 
 -define(CHECK(Cond1, Cond2),
         case Cond1 of

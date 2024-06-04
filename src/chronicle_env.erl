@@ -22,6 +22,7 @@
 
 %% For use by chronicle_dump.
 -export([setup_logger/0]).
+-export([setup_decrypt_function/1]).
 
 -ifdef(TEST).
 -export([set_env/2]).
@@ -39,7 +40,8 @@ setup() ->
     ?CHECK(check_data_dir(),
            setup_logger_filter(),
            setup_logger(),
-           setup_stats()
+           setup_stats(),
+           setup_encryption()
           ).
 
 check_data_dir() ->
@@ -106,6 +108,15 @@ setup_logger_filter() ->
 setup_stats() ->
     setup_function(stats_function, 1,
                    fun chronicle_stats:ignore_stats/1, ?CHRONICLE_STATS).
+
+setup_encryption() ->
+    setup_function(encrypt_function, 1, fun (Data) -> Data end,
+                   ?CHRONICLE_ENCRYPT),
+    setup_function(decrypt_function, 1, fun (Data) -> {ok, Data} end,
+                   ?CHRONICLE_DECRYPT).
+
+setup_decrypt_function(Fun) ->
+    persistent_term:put(?CHRONICLE_DECRYPT, Fun).
 
 -ifndef(TEST).
 
