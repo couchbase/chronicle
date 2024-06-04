@@ -66,7 +66,10 @@ parse_args_option(Option, Name, Fun, [Arg|Args], AccArgs, AccOptions, Spec) ->
 
 dump_logs(Args) ->
     {Paths, Options} = parse_args(Args,
-                                  #{sanitize => {option, fun sanitize_opt/1}}),
+                                  #{sanitize => {option, fun sanitize_opt/1},
+                                    decrypt  => {option, fun decrypt_opt/1}}),
+    DecryptFun = maps:get(decrypt, Options, fun (D) -> {ok, D} end),
+    chronicle_env:setup_decrypt_function(DecryptFun),
     dump_many(Paths,
               fun (Path) ->
                       dump_log(Path, Options)
@@ -134,15 +137,17 @@ unpack_entry(SanitizeFun, Entry) ->
               end
       end, Entry).
 
-sanitize_opt(Value) ->
+sanitize_opt(Value) -> function_opt(Value, 2).
+decrypt_opt(Value) -> function_opt(Value, 1).
+
+function_opt(Value, Arity) ->
     case string:split(Value, ":", all) of
         [Module, Function] ->
             M = list_to_atom(Module),
             F = list_to_atom(Function),
-            A = 2,
-            case chronicle_utils:is_function_exported(M, F, A) of
+            case chronicle_utils:is_function_exported(M, F, Arity) of
                 true ->
-                    {ok, fun M:F/A};
+                    {ok, fun M:F/Arity};
                 false ->
                     {error, not_exported}
             end;
@@ -156,7 +161,10 @@ output_item(Int) when is_integer(Int) -> integer_to_list(Int);
 output_item(String) when is_list(String) -> String.
 
 dump_guts(Args) ->
-    {Path, _Options} = parse_args(Args, #{}),
+    {Path, Options} = parse_args(Args,
+                                 #{decrypt  => {option, fun decrypt_opt/1}}),
+    DecryptFun = maps:get(decrypt, Options, fun (D) -> {ok, D} end),
+    chronicle_env:setup_decrypt_function(DecryptFun),
     Guts = dump_guts_inner(Path),
     Items = [E || {K, V} <- Guts, E <- [K, V]],
     ?fmt("~s", [[[output_item(Item) | <<0:8>>] || Item <- Items]]).
@@ -198,7 +206,10 @@ get_value(Key, Props) ->
 dump_snapshots(Args) ->
     {Paths, Options} = parse_args(Args,
                                   #{raw => flag,
-                                    sanitize => {option, fun sanitize_opt/1}}),
+                                    sanitize => {option, fun sanitize_opt/1},
+                                    decrypt  => {option, fun decrypt_opt/1}}),
+    DecryptFun = maps:get(decrypt, Options, fun (D) -> {ok, D} end),
+    chronicle_env:setup_decrypt_function(DecryptFun),
     dump_many(Paths,
               fun (Path) ->
                       dump_snapshot(Path, Options)
@@ -333,9 +344,9 @@ type(Term) ->
 usage() ->
     ?error("Usage: ~s [COMMAND]", [escript:script_name()]),
     ?error("Commands:"),
-    ?error("    snapshot [--raw] [--sanitize <Mod:Fun>] [FILE]..."),
-    ?error("    dumpguts [FILE]"),
-    ?error("         log [--sanitize <Mod:Fun>] [FILE]..."),
+    ?error("    snapshot [--raw] [--sanitize <Mod:Fun>] [--decrypt <Mod:Fun>] [FILE]..."),
+    ?error("    dumpguts [--decrypt <Mod:Fun>] [FILE]"),
+    ?error("         log [--sanitize <Mod:Fun>] [--decrypt <Mod:Fun>] [FILE]..."),
     stop(?STATUS_FATAL).
 
 -spec usage(Fmt::io:format(), Args::[any()]) -> no_return().
