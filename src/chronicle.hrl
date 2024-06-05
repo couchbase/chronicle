@@ -168,3 +168,29 @@
 
 -define(EXTERNAL_EVENTS, chronicle_external_events).
 -define(EXTERNAL_EVENTS_SERVER, ?SERVER_NAME(?EXTERNAL_EVENTS)).
+
+-define(HISTO_METRIC(Op), {?MODULE:get_histo_name(), [{op, Op}]}).
+
+-define(TIME_OK(Op, StartTS),
+        begin
+            __EndTS = erlang:monotonic_time(?MODULE:get_histo_unit()),
+            __Diff = __EndTS - StartTS,
+            chronicle_stats:report_histo(
+              ?HISTO_METRIC(Op), ?MODULE:get_histo_max(),
+              ?MODULE:get_histo_unit(), __Diff)
+        end).
+
+-define(TIME(Op, Body), ?TIME(Op, ok, Body)).
+-define(TIME(Op, OkPattern, Body),
+        begin
+            __StartTS = erlang:monotonic_time(?MODULE:get_histo_unit()),
+            __Result = Body,
+            case __Result of
+                OkPattern ->
+                    ?TIME_OK(Op, __StartTS);
+                _ ->
+                    ok
+            end,
+
+            __Result
+        end).
