@@ -982,14 +982,14 @@ file_exists(Path, Type) ->
             exit({file_exists_failed, Path, Type, Error})
     end.
 
+%% The TIME macro is a generic macro used for various disk ops. The 2 arity
+%% macro expects the result to be ok. chronicle_utils:sync_dir/1 always returns
+%% ok so dialyzer warns about the handling of an unexpected return in the macro
+%% if __Result does not match OkPattern. Given that that's not possible, turn
+%% off dialyzer for this function.
+-dialyzer({no_match, sync_dir/1}).
 sync_dir(Dir) ->
-    Result = ?TIME(<<"sync_dir">>, chronicle_utils:sync_dir(Dir)),
-    case Result of
-        ok ->
-            ok;
-        {error, Error} ->
-            exit({sync_dir_failed, Dir, Error})
-    end.
+  ?TIME(<<"sync_dir">>, chronicle_utils:sync_dir(Dir)).
 
 get_log() ->
     {LogLowSeqno, LogHighSeqno, _} = get_published_seqno_range(),
