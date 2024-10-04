@@ -26,7 +26,7 @@
 -export([format_config/1]).
 -export([is_config/1, is_stable/1]).
 -export([transition/2, next_config/1]).
--export([init/3, reinit/3, branch/3]).
+-export([init/3, reinit/3, put_rsm/2, branch/3]).
 -export([get_request_id/1, set_request_id/2]).
 -export([get_compat_version/1, set_compat_version/2]).
 -export([set_lock/2, check_lock/2]).
@@ -133,6 +133,11 @@ init(HistoryId, Peer, Machines0) ->
 reinit(NewPeer, OldPeer, #config{old_peers = undefined} = Config) ->
     {ok, PeerId} = get_peer_id(OldPeer, Config),
     reset(Config#config{peers = #{NewPeer => peer_info(PeerId, voter)}}).
+
+put_rsm({Name, Module, Args}, #config{state_machines = MachinesMap} = Config) ->
+    NewMap = maps:put(Name, #rsm_config{module = Module, args = Args},
+                      MachinesMap),
+    {ok, reset(Config#config{state_machines = NewMap})}.
 
 branch(Seqno, #branch{peers = Peers,
                       history_id = HistoryId} = Branch, Config0) ->

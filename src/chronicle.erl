@@ -41,6 +41,7 @@
          set_peer_roles/1, set_peer_roles/2, set_peer_roles/3]).
 -export([switch_compat_version/0, switch_compat_version/1]).
 -export([compare_revisions/2]).
+-export([put_rsm/1]).
 
 %% For internal use only currently. Changing these may render chronicle
 %% unusable.
@@ -82,6 +83,7 @@
 -type lock() :: binary().
 -type lockreq() :: lock() | unlocked.
 -type role() :: voter | replica.
+-type rsm() :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 
 -spec get_system_state() ->
           not_provisioned |
@@ -127,8 +129,7 @@ get_peer_statuses() ->
 get_cluster_status() ->
     chronicle_status:get_cluster_status().
 
--spec provision([Machine]) -> chronicle_agent:provision_result() when
-      Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
+-spec provision([rsm()]) -> chronicle_agent:provision_result().
 provision(Machines) ->
     chronicle_agent:provision(Machines).
 
@@ -399,6 +400,10 @@ switch_compat_version(Lock) ->
         {error, Failed} ->
             {error, {get_peer_infos_failed, Failed}}
     end.
+
+-spec put_rsm(rsm()) -> ok.
+put_rsm(Machine) ->
+    chronicle_config_rsm:put_rsm(Machine, ?DEFAULT_TIMEOUT).
 
 -spec compare_revisions(revision(), revision()) -> eq | gt | lt | incompatible.
 compare_revisions(RevA, RevB) ->
