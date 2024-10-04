@@ -20,7 +20,7 @@
 -export([get_config/1, get_cluster_info/1, get_peers/1, check_quorum/1]).
 -export([acquire_lock/1, remove_peers/3, add_peers/3, set_peer_roles/3,
          set_settings/2, replace_settings/2, unset_settings/2,
-         set_compat_version/3]).
+         set_compat_version/3, put_rsm/2]).
 
 -export([format_state/1]).
 -export([specs/2, init/2, post_init/3, state_enter/4,
@@ -81,6 +81,9 @@ unset_settings(Names, Timeout) ->
 
 set_compat_version(Lock, NewVersion, Timeout) ->
     command({set_compat_version, Lock, NewVersion}, Timeout).
+
+put_rsm(Machine, Timeout) ->
+    command({put_rsm, Machine}, Timeout).
 
 %% callbacks
 format_state(#state{current_request = CurrentRequest,
@@ -228,6 +231,8 @@ do_apply_command({unset_settings, Names}, Config) ->
     update(fun handle_unset_settings/2, [Names, Config]);
 do_apply_command({set_compat_version, Lock, NewVersion}, Config) ->
     update(fun handle_set_compat_version/3, [Lock, NewVersion, Config]);
+do_apply_command({put_rsm, Machine}, Config) ->
+    update(fun handle_put_rsm/2, [Machine, Config]);
 do_apply_command(_, _Config) ->
     {reject, {error, unknown_command}}.
 
@@ -303,6 +308,9 @@ handle_unset_settings(Names, Config) ->
       fun (Settings) ->
               maps:without(Names, Settings)
       end, Config).
+
+handle_put_rsm(Machine, Config) ->
+    chronicle_config:put_rsm(Machine, Config).
 
 handle_set_compat_version(Lock, NewVersion, Config) ->
     Version = chronicle_config:get_compat_version(Config),
