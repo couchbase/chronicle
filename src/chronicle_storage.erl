@@ -36,6 +36,7 @@
          get_term_for_committed_seqno/1, get_term_for_seqno/2,
          get_log/0, get_log/2, get_log_committed/2, get_log_entry/2,
          ensure_rsm_dir/1, snapshot_dir/1,
+         get_histo_name/0, get_histo_max/0, get_histo_unit/0,
          handle_event/2,
          map_append/2]).
 
@@ -53,33 +54,6 @@
 
 -define(RANGE_KEY, '$range').
 -define(SNAPSHOT_KEY, '$snapshot').
-
--define(HISTO_METRIC(Op), {<<"chronicle_disk_latency">>, [{op, Op}]}).
--define(HISTO_MAX, 5000).
--define(HISTO_UNIT, millisecond).
-
--define(TIME_OK(Op, StartTS),
-        begin
-            __EndTS = erlang:monotonic_time(?HISTO_UNIT),
-            __Diff = __EndTS - StartTS,
-            chronicle_stats:report_histo(
-              ?HISTO_METRIC(Op), ?HISTO_MAX, ?HISTO_UNIT, __Diff)
-        end).
-
--define(TIME(Op, Body), ?TIME(Op, ok, Body)).
--define(TIME(Op, OkPattern, Body),
-        begin
-            __StartTS = erlang:monotonic_time(?HISTO_UNIT),
-            __Result = Body,
-            case __Result of
-                OkPattern ->
-                    ?TIME_OK(Op, __StartTS);
-                _ ->
-                    ok
-            end,
-
-            __Result
-        end).
 
 -type meta_state() :: ?META_STATE_PROVISIONED
                     | ?META_STATE_NOT_PROVISIONED
@@ -1586,3 +1560,12 @@ delete_logs(Paths) ->
                       error({delete_log_failed, Path, Error})
               end
       end, Paths).
+
+get_histo_name() ->
+    <<"chronicle_disk_latency">>.
+
+get_histo_max() ->
+    5000.
+
+get_histo_unit() ->
+    millisecond.
