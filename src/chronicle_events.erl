@@ -124,7 +124,6 @@ remove_watcher(Pid, Watchers) ->
     end.
 
 terminate_watcher(Pid, Reason) ->
-    true = (Reason =/= normal),
     exit(Pid, Reason),
     unlink(Pid),
     receive
