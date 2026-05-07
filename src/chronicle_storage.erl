@@ -66,21 +66,6 @@
               ?HISTO_METRIC(Op), ?HISTO_MAX, ?HISTO_UNIT, __Diff)
         end).
 
--define(TIME(Op, Body), ?TIME(Op, ok, Body)).
--define(TIME(Op, OkPattern, Body),
-        begin
-            __StartTS = erlang:monotonic_time(?HISTO_UNIT),
-            __Result = Body,
-            case __Result of
-                OkPattern ->
-                    ?TIME_OK(Op, __StartTS);
-                _ ->
-                    ok
-            end,
-
-            __Result
-        end).
-
 -type meta_state() :: ?META_STATE_PROVISIONED
                     | ?META_STATE_NOT_PROVISIONED
                     | {?META_STATE_PREPARE_JOIN,
@@ -983,7 +968,8 @@ file_exists(Path, Type) ->
     end.
 
 sync_dir(Dir) ->
-    Result = ?TIME(<<"sync_dir">>, chronicle_utils:sync_dir(Dir)),
+    Result = time(<<"sync_dir">>,
+                  fun() -> chronicle_utils:sync_dir(Dir) end),
     case Result of
         ok ->
             ok;
@@ -1154,7 +1140,8 @@ rsm_snapshot_path(SnapshotDir, RSM) ->
 
 prepare_snapshot(Seqno) ->
     SnapshotDir = snapshot_dir(Seqno),
-    ?TIME(<<"prepare_snapshot">>, chronicle_utils:mkdir_p(SnapshotDir)).
+    time(<<"prepare_snapshot">>,
+         fun() -> chronicle_utils:mkdir_p(SnapshotDir) end).
 
 copy_snapshot(Path, Seqno, Config) ->
     SnapshotDir = snapshot_dir(Seqno),
@@ -1325,8 +1312,8 @@ release_snapshot(Seqno, #storage{extra_snapshots = ExtraSnapshots} = Storage) ->
 delete_snapshot(SnapshotSeqno, #storage{data_dir = DataDir}) ->
     SnapshotDir = snapshot_dir(DataDir, SnapshotSeqno),
     ?INFO("Deleting snapshot at seqno ~p: ~s", [SnapshotSeqno, SnapshotDir]),
-    Result = ?TIME(<<"delete_snapshot">>,
-                   chronicle_utils:delete_recursive(SnapshotDir)),
+    Result = time(<<"delete_snapshot">>,
+                  fun() -> chronicle_utils:delete_recursive(SnapshotDir) end),
     case Result of
         ok ->
             ok;
@@ -1539,7 +1526,9 @@ report_batch_stats(Size) ->
                                60000, 10000, Size).
 
 writer_log_append(Log, Batch) ->
-    Result = ?TIME(<<"append">>, {ok, _}, chronicle_log:append(Log, Batch)),
+    Result = time(<<"append">>,
+                  fun ({ok, _}) -> true; (_) -> false end,
+                  fun() -> chronicle_log:append(Log, Batch) end),
     case Result of
         {ok, BytesWritten} ->
             BytesWritten;
@@ -1548,7 +1537,7 @@ writer_log_append(Log, Batch) ->
     end.
 
 log_sync(Log) ->
-    Result = ?TIME(<<"sync">>, chronicle_log:sync(Log)),
+    Result = time(<<"sync">>, fun() -> chronicle_log:sync(Log) end),
     case Result of
         ok ->
             ok;
@@ -1575,7 +1564,7 @@ notify_parent(Msg, #writer{parent = Parent}) ->
 delete_logs(Paths) ->
     lists:foreach(
       fun (Path) ->
-              Result = ?TIME(<<"delete">>, file:delete(Path)),
+              Result = time(<<"delete">>, fun() -> file:delete(Path) end),
               case Result of
                   ok ->
                       ?INFO("Deleted ~s", [Path]),
@@ -1586,3 +1575,18 @@ delete_logs(Paths) ->
                       error({delete_log_failed, Path, Error})
               end
       end, Paths).
+
+time(Op, Body) ->
+    time(Op, fun(ok) -> true; (_) -> false end, Body).
+
+time(Op, OkFun, Body) ->
+    StartTS = erlang:monotonic_time(?HISTO_UNIT),
+    Result = Body(),
+    case OkFun(Result) of
+        true ->
+            ?TIME_OK(Op, StartTS);
+        false ->
+            ok
+    end,
+
+    Result.
