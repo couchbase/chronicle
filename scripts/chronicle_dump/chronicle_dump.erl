@@ -167,7 +167,7 @@ dump_guts(Args) ->
     chronicle_env:setup_decrypt_function(DecryptFun),
     Guts = dump_guts_inner(Path),
     Items = [E || {K, V} <- Guts, E <- [K, V]],
-    ?fmt("~s", [[[output_item(Item) | <<0:8>>] || Item <- Items]]).
+    ?fmt("~s", [[[output_item(Item), <<0:8>>] || Item <- Items]]).
 
 dump_guts_inner(Path) ->
     case chronicle_storage:read_rsm_snapshot(Path) of
