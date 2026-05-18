@@ -27,7 +27,7 @@
 -export([unpack_payload/2, unpack_command/1, pack_command/1]).
 -export([map_snapshot/2, format_snapshot/1]).
 -export([callback_mode/0,
-         format_status/2, sanitize_event/2,
+         format_status/1, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
 
 -import(chronicle_utils, [call/2, call/3, call/4,
@@ -194,22 +194,20 @@ note_leader_status(Pid, LeaderStatus) ->
 callback_mode() ->
     handle_event_function.
 
-format_status(Opt, [_PDict, State, Data]) ->
-    case Opt of
-        normal ->
-            [{data, [{"State", {State, Data}}]}];
-        terminate ->
-            {State,
-             case Data of
-                 #data{} ->
-                     Data#data{mod_state = omitted,
-                               leader_requests = omitted,
-                               peer_states = #{}};
-                 _ ->
-                     %% During gen_statem initialization Data may be undefined.
-                     Data
-             end}
-    end.
+%% Per the OTP source, reason only seems to be set in the `terminate` case which
+%% the old format_status/2 differentiated via the Opt (1st) param.
+format_status(#{reason := _, data := Data} = Status) ->
+    Status#{data => case Data of
+        #data{} ->
+            Data#data{mod_state = omitted,
+                      leader_requests = omitted,
+                      peer_states = #{}};
+        _ ->
+            %% During gen_statem initialization Data may be undefined.
+            Data
+    end};
+format_status(Status) ->
+    Status.
 
 map_snapshot(Fun, #snapshot{mod = Mod, mod_state = ModState} = Snapshot) ->
    Snapshot#snapshot{mod_state = Fun(Mod, ModState)}.
