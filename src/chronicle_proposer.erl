@@ -27,7 +27,7 @@
 -export([sync_quorum/2, cas_config/3, append_commands/2]).
 
 -export([callback_mode/0,
-         format_status/2, sanitize_event/2,
+         format_status/1, sanitize_event/2,
          init/1, handle_event/4]).
 
 -import(chronicle_utils, [get_all_peers/1,
@@ -153,20 +153,12 @@ append_commands(Pid, Commands) ->
 callback_mode() ->
     [handle_event_function, state_enter].
 
-format_status(Opt, [_PDict, State, Data]) ->
-    case Opt of
-        normal ->
-            [{data, [{"State", {State, Data}}]}];
-        terminate ->
-            {State,
-             case Data of
-                 #data{} ->
-                     sanitize_data(Data);
-                 _ ->
-                     %% During gen_statem initialization Data may be undefined.
-                     Data
-             end}
-    end.
+%% Per the OTP source, reason only seems to be set in the `terminate` case which
+%% the old format_status/2 differentiated via the Opt (1st) param.
+format_status(#{reason := _, data := Data} = Status) ->
+    Status#{data => sanitize_data(Data)};
+format_status(Status) ->
+    Status.
 
 sanitize_event(cast, {append_commands, _}) ->
     {cast, {append_commands, '...'}};
@@ -2117,4 +2109,6 @@ sanitize_data(#data{pending_entries = PendingQ} = Data) ->
 
     Data#data{pending_entries = {sanitized,
                                  length(Pending),
-                                 Sanitized}}.
+                                 Sanitized}};
+sanitize_data(Data) ->
+    Data.

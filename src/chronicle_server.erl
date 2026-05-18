@@ -24,7 +24,7 @@
          proposer_ready/3, reply_request/2]).
 
 -export([callback_mode/0,
-         format_status/2, sanitize_event/2,
+         format_status/1, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
 
 -import(chronicle_utils, [call/3, sanitize_reason/1]).
@@ -86,20 +86,12 @@ reply_request(ReplyTo, Reply) ->
 callback_mode() ->
     [handle_event_function, state_enter].
 
-format_status(Opt, [_PDict, State, Data]) ->
-    case Opt of
-        normal ->
-            [{data, [{"State", {State, Data}}]}];
-        terminate ->
-            {State,
-             case Data of
-                 #data{} ->
-                     sanitize_data(Data);
-                 _ ->
-                     %% During gen_statem initialization Data may be undefined.
-                     Data
-             end}
-    end.
+%% Per the OTP source, reason only seems to be set in the `terminate` case which
+%% the old format_status/2 differentiated via the Opt (1st) param.
+format_status(#{reason := _, data := Data} = Status) ->
+    Status#{data => sanitize_data(Data)};
+format_status(Status) ->
+    Status.
 
 sanitize_event(cast, {rsm_command, HistoryId, Term,
                       #rsm_command{payload = {command, _}} = Command}) ->
@@ -449,4 +441,7 @@ sanitize_data(#data{commands_batch = Commands} = Data) ->
                       {ReplyTo, {rsm_command, _}} <- Requests]
           end, Commands),
 
-    Data#data{commands_batch = SanitizedCommands}.
+    Data#data{commands_batch = SanitizedCommands};
+sanitize_data(Data) ->
+    %% During gen_statem initialization Data may be undefined.
+    Data.
