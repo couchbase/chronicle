@@ -216,8 +216,16 @@ handle_event(info, {'EXIT', Pid, Reason}, State, Data) ->
 handle_event(info, {timeout, TRef, leader_wait}, State, Data) ->
     handle_leader_wait_timeout(TRef, State, Data);
 handle_event(info, {state_timer, Name}, _State, Data) ->
-    {ok, _, NewData} = take_state_timer(Name, Data),
-    {keep_state, NewData, {next_event, internal, {state_timer, Name}}};
+    case take_state_timer(Name, Data) of
+        {ok, _, NewData} ->
+            {keep_state, NewData,
+             {next_event, internal, {state_timer, Name}}};
+        not_found ->
+            %% The timer was canceled (e.g. due to a state transition), but
+            %% its message raced past the cancellation and got delivered
+            %% anyway. It's stale, so just ignore it.
+            keep_state_and_data
+    end;
 handle_event(info, check_member_timeout, State, Data) ->
     handle_check_member_timeout(State, Data);
 handle_event(internal, {state_timer, state}, State, Data) ->
