@@ -41,6 +41,7 @@
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
 -export([txn_get/2, txn_get_many/2]).
 -export([get_txn_default_timeout/0]).
+-export([in_txn/0]).
 
 %% callbacks
 -export([specs/2,
@@ -117,6 +118,7 @@ add(Name, Key, Value) ->
 
 -spec add(name(), key(), value(), options()) -> op_result().
 add(Name, Key, Value, Opts) ->
+    assert_not_in_txn(add),
     submit_command(Name, {add, Key, Value},
                    get_timeout(Name, Opts)).
 
@@ -130,6 +132,7 @@ set(Name, Key, Value, ExpectedRevision) ->
 
 -spec set(name(), key(), value(), revisionreq(), options()) -> op_result().
 set(Name, Key, Value, ExpectedRevision, Opts) ->
+    assert_not_in_txn(set),
     submit_command(Name,
                    {set, Key, Value, ExpectedRevision},
                    get_timeout(Name, Opts)).
@@ -164,6 +167,7 @@ delete(Name, Key, ExpectedRevision) ->
 
 -spec delete(name(), key(), revisionreq(), options()) -> op_result().
 delete(Name, Key, ExpectedRevision, Opts) ->
+    assert_not_in_txn(delete),
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
                    get_timeout(Name, Opts)).
@@ -181,6 +185,7 @@ multi(Name, Updates) ->
 
 -spec multi(name(), multi_ops(), options()) -> op_result().
 multi(Name, Updates, Opts) ->
+    assert_not_in_txn(multi),
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
     submit_transaction(Name, TxnConditions, TxnUpdates,
                        get_timeout(Name, Opts)).
@@ -273,6 +278,7 @@ txn(Name, Fun) ->
 
 -spec txn(name(), txn_fun(txn_opaque()), txn_options()) -> txn_result().
 txn(Name, Fun, Opts) ->
+    assert_not_in_txn(txn),
     BuildTxn = fun (TRef, TxnOpts) ->
                        case prepare_txn(Name, Fun, TRef, TxnOpts) of
                            {ok, {TxnResult, Conditions, _Revision}} ->
@@ -368,6 +374,7 @@ ro_txn(Name, Fun) ->
 
 -spec ro_txn(name(), ro_txn_fun(), options()) -> ro_txn_result().
 ro_txn(Name, Fun, Opts) ->
+    assert_not_in_txn(ro_txn),
     TRef = start_timeout(get_timeout(Name, Opts)),
     case prepare_txn(Name, Fun, TRef, Opts) of
         {ok, {TxnResult, _Conditions, Revision}} ->
@@ -384,6 +391,7 @@ get(Name, Key) ->
 
 -spec get(name(), key(), options()) -> get_result().
 get(Name, Key, Opts) ->
+    assert_not_in_txn(get),
     optimistic_query(
       Name, {get, Key}, get_timeout(Name, Opts), Opts,
       fun () ->
@@ -430,6 +438,7 @@ rewrite(Name, Fun) ->
 
 -spec rewrite(name(), rewrite_fun(), txn_options()) -> txn_result().
 rewrite(Name, Fun, Opts) ->
+    assert_not_in_txn(rewrite),
     BuildTxn = fun (TRef, TxnOpts) ->
                        submit_query(Name, {rewrite, Fun}, TRef, TxnOpts)
                end,
@@ -443,6 +452,7 @@ get_full_snapshot(Name) ->
 
 -spec get_full_snapshot(name(), options()) -> get_snapshot_result().
 get_full_snapshot(Name, Opts) ->
+    assert_not_in_txn(get_full_snapshot),
     submit_query(Name, get_full_snapshot, get_timeout(Name, Opts), Opts).
 
 -spec get_snapshot(name(), [key()]) -> get_snapshot_result().
@@ -451,6 +461,7 @@ get_snapshot(Name, Keys) ->
 
 -spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
+    assert_not_in_txn(get_snapshot),
     optimistic_query(
       Name, {get_snapshot, Keys}, get_timeout(Name, Opts), Opts,
       fun () ->
@@ -514,6 +525,7 @@ sync(Name) ->
 
 -spec sync(name(), timeout()) -> ok.
 sync(Name, Timeout) ->
+    assert_not_in_txn(sync),
     chronicle_rsm:sync(Name, Timeout).
 
 -spec sync(name(), read_consistency(), timeout()) -> ok.
@@ -522,6 +534,7 @@ sync(Name, Type, Timeout) ->
         local ->
             ok;
         quorum ->
+            assert_not_in_txn(sync),
             chronicle_rsm:sync(Name, Timeout)
     end.
 
@@ -1019,12 +1032,7 @@ txn_require_missing(Key) ->
     txn_add_condition({missing, Key}).
 
 txn_init_conditions() ->
-    case erlang:put(?TXN_CONDITIONS, []) of
-        undefined ->
-            ok;
-        false ->
-            error(nested_transactions_detected)
-    end.
+    undefined = erlang:put(?TXN_CONDITIONS, []).
 
 txn_take_conditions() ->
     erlang:erase(?TXN_CONDITIONS).
@@ -1036,4 +1044,18 @@ txn_with_conditions(Revision, Body) ->
             {Result, txn_take_conditions(), Revision}
     after
         _ = txn_take_conditions()
+    end.
+
+%% Useful for avoiding deadlocks where you are about to call out to another
+%% process that may wish to enter a chronicle transaction
+-spec in_txn() -> boolean().
+in_txn() ->
+    erlang:get(?TXN_CONDITIONS) =/= undefined.
+
+%% Fast-fail when attempting a chronicle op from inside a txn, which has the
+%% potential to otherwise go undetected and end up in a deadlock
+assert_not_in_txn(Op) ->
+    case in_txn() of
+        true -> error({chronicle_op_inside_txn, Op});
+        false -> ok
     end.
