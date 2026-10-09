@@ -17,6 +17,10 @@
 
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -import(chronicle_utils, [start_timeout/1,
                           sanitize_stacktrace/1]).
 
@@ -904,8 +908,8 @@ notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
       fun (Key, {Value, Rev}) ->
               Notify =
                   case maps:find(Key, OldSnapshot) of
-                      {ok, OldRev} ->
-                          Rev =:= OldRev;
+                      {ok, {_OldValue, OldRev}} ->
+                          Rev =/= OldRev;
                       error ->
                           true
                   end,
@@ -935,6 +939,33 @@ notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
       end, OldSnapshot);
 notify_snapshot_diff(_, _, _, _) ->
     ok.
+
+-ifdef(TEST).
+notify_snapshot_diff_test() ->
+    Rev = {<<"history">>, 10},
+    OldSnapshot = #{unchanged => {a, {<<"history">>, 1}},
+                    changed => {b, {<<"history">>, 2}},
+                    deleted => {c, {<<"history">>, 3}}},
+    NewSnapshot = #{unchanged => {a, {<<"history">>, 1}},
+                    changed => {b2, {<<"history">>, 8}},
+                    added => {d, {<<"history">>, 9}}},
+
+    notify_snapshot_diff(Rev, NewSnapshot, OldSnapshot,
+                         #data{initialized = true, event_mgr = self()}),
+
+    ?assertEqual(lists:sort([{{key, changed}, Rev, {updated, b2}},
+                             {{key, added}, Rev, {updated, d}},
+                             {{key, deleted}, Rev, deleted}]),
+                 lists:sort(collect_notify_events())).
+
+collect_notify_events() ->
+    receive
+        {notify, Event} ->
+            [Event | collect_notify_events()]
+    after 0 ->
+            []
+    end.
+-endif.
 
 get_kv_table(Name) ->
     case ets:lookup(?ETS_TABLE(Name), table) of
