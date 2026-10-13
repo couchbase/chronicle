@@ -314,6 +314,261 @@ rpc_nodes(Nodes, Fun) ->
               ok = rpc_node(N, Fun)
       end, Nodes).
 
+txn_guards_test_() ->
+    {setup,
+     fun () -> setup_vnet([a]) end,
+     fun teardown_vnet/1,
+     {timeout, 20, fun txn_guards_test__/0}}.
+
+txn_guards_test__() ->
+    ok = rpc_node(a,
+                  fun () ->
+                          chronicle:provision([{kv, chronicle_kv, []}])
+                  end),
+    {ok, _} = rpc_node(
+      a,
+      fun () ->
+              {ok, _} = chronicle_kv:set(kv, a, 1),
+
+              %% in_txn/0 is false outside a transaction and true inside the
+              %% fun, for read-write and read-only paths, in both fast and slow
+              %% paths
+              ?assertNot(chronicle_kv:in_txn()),
+              {ok, _} =
+                  chronicle_kv:txn(
+                    kv,
+                    fun (Txn) ->
+                            ?assert(chronicle_kv:in_txn()),
+                            {ok, {1, _}} = chronicle_kv:txn_get(a, Txn),
+                            {commit, []}
+                    end),
+              {ok, _} =
+                  chronicle_kv:txn(
+                    kv,
+                    fun ({txn_fast, _, _}) ->
+                            throw(use_slow_path);
+                        ({txn_slow, _} = Txn) ->
+                            ?assert(chronicle_kv:in_txn()),
+                            {ok, {1, _}} = chronicle_kv:txn_get(a, Txn),
+                            {commit, []}
+                    end),
+              {ok, {true, _}} =
+                  chronicle_kv:ro_txn(
+                    kv, fun (_Txn) -> chronicle_kv:in_txn() end),
+              {ok, {true, _}} =
+                  chronicle_kv:ro_txn(
+                    kv,
+                    fun ({txn_fast, _, _}) ->
+                            throw(use_slow_path);
+                        ({txn_slow, _}) ->
+                            chronicle_kv:in_txn()
+                    end),
+              ?assertNot(chronicle_kv:in_txn()),
+
+              %% An operation that reaches the rsm on its own inside a
+              %% transaction fun crashes rather than running against a
+              %% different snapshot or blocking the rsm
+              ?assertError(
+                 {chronicle_op_inside_txn, add},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:add(kv, k, v),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, add},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                        ({txn_slow, _}) ->
+                           chronicle_kv:add(kv, k, v),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, set},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:set(kv, k, v),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, set},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:set(kv, k, v),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, delete},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:delete(kv, k),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, delete},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:delete(kv, k),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, multi},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:multi(kv, []),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, multi},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:multi(kv, []),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, txn},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:txn(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, txn},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:txn(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, ro_txn},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:ro_txn(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, ro_txn},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:ro_txn(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:get(kv, a),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:get(kv, a),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, rewrite},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:rewrite(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, rewrite},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:rewrite(kv, fun (_) -> ok end),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get_full_snapshot},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:get_full_snapshot(kv),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get_full_snapshot},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:get_full_snapshot(kv),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get_snapshot},
+                 chronicle_kv:ro_txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:get_snapshot(kv, [a])
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, get_snapshot},
+                 chronicle_kv:ro_txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:get_snapshot(kv, [a])
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, sync},
+                 chronicle_kv:txn(
+                   kv,
+                   fun (_Txn) ->
+                           chronicle_kv:sync(kv),
+                           {commit, []}
+                   end)),
+              ?assertError(
+                 {chronicle_op_inside_txn, sync},
+                 chronicle_kv:txn(
+                   kv,
+                   fun ({txn_fast, _, _}) ->
+                           throw(use_slow_path);
+                       ({txn_slow, _}) ->
+                           chronicle_kv:sync(kv),
+                           {commit, []}
+                   end)),
+
+              %% the guard does not affect a normal read outside a transaction
+              {ok, {1, _}} = chronicle_kv:get(kv, a)
+      end).
+
 leader_transfer_test_() ->
     Nodes = [a, b],
 
