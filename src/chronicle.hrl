@@ -37,7 +37,7 @@
 -define(NO_TERM, {0, ?NO_PEER}).
 -define(NO_SEQNO, 0).
 
--define(COMPAT_VERSION, 0).
+-define(COMPAT_VERSION, 1).
 
 -record(rsm_config, { module :: module(),
                       args = [] :: list() }).
@@ -140,6 +140,8 @@
         ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4))).
 -define(CHECK(Cond1, Cond2, Cond3, Cond4, Cond5),
         ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4, Cond5))).
+-define(CHECK(Cond1, Cond2, Cond3, Cond4, Cond5, Cond6),
+        ?CHECK(Cond1, ?CHECK(Cond2, Cond3, Cond4, Cond5, Cond6))).
 
 -define(FLUSH(Pattern),
         (fun __Loop(__N) ->

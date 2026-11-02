@@ -19,6 +19,7 @@
 
 -export([data_dir/0]).
 -export([setup/0]).
+-export([kv_expire_handler/1]).
 
 %% For use by chronicle_dump.
 -export([setup_logger/0]).
@@ -41,7 +42,8 @@ setup() ->
            setup_logger_filter(),
            setup_logger(),
            setup_stats(),
-           setup_encryption()
+           setup_encryption(),
+           check_kv_expire_handlers()
           ).
 
 check_data_dir() ->
@@ -117,6 +119,32 @@ setup_encryption() ->
 
 setup_decrypt_function(Fun) ->
     persistent_term:put(?CHRONICLE_DECRYPT, Fun).
+
+%% Handlers build the updates that expire a batch of chronicle_kv keys, keyed
+%% by RSM name. Read on each use so they can be set after chronicle starts
+-spec kv_expire_handler(atom()) -> {ok, function()} | {error, any()} | undefined.
+kv_expire_handler(Name) ->
+    case maps:find(Name, get_env(kv_expire_handlers, #{})) of
+        {ok, ModFun} ->
+            case validate_function(ModFun, 2) of
+                {true, Fun} ->
+                    {ok, Fun};
+                false ->
+                    {error, {badarg, kv_expire_handlers, ModFun}}
+            end;
+        error ->
+            undefined
+    end.
+
+check_kv_expire_handlers() ->
+    Errors = [Error || Name <- maps:keys(get_env(kv_expire_handlers, #{})),
+                       {error, _} = Error <- [kv_expire_handler(Name)]],
+    case Errors of
+        [] ->
+            ok;
+        [Error | _] ->
+            Error
+    end.
 
 -ifndef(TEST).
 
