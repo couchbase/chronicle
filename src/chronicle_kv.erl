@@ -43,7 +43,7 @@
 -export([sync/1, sync/2]).
 
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
--export([txn_get/2, txn_get_many/2]).
+-export([txn_get/2, txn_get_key_opts/2, txn_get_many/2]).
 -export([get_txn_default_timeout/0]).
 
 %% internal
@@ -308,6 +308,24 @@ transaction(Name, Keys, Fun, Opts) ->
 
 -spec txn_get(key(), txn_opaque()) -> get_result().
 txn_get(Key, Txn) ->
+    case txn_get_entry(Key, Txn) of
+        {ok, Entry} ->
+            {ok, value_rev(Entry)};
+        {error, not_found} = Error ->
+            Error
+    end.
+
+-spec txn_get_key_opts(key(), txn_opaque()) ->
+          {ok, key_options()} | {error, not_found}.
+txn_get_key_opts(Key, Txn) ->
+    case txn_get_entry(Key, Txn) of
+        {ok, Entry} ->
+            {ok, key_opts(Entry)};
+        {error, not_found} = Error ->
+            Error
+    end.
+
+txn_get_entry(Key, Txn) ->
     case Txn of
         {txn_fast, Table, TableSeqno} ->
             txn_get_from_table(Key, Table, TableSeqno);
@@ -638,7 +656,7 @@ apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
     KvTable = create_kv_table(Name),
     chronicle_utils:maps_foreach(
       fun (Key, Entry) ->
-              true = ets:insert_new(KvTable, {Key, value_rev(Entry)})
+              true = ets:insert_new(KvTable, {Key, Entry})
       end, SnapshotState),
 
     case IsLeader of
@@ -1160,7 +1178,8 @@ ttl_keys(State) ->
 
 handle_update(Key, Value, KeyOpts, Revision, State,
               #data{kv_table = Table} = Data) ->
-    ets:insert(Table, {Key, {Value, Revision}}),
+    Entry = make_entry(Value, Revision, KeyOpts),
+    ets:insert(Table, {Key, Entry}),
     notify_updated(Key, Revision, Value, Data),
     case maps:find(ttl, KeyOpts) of
         {ok, TTL} ->
@@ -1168,7 +1187,7 @@ handle_update(Key, Value, KeyOpts, Revision, State,
         error ->
             untrack_ttl(Key, State, Data)
     end,
-    maps:put(Key, make_entry(Value, Revision, KeyOpts), State).
+    maps:put(Key, Entry, State).
 
 handle_delete(Key, Revision, State, #data{kv_table = Table} = Data) ->
     ets:delete(Table, Key),
@@ -1310,19 +1329,28 @@ publish_kv_table(KvTable, #data{meta_table = MetaTable}) ->
     ets:insert(MetaTable, {table, KvTable}).
 
 get_from_kv_table(Table, Key) ->
+    case get_entry_from_kv_table(Table, Key) of
+        {ok, Entry} ->
+            {ok, value_rev(Entry)};
+        {error, _} = Error ->
+            Error
+    end.
+
+get_entry_from_kv_table(Table, Key) ->
     try ets:lookup(Table, Key) of
         [] ->
             {error, not_found};
-        [{_, ValueRev}] ->
-            {ok, ValueRev}
+        [{_, Entry}] ->
+            {ok, Entry}
     catch
         error:badarg ->
             {error, no_table}
     end.
 
 txn_get_from_table(Key, Table, TableSeqno) ->
-    case get_from_kv_table(Table, Key) of
-        {ok, {_Value, {_HistoryId, Seqno} = Revision}} = Ok ->
+    case get_entry_from_kv_table(Table, Key) of
+        {ok, Entry} = Ok ->
+            {_Value, {_HistoryId, Seqno} = Revision} = value_rev(Entry),
             case Seqno =< TableSeqno of
                 true ->
                     txn_require_revision(Key, Revision),
@@ -1337,10 +1365,10 @@ txn_get_from_table(Key, Table, TableSeqno) ->
 
 txn_get_from_map(Key, Map) ->
     case maps:find(Key, Map) of
-        {ok, Entry} ->
-            {_, Revision} = ValueRev = value_rev(Entry),
+        {ok, Entry} = Ok ->
+            {_, Revision} = value_rev(Entry),
             txn_require_revision(Key, Revision),
-            {ok, ValueRev};
+            Ok;
         error ->
             txn_require_missing(Key),
             {error, not_found}
@@ -1350,8 +1378,8 @@ txn_get_from_map_many(Keys, Map) ->
     lists:foldl(
       fun (Key, Acc) ->
               case txn_get_from_map(Key, Map) of
-                  {ok, ValueRev} ->
-                      Acc#{Key => ValueRev};
+                  {ok, Entry} ->
+                      Acc#{Key => value_rev(Entry)};
                   {error, not_found} ->
                       Acc
               end
@@ -1360,8 +1388,8 @@ txn_get_from_map_many(Keys, Map) ->
 txn_get_from_table_many(Keys, Table, TableSeqno) ->
     lists:foldl(
       fun (Key, Acc) ->
-              {ok, ValueRev} = txn_get_from_table(Key, Table, TableSeqno),
-              Acc#{Key => ValueRev}
+              {ok, Entry} = txn_get_from_table(Key, Table, TableSeqno),
+              Acc#{Key => value_rev(Entry)}
       end, #{}, Keys).
 
 -define(TXN_CONDITIONS, '$txn_conditions').

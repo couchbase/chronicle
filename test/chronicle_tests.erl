@@ -423,6 +423,22 @@ ttl_test__(Nodes) ->
                    {ok, {#{multi := {1, _}}, _}} =
                        chronicle_kv:get_snapshot(kv, [multi]),
 
+                   %% Transactions can read them
+                   {ok, {{{ok, #{ttl := 60000}}, {ok, #{}}}, _}} =
+                       chronicle_kv:ro_txn(
+                         kv,
+                         fun (Txn) ->
+                                 {chronicle_kv:txn_get_key_opts(extended, Txn),
+                                  chronicle_kv:txn_get_key_opts(overwritten,
+                                                                Txn)}
+                         end),
+                   {ok, {{error, not_found}, _}} =
+                       chronicle_kv:ro_txn(
+                         kv,
+                         fun (Txn) ->
+                                 chronicle_kv:txn_get_key_opts(missing, Txn)
+                         end),
+
                    ?assertError({bad_key_opts, _},
                                 chronicle_kv:set(kv, bad, 1, any,
                                                  #{ttl => 0}, #{})),
