@@ -41,6 +41,7 @@
 -export([get_full_snapshot/1, get_full_snapshot/2]).
 -export([get_revision/1]).
 -export([sync/1, sync/2]).
+-export([touch/2, touch/3]).
 
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
 -export([txn_get/2, txn_get_key_opts/2, txn_get_many/2]).
@@ -608,6 +609,26 @@ sync(Name, Type, Timeout) ->
             chronicle_rsm:sync(Name, Timeout)
     end.
 
+-type touch_result() :: ok
+                      | {error, not_found
+                              | no_ttl
+                              | expiring
+                              | {conflict, revision()}}.
+
+%% Restarts the ttl of each key on the leader without writing to the quorum.
+%% A key that the leader is already expiring can't be touched
+-spec touch(name(), [{key(), revisionreq()}]) ->
+          {ok, #{key() => touch_result()}}.
+touch(Name, Keys) ->
+    touch(Name, Keys, #{}).
+
+-spec touch(name(), [{key(), revisionreq()}], write_options()) ->
+          {ok, #{key() => touch_result()}}.
+touch(Name, Keys, Opts) ->
+    check_ttl_supported(),
+    TRef = start_timeout(get_timeout(Name, Opts)),
+    chronicle_rsm:leader_query(Name, {touch, Keys}, TRef).
+
 %% callbacks
 specs(Name, _Args) ->
     EventName = event_manager_name(Name),
@@ -692,6 +713,8 @@ handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
     handle_get_snapshot(Keys, StateRevision, State, Data);
 handle_query({prepare_txn, Fun}, StateRevision, State, Data) ->
     handle_prepare_txn(Fun, StateRevision, State, Data);
+handle_query({touch, Keys}, _StateRevision, State, Data) ->
+    handle_touch(Keys, State, Data);
 handle_query(_, _, _, Data) ->
     {reply, {error, unknown_query}, Data}.
 
@@ -986,6 +1009,35 @@ handle_get(Key, State, Data) ->
         end,
 
     {reply, Reply, Data}.
+
+%% The expiry server is called rather than cast to, so that it has seen every
+%% key tracked so far and the reply reflects the touch
+handle_touch(Keys, State, #data{name = Name} = Data) ->
+    {Results, ToTouch} =
+        lists:foldl(
+          fun ({Key, ExpectedRevision}, {AccResults, AccToTouch}) ->
+                  case check_touch(Key, ExpectedRevision, State) of
+                      {ok, Revision} ->
+                          {AccResults, [{Key, Revision} | AccToTouch]};
+                      {error, _} = Error ->
+                          {AccResults#{Key => Error}, AccToTouch}
+                  end
+          end, {#{}, []}, Keys),
+    Touched = chronicle_kv_expiry:touch(Name, ToTouch),
+    {reply, {ok, maps:merge(Results, Touched)}, Data}.
+
+check_touch(Key, ExpectedRevision, State) ->
+    case maps:find(Key, State) of
+        {ok, {_, Revision, #{ttl := _}}} when ExpectedRevision =:= any;
+                                               ExpectedRevision =:= Revision ->
+            {ok, Revision};
+        {ok, {_, Revision, #{ttl := _}}} ->
+            {error, {conflict, Revision}};
+        {ok, _} ->
+            {error, no_ttl};
+        error ->
+            {error, not_found}
+    end.
 
 handle_get_full_snapshot(StateRevision, State, Data) ->
     {reply, {ok, {State, StateRevision}}, Data}.

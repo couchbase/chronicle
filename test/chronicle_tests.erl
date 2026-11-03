@@ -499,26 +499,69 @@ ttl_test__(Nodes) ->
                                               #{ttl => 500}, #{}),
                    ok = wait_for_keys_gone([handled], 10000),
                    {ok, {true, _}} = chronicle_kv:get(kv, {expired, handled}),
-                   {ok, _} = chronicle_kv:set(kv, takeover, 1, any,
-                                              #{ttl => 3000}, #{}),
                    ok
            end),
 
+    %% A touch from a follower is run on the leader, and keeps a key alive
+    %% without a write
     [Other | _] = Nodes -- [Leader],
+    ok = rpc_node(
+           Other,
+           fun () ->
+                   {ok, {HistoryId, Seqno} = Rev} =
+                       chronicle_kv:set(kv, touched, 1, any,
+                                        #{ttl => 1000}, #{}),
+                   {ok, _} = chronicle_kv:set(kv, untouched, 1),
+                   ok = touch_for(touched, 3000),
+                   {ok, {1, Rev}} =
+                       chronicle_kv:get(kv, touched,
+                                        #{read_consistency => quorum}),
+
+                   {ok, #{touched := {error, {conflict, Rev}},
+                          untouched := {error, no_ttl},
+                          missing := {error, not_found}}} =
+                       chronicle_kv:touch(
+                         kv, [{touched, {HistoryId, Seqno + 1}},
+                              {untouched, any},
+                              {missing, any}]),
+
+                   ok = wait_for_keys_gone([touched], 10000),
+                   {ok, #{touched := {error, not_found}}} =
+                       chronicle_kv:touch(kv, [{touched, Rev}]),
+                   ok
+           end),
+
     ok = rpc_node(Other,
                   fun () ->
+                          {ok, _} = chronicle_kv:set(kv, takeover, 1, any,
+                                                     #{ttl => 3000}, #{}),
                           ok = chronicle:remove_peer(Leader),
                           {ok, {1, _}} =
                               chronicle_kv:get(kv, takeover,
                                                #{read_consistency => quorum}),
                           ok = wait_for_keys_gone([takeover], 20000),
                           {ok, {2, _}} = chronicle_kv:get(kv, extended),
+
+                          %% The new leader takes touches
+                          {ok, _} = chronicle_kv:set(kv, retouched, 1, any,
+                                                     #{ttl => 1000}, #{}),
+                          ok = touch_for(retouched, 2000),
+                          {ok, {1, _}} =
+                              chronicle_kv:get(kv, retouched,
+                                               #{read_consistency => quorum}),
                           ok
                   end).
 
 ttl_test_expire_updates(Keys, Txn) ->
     Updates = chronicle_kv:expire_updates(Keys, Txn),
     Updates ++ [{set, {expired, Key}, true} || {expire, Key} <- Updates].
+
+touch_for(Key, Duration) when Duration > 0 ->
+    {ok, #{Key := ok}} = chronicle_kv:touch(kv, [{Key, any}]),
+    timer:sleep(250),
+    touch_for(Key, Duration - 250);
+touch_for(_Key, _Duration) ->
+    ok.
 
 wait_for_keys_gone(Keys, Timeout) when Timeout > 0 ->
     Gone = lists:all(

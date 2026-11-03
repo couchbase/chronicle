@@ -20,7 +20,7 @@
 -include("chronicle.hrl").
 
 -export([start_link/4]).
--export([command/2, command/3, query/2, query/3,
+-export([command/2, command/3, query/2, query/3, leader_query/3,
          get_local_revision/1, sync_revision/3, sync/2,
          note_leader_status/2]).
 
@@ -55,6 +55,10 @@
         gb_trees:tree(
           {chronicle:seqno(), reference()},
           {From :: any(), Timer :: reference(), chronicle:history_id()}).
+
+-type leader_queries() ::
+        gb_trees:tree({chronicle:seqno(), reference()},
+                      {Query :: any(), ReplyTo :: any()}).
 
 -record(init, { wait_for_seqno }).
 -record(no_leader, {}).
@@ -109,6 +113,8 @@
                 leader_last_retry,
 
                 local_requests,
+                %% Leader queries waiting for the synced revision to be applied
+                leader_queries :: leader_queries(),
 
                 config :: undefined | #config{},
                 config_peers :: sets:set(chronicle:peer_id()),
@@ -135,6 +141,11 @@ query(Name, Query) ->
 
 query(Name, Query, Timeout) ->
     call(?SERVER(Name), {query, Query}, query, Timeout).
+
+%% Runs the query on the leader once a quorum confirms its leadership and it
+%% has applied everything committed by then
+leader_query(Name, Query, Timeout) ->
+    leader_request(Name, {leader_query, Query}, Timeout).
 
 sync(Name, Timeout) ->
     leader_request(Name, sync, Timeout).
@@ -247,6 +258,8 @@ sanitize_event({call, _} = Type,
     case Request of
         {command, _} ->
             {Type, {leader_request, {command, '...'}, Deadline}};
+        {leader_query, _} ->
+            {Type, {leader_request, {leader_query, '...'}, Deadline}};
         _ ->
             {Type, LeaderRequest}
     end;
@@ -287,6 +300,7 @@ init([Name, PeerId, Mod, ModArgs]) ->
                           sync_revision_requests = gb_trees:empty(),
                           leader_requests = #{},
                           local_requests = #{},
+                          leader_queries = gb_trees:empty(),
 
                           config = undefined,
                           config_peers = sets:new(),
@@ -675,7 +689,9 @@ leader_request_sync_revision(Request, Result, From, Data) ->
                     do_handle_sync_revision(ok, Revision, Deadline, From, Data);
                 _ ->
                     {reply, Result}
-            end
+            end;
+        {leader_query, _} ->
+            {reply, Result}
     end.
 
 handle_leader_down(State, #data{leader_last_retry = LastRetry,
@@ -817,7 +833,9 @@ do_leader_request(Request, ReplyTo, State, Data) ->
             handle_command(PeerId, Incarnation,
                            Serial, SeenSerial, Command, ReplyTo, State, Data);
         sync ->
-            handle_sync(ReplyTo, State, Data)
+            handle_sync(ReplyTo, State, Data);
+        {leader_query, Query} ->
+            handle_leader_query(Query, ReplyTo, State, Data)
     end.
 
 handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
@@ -1001,10 +1019,16 @@ find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
     end.
 
 handle_sync(ReplyTo, State, Data) ->
-    {keep_state, sync_quorum(ReplyTo, State, Data)}.
+    {keep_state, sync_quorum(sync_quorum, ReplyTo, State, Data)}.
 
-sync_quorum(ReplyTo, #leader{history_id = HistoryId, term = Term}, Data) ->
-    {Request, NewData} = add_local_request(sync_quorum, ReplyTo, Data),
+%% The quorum is synced before the query, so that the query sees everything
+%% committed by a previous leader
+handle_leader_query(Query, ReplyTo, State, Data) ->
+    {keep_state, sync_quorum({leader_query, Query}, ReplyTo, State, Data)}.
+
+sync_quorum(LocalRequest, ReplyTo,
+            #leader{history_id = HistoryId, term = Term}, Data) ->
+    {Request, NewData} = add_local_request(LocalRequest, ReplyTo, Data),
     Tag = {?RSM_TAG, sync_quorum, Request#request.ref},
     chronicle_server:sync_quorum(Tag, HistoryId, Term),
     NewData.
@@ -1012,17 +1036,54 @@ sync_quorum(ReplyTo, #leader{history_id = HistoryId, term = Term}, Data) ->
 handle_sync_quorum_result(Ref, Result, State, Data) ->
     case take_local_request(Ref, Data) of
         {#request{reply_to = ReplyTo,
-                  request = sync_quorum}, NewData} ->
+                  request = LocalRequest}, NewData} ->
             case Result of
-                {ok, _Revision} ->
+                {ok, Revision} ->
                     #leader{} = State,
-                    {keep_state, NewData,
-                     reply_leader_request(ReplyTo, Result)};
+                    case LocalRequest of
+                        sync_quorum ->
+                            {keep_state, NewData,
+                             reply_leader_request(ReplyTo, Result)};
+                        {leader_query, Query} ->
+                            {FinalData, Effects} =
+                                add_leader_query(Query, Revision,
+                                                 ReplyTo, NewData),
+                            {keep_state, FinalData, Effects}
+                    end;
                 {error, {leader_error, _}} ->
                     {keep_state, NewData}
             end;
         no_request ->
             keep_state_and_data
+    end.
+
+add_leader_query(Query, {_, Seqno}, ReplyTo,
+                 #data{leader_queries = Queries} = Data) ->
+    Key = {Seqno, make_ref()},
+    NewQueries = gb_trees:insert(Key, {Query, ReplyTo}, Queries),
+    run_leader_queries(Data#data{leader_queries = NewQueries}, []).
+
+run_leader_queries(#data{read_seqno = ReadSeqno,
+                         leader_queries = Queries} = Data, Effects) ->
+    case gb_trees:is_empty(Queries) of
+        true ->
+            {Data, Effects};
+        false ->
+            {{Seqno, _}, {Query, ReplyTo}, NewQueries} =
+                gb_trees:take_smallest(Queries),
+            case Seqno =< ReadSeqno of
+                true ->
+                    {reply, Reply, NewModData} =
+                        call_callback(handle_query, [Query], Data),
+                    NewData = set_mod_data(
+                                NewModData,
+                                Data#data{leader_queries = NewQueries}),
+                    NewEffects =
+                        reply_leader_request(ReplyTo, {ok, Reply}, Effects),
+                    run_leader_queries(NewData, NewEffects);
+                false ->
+                    {Data, Effects}
+            end
     end.
 
 handle_query(Query, From, _State, Data) ->
@@ -1388,10 +1449,12 @@ cleanup_after_leader(State, Data) ->
             %% not a need to synchronize with chronicle_agent as it was done
             %% previously.
 
-            %% For simplicity, we don't respond to inflight commands. This is
-            %% because eventually all other nodes should realize that this
-            %% node is not the leader anymore and will retry the requests.
-            Data#data{local_requests = #{}};
+            %% For simplicity, we don't respond to inflight commands or leader
+            %% queries. This is because eventually all other nodes should
+            %% realize that this node is not the leader anymore and will retry
+            %% the requests.
+            Data#data{local_requests = #{},
+                      leader_queries = gb_trees:empty()};
         #follower{} ->
             Sender = Data#data.leader_sender,
 
@@ -1413,8 +1476,9 @@ handle_seqno_committed(CommittedSeqno, State,
                        #data{read_seqno = ReadSeqno} = Data) ->
     case CommittedSeqno >= ReadSeqno of
         true ->
-            {NewData0, Effects} = read_log(CommittedSeqno, State, Data),
-            NewData = manage_sync_revision_requests(Data, NewData0),
+            {NewData0, Effects0} = read_log(CommittedSeqno, State, Data),
+            NewData1 = manage_sync_revision_requests(Data, NewData0),
+            {NewData, Effects} = run_leader_queries(NewData1, Effects0),
             maybe_publish_local_revision(State, NewData),
             handle_seqno_committed_next_state(Effects, State, NewData);
         false ->
