@@ -944,7 +944,15 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
                 {error, _} = Error ->
                     ?DEBUG("Failed to get leader vote from ~p: ~p",
                            [Peer, Error]),
-                    election_worker_loop(NewRefs, Quorum, Votes, Term)
+                    %% Don't wait for peers that may never respond (e.g. a
+                    %% partitioned node that's not yet detected as down) once
+                    %% quorum is out of reach. Fail and back off instead.
+                    case have_quorum(Votes ++ maps:values(NewRefs), Quorum) of
+                        true ->
+                            election_worker_loop(NewRefs, Quorum, Votes, Term);
+                        false ->
+                            {error, {no_quorum, Votes, Term}}
+                    end
             end;
         error ->
             %% Possible if we got a DOWN message from the peer, but it did end
