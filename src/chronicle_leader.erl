@@ -726,6 +726,11 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
             %% frequent vote requests could then keep it from ever
             %% completing. We don't run elections while checking anyway.
             {keep_state_and_data, {reply, From, {ok, LatestTerm}}};
+        {ok, LatestTerm} when is_record(State, candidate) ->
+            %% Keep running our own election: aborting it would leave both
+            %% candidates without a result if they ask each other at the same
+            %% time. If both win, term establishment picks one.
+            {keep_state_and_data, {reply, From, {ok, LatestTerm}}};
         {ok, LatestTerm} ->
             {next_state,
              #voted_for{peer = Candidate,
@@ -736,20 +741,17 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     end.
 
 check_consider_granting_vote(State) ->
-    case State of
-        #observer{} ->
+    case state_leader_info(State) of
+        no_leader ->
+            %% This includes running our own election and checking
+            %% membership: both may be stuck waiting on an unreachable peer,
+            %% and refusing votes meanwhile can prevent an election. Votes
+            %% are only advisory (term establishment is what guarantees
+            %% safety), so granting them to several candidates is safe. See
+            %% handle_request_vote/6 for why neither is interrupted.
             ok;
-        #voted_for{} ->
-            ok;
-        #candidate{} ->
-            {error, in_election};
-        #check_member{} ->
-            %% Membership checks may block for a long time on unreachable
-            %% peers. Refusing votes meanwhile can prevent an election. See
-            %% handle_request_vote/6 for why the check isn't interrupted.
-            ok;
-        _ ->
-            {error, {have_leader, state_leader_info(State)}}
+        LeaderInfo ->
+            {error, {have_leader, LeaderInfo}}
     end.
 
 check_grant_vote(HistoryId, PeerPosition, State) ->
