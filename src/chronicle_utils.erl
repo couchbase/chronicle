@@ -56,6 +56,10 @@
 
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
+-ifdef(TEST).
+-export([blackhole/2, clear_blackholes/0]).
+-endif.
+
 -ifdef(HAVE_SYNC_DIR).
 -on_load(init_sync_nif/0).
 -endif.
@@ -163,11 +167,58 @@ call_async(ServerRef, Tag, Request, Options) ->
 
 -spec send(any(), any(), send_options()) -> send_result().
 -ifdef(TEST).
-send(Name, Msg, Options) ->
-    {via, vnet, _} = Name,
+-define(BLACKHOLES, chronicle_test_blackholes).
+
+%% Makes send/3 silently drop all messages between two vnodes. Unlike
+%% vnet:disconnect/2, monitors don't fire, so peers keep waiting for
+%% responses: like a dead connection that net_kernel hasn't detected yet. The
+%% table is owned by the caller and goes away when the caller exits;
+%% clear_blackholes/0 empties it explicitly.
+%%
+%% Only send/3 (and so call_async/4) is affected: replies and messages sent
+%% via synchronous calls or plain ! still get through. That's enough for
+%% leader election and the proposer's requests to agents, which all go
+%% through send/3, so their replies are never produced. Catchup
+%% (chronicle_catchup) uses synchronous calls and isn't blocked.
+blackhole(VNode1, VNode2) ->
+    case ets:whereis(?BLACKHOLES) of
+        undefined ->
+            _ = ets:new(?BLACKHOLES, [named_table, public, set]);
+        _ ->
+            ok
+    end,
+    true = ets:insert(?BLACKHOLES, [{{VNode1, VNode2}}, {{VNode2, VNode1}}]),
+    ok.
+
+clear_blackholes() ->
+    try ets:delete_all_objects(?BLACKHOLES) of
+        true ->
+            ok
+    catch
+        error:badarg ->
+            ok
+    end.
+
+is_blackholed({ToVNode, _Name}) ->
     try
-        vnet:send(element(3, Name), Msg),
-        ok
+        ets:member(?BLACKHOLES, {vnet:vnode(), ToVNode})
+    catch
+        error:badarg ->
+            false
+    end;
+is_blackholed(_LocalName) ->
+    false.
+
+send(Name, Msg, Options) ->
+    {via, vnet, VName} = Name,
+    try
+        case is_blackholed(VName) of
+            true ->
+                ok;
+            false ->
+                _ = vnet:send(VName, Msg),
+                ok
+        end
     catch
         exit:{badarg, {_, _}} ->
             %% vnet:send() may fail with this error when Name can't be
