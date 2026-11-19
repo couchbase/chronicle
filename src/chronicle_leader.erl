@@ -720,6 +720,11 @@ handle_check_member_result(Result, Data) ->
 
 handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case check_grant_vote(HistoryId, Position, State) of
+        {ok, LatestTerm} when is_record(State, check_member) ->
+            %% Moving to voted_for would abort the membership check, and
+            %% frequent vote requests could then keep it from ever
+            %% completing. We don't run elections while checking anyway.
+            {keep_state_and_data, {reply, From, {ok, LatestTerm}}};
         {ok, LatestTerm} ->
             {next_state,
              #voted_for{peer = Candidate,
@@ -738,7 +743,10 @@ check_consider_granting_vote(State) ->
         #candidate{} ->
             {error, in_election};
         #check_member{} ->
-            {error, check_member};
+            %% Membership checks may block for a long time on unreachable
+            %% peers. Refusing votes meanwhile can prevent an election. See
+            %% handle_request_vote/6 for why the check isn't interrupted.
+            ok;
         _ ->
             {error, {have_leader, state_leader_info(State)}}
     end.
