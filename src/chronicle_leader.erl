@@ -607,15 +607,16 @@ handle_note_term_status(HistoryId, Term, Status, State, Data) ->
 handle_state_timeout(State, Data) ->
     ?DEBUG("State timeout when state is: ~p", [State]),
 
-    NewState =
-        case State of
-            #observer{} ->
-                #candidate{};
-            _ ->
-                make_observer(Data)
-        end,
-
-    {next_state, NewState, Data}.
+    case State of
+        #observer{} ->
+            {next_state, #candidate{}, Data};
+        #candidate{} ->
+            %% The election didn't conclude in time. Back off as if it
+            %% failed, so competing candidates desynchronize.
+            {next_state, make_observer(Data), backoff(Data)};
+        _ ->
+            {next_state, make_observer(Data), Data}
+    end.
 
 handle_heartbeat(LeaderInfo, State, Data) ->
     #{leader := Peer,
