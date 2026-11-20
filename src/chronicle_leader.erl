@@ -1206,12 +1206,8 @@ make_observer(#data{electable = Electable, removed = Removed}) ->
     #observer{electable = Electable, removed = Removed}.
 
 backoff(#data{backoff_factor = Factor} = Data) ->
-    case Factor >= ?MAX_BACKOFF of
-        true ->
-            Data;
-        false ->
-            Data#data{backoff_factor = Factor * 2}
-    end.
+    Data#data{backoff_factor = chronicle_utils:next_backoff(Factor,
+                                                            ?MAX_BACKOFF)}.
 
 reset_backoff(Data) ->
     Data#data{backoff_factor = 1}.

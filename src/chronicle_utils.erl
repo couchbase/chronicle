@@ -52,7 +52,8 @@
          shuffle/1,
          announce_important_change/1,
          is_function_exported/3,
-         read_int_from_file/2, store_int_to_file/2]).
+         read_int_from_file/2, store_int_to_file/2,
+         next_backoff/2]).
 
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
@@ -1016,3 +1017,16 @@ store_int_to_file(Path, Value) ->
       fun (Fd) ->
               file:write(Fd, [integer_to_binary(Value), $\n])
       end).
+
+%% Doubles a backoff factor, up to Max
+-spec next_backoff(pos_integer(), pos_integer()) -> pos_integer().
+next_backoff(Factor, Max) ->
+    min(Factor * 2, Max).
+
+-ifdef(TEST).
+next_backoff_test() ->
+    ?assertEqual(2, next_backoff(1, 16)),
+    ?assertEqual(16, next_backoff(8, 16)),
+    ?assertEqual(16, next_backoff(16, 16)),
+    ?assertEqual(10, next_backoff(8, 10)).
+-endif.
