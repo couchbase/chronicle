@@ -607,15 +607,16 @@ handle_note_term_status(HistoryId, Term, Status, State, Data) ->
 handle_state_timeout(State, Data) ->
     ?DEBUG("State timeout when state is: ~p", [State]),
 
-    NewState =
-        case State of
-            #observer{} ->
-                #candidate{};
-            _ ->
-                make_observer(Data)
-        end,
-
-    {next_state, NewState, Data}.
+    case State of
+        #observer{} ->
+            {next_state, #candidate{}, Data};
+        #candidate{} ->
+            %% The election didn't conclude in time. Back off as if it
+            %% failed, so competing candidates desynchronize.
+            {next_state, make_observer(Data), backoff(Data)};
+        _ ->
+            {next_state, make_observer(Data), Data}
+    end.
 
 handle_heartbeat(LeaderInfo, State, Data) ->
     #{leader := Peer,
@@ -720,6 +721,16 @@ handle_check_member_result(Result, Data) ->
 
 handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     case check_grant_vote(HistoryId, Position, State) of
+        {ok, LatestTerm} when is_record(State, check_member) ->
+            %% Moving to voted_for would abort the membership check, and
+            %% frequent vote requests could then keep it from ever
+            %% completing. We don't run elections while checking anyway.
+            {keep_state_and_data, {reply, From, {ok, LatestTerm}}};
+        {ok, LatestTerm} when is_record(State, candidate) ->
+            %% Keep running our own election: aborting it would leave both
+            %% candidates without a result if they ask each other at the same
+            %% time. If both win, term establishment picks one.
+            {keep_state_and_data, {reply, From, {ok, LatestTerm}}};
         {ok, LatestTerm} ->
             {next_state,
              #voted_for{peer = Candidate,
@@ -730,17 +741,17 @@ handle_request_vote(Candidate, HistoryId, Position, From, State, Data) ->
     end.
 
 check_consider_granting_vote(State) ->
-    case State of
-        #observer{} ->
+    case state_leader_info(State) of
+        no_leader ->
+            %% This includes running our own election and checking
+            %% membership: both may be stuck waiting on an unreachable peer,
+            %% and refusing votes meanwhile can prevent an election. Votes
+            %% are only advisory (term establishment is what guarantees
+            %% safety), so granting them to several candidates is safe. See
+            %% handle_request_vote/6 for why neither is interrupted.
             ok;
-        #voted_for{} ->
-            ok;
-        #candidate{} ->
-            {error, in_election};
-        #check_member{} ->
-            {error, check_member};
-        _ ->
-            {error, {have_leader, state_leader_info(State)}}
+        LeaderInfo ->
+            {error, {have_leader, LeaderInfo}}
     end.
 
 check_grant_vote(HistoryId, PeerPosition, State) ->
@@ -944,7 +955,15 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
                 {error, _} = Error ->
                     ?DEBUG("Failed to get leader vote from ~p: ~p",
                            [Peer, Error]),
-                    election_worker_loop(NewRefs, Quorum, Votes, Term)
+                    %% Don't wait for peers that may never respond (e.g. a
+                    %% partitioned node that's not yet detected as down) once
+                    %% quorum is out of reach. Fail and back off instead.
+                    case have_quorum(Votes ++ maps:values(NewRefs), Quorum) of
+                        true ->
+                            election_worker_loop(NewRefs, Quorum, Votes, Term);
+                        false ->
+                            {error, {no_quorum, Votes, Term}}
+                    end
             end;
         error ->
             %% Possible if we got a DOWN message from the peer, but it did end

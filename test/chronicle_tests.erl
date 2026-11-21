@@ -108,6 +108,7 @@ prepare_vnode_dir() ->
     chronicle_env:set_env(data_dir, Dir).
 
 teardown_vnet(Sups) ->
+    ok = chronicle_utils:clear_blackholes(),
     lists:foreach(
       fun (Sup) ->
               %% Supervisors are gen_server-s under the hood, hence the
@@ -578,6 +579,77 @@ partition_test__(Nodes) ->
                   end),
 
     ok.
+
+%% MB-75350: the leader gets cut off from the other voters. The connections
+%% go dead silently (no nodedown), as they do until net_kernel's tick timeout
+%% expires. Once the old leader can't reach anyone, a new leader should be
+%% elected quickly, whether the cuts happen together or one at a time.
+simultaneous_leader_partition_test_() ->
+    leader_partition_test_spec(0).
+
+staggered_leader_partition_test_() ->
+    leader_partition_test_spec(6000).
+
+leader_partition_test_spec(CutInterval) ->
+    Nodes = [a, b, c, d],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 60, fun () -> leader_partition_test__(Nodes, CutInterval) end}}.
+
+leader_partition_test__(Nodes, CutInterval) ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          ok = chronicle:provision(Machines)
+                  end),
+    add_voters(a, Nodes -- [a]),
+
+    Leader = wait_for_leader(Nodes, [], deadline(10000)),
+    Survivors = Nodes -- [Leader],
+
+    [First | Rest] = Survivors,
+    ok = chronicle_utils:blackhole(Leader, First),
+    lists:foreach(
+      fun (Survivor) ->
+              timer:sleep(CutInterval),
+              ok = chronicle_utils:blackhole(Leader, Survivor)
+      end, Rest),
+
+    Start = erlang:monotonic_time(millisecond),
+    NewLeader = wait_for_leader(Survivors, [Leader], Start + 10000),
+    Elapsed = erlang:monotonic_time(millisecond) - Start,
+    ?debugFmt("Old leader: ~p, new leader: ~p, elected ~bms after last cut",
+              [Leader, NewLeader, Elapsed]).
+
+deadline(Timeout) ->
+    erlang:monotonic_time(millisecond) + Timeout.
+
+%% Waits until all Nodes agree on an established leader not in Excluded.
+wait_for_leader(Nodes, Excluded, Deadline) ->
+    Leaders = lists:usort(
+                [rpc_node(N, fun chronicle_leader:get_leader/0)
+                 || N <- Nodes]),
+    case Leaders of
+        [{Leader, _}] ->
+            case lists:member(Leader, Excluded) of
+                false ->
+                    Leader;
+                true ->
+                    retry_wait_for_leader(Nodes, Excluded, Deadline, Leaders)
+            end;
+        _ ->
+            retry_wait_for_leader(Nodes, Excluded, Deadline, Leaders)
+    end.
+
+retry_wait_for_leader(Nodes, Excluded, Deadline, Leaders) ->
+    case erlang:monotonic_time(millisecond) < Deadline of
+        true ->
+            timer:sleep(100),
+            wait_for_leader(Nodes, Excluded, Deadline);
+        false ->
+            error({no_leader, Leaders})
+    end.
 
 proposer_crash_test_() ->
     Nodes = [a,b,c,d,e],
