@@ -29,8 +29,8 @@
 
 %% APIs
 -export([event_manager/1]).
--export([add/3, add/4]).
--export([set/3, set/4, set/5]).
+-export([add/3, add/4, add/5]).
+-export([set/3, set/4, set/5, set/6]).
 -export([update/3, update/4]).
 -export([delete/2, delete/3, delete/4]).
 -export([multi/2, multi/3]).
@@ -41,10 +41,19 @@
 -export([get_full_snapshot/1, get_full_snapshot/2]).
 -export([get_revision/1]).
 -export([sync/1, sync/2]).
+-export([touch/2, touch/3]).
 
 -export([txn/2, txn/3, ro_txn/2, ro_txn/3]).
--export([txn_get/2, txn_get_many/2]).
+-export([txn_get/2, txn_get_key_opts/2, txn_get_many/2]).
 -export([get_txn_default_timeout/0]).
+
+%% internal
+-export([expire/3]).
+
+%% for use by expire handlers
+-export([expire_updates/2]).
+
+-export_type([key/0, full_snapshot/0]).
 
 %% callbacks
 -export([specs/2,
@@ -56,6 +65,8 @@
 
 -define(DEFAULT_TIMEOUT, 15000).
 -define(DEFAULT_RETRIES, 10).
+-define(DEFAULT_MAX_TTL, 30 * 24 * 60 * 60 * 1000).
+-define(TTL_COMPAT_VERSION, 1).
 
 -type name() :: atom().
 -type key() :: any().
@@ -64,8 +75,12 @@
 -type revisionreq() :: any | revision().
 
 -type read_consistency() :: local | quorum.
--type options() :: #{timeout => timeout(),
-                     read_consistency => read_consistency()}.
+-type write_options() :: #{timeout => timeout()}.
+-type read_options() :: #{timeout => timeout(),
+                          read_consistency => read_consistency()}.
+%% ttl is the minimum time in milliseconds that a key lives for, up to the
+%% max_ttl setting. Refused until the cluster compat version is at least 1
+-type key_options() :: #{ttl => pos_integer()}.
 -type op_result() :: {ok, revision()}
                    | {error, {conflict, revision()}}.
 
@@ -73,7 +88,10 @@
                meta_table,
                kv_table,
                event_mgr,
-               initialized}).
+               initialized,
+               %% We track if we are the leader node and only pass ttl writes
+               %% for tracking if true
+               is_leader = false}).
 
 -ifndef(TEST).
 -type event_manager_name() :: atom().
@@ -83,16 +101,20 @@
 
 sanitize_state(Fun, State) ->
     maps:map(
-      fun (Key, {Value, Rev}) ->
-              {Fun(Key, Value), Rev}
+      fun (Key, Entry) ->
+              setelement(1, Entry, Fun(Key, element(1, Entry)))
       end, State).
 
 sanitize_command(Fun, Command) ->
     case Command of
         {add, Key, Value} ->
             {add, Key, Fun(Key, Value)};
+        {add, Key, Value, KeyOpts} ->
+            {add, Key, Fun(Key, Value), KeyOpts};
         {set, Key, Value, ExpectedRevision} ->
             {set, Key, Fun(Key, Value), ExpectedRevision};
+        {set, Key, Value, ExpectedRevision, KeyOpts} ->
+            {set, Key, Fun(Key, Value), ExpectedRevision, KeyOpts};
         {transaction, Conditions, Updates} ->
             {transaction, Conditions,
              lists:map(
@@ -100,6 +122,8 @@ sanitize_command(Fun, Command) ->
                        case Update of
                            {set, Key, Value} ->
                                {set, Key, Fun(Key, Value)};
+                           {set, Key, Value, KeyOpts} ->
+                               {set, Key, Fun(Key, Value), KeyOpts};
                            _ ->
                                Update
                        end
@@ -119,9 +143,14 @@ event_manager(Name) ->
 add(Name, Key, Value) ->
     add(Name, Key, Value, #{}).
 
--spec add(name(), key(), value(), options()) -> op_result().
+-spec add(name(), key(), value(), write_options()) -> op_result().
 add(Name, Key, Value, Opts) ->
-    submit_command(Name, {add, Key, Value},
+    add(Name, Key, Value, #{}, Opts).
+
+-spec add(name(), key(), value(), key_options(), write_options()) ->
+          op_result().
+add(Name, Key, Value, KeyOpts, Opts) ->
+    submit_command(Name, with_key_opts(Name, {add, Key, Value}, KeyOpts),
                    get_timeout(Name, Opts)).
 
 -spec set(name(), key(), value()) -> op_result().
@@ -132,10 +161,18 @@ set(Name, Key, Value) ->
 set(Name, Key, Value, ExpectedRevision) ->
     set(Name, Key, Value, ExpectedRevision, #{}).
 
--spec set(name(), key(), value(), revisionreq(), options()) -> op_result().
+-spec set(name(), key(), value(), revisionreq(), write_options()) ->
+          op_result().
 set(Name, Key, Value, ExpectedRevision, Opts) ->
+    set(Name, Key, Value, ExpectedRevision, #{}, Opts).
+
+-spec set(name(), key(), value(), revisionreq(), key_options(),
+          write_options()) ->
+          op_result().
+set(Name, Key, Value, ExpectedRevision, KeyOpts, Opts) ->
     submit_command(Name,
-                   {set, Key, Value, ExpectedRevision},
+                   with_key_opts(Name, {set, Key, Value, ExpectedRevision},
+                                 KeyOpts),
                    get_timeout(Name, Opts)).
 
 -type update_result() :: {ok, revision()}
@@ -166,7 +203,7 @@ delete(Name, Key) ->
 delete(Name, Key, ExpectedRevision) ->
     delete(Name, Key, ExpectedRevision, #{}).
 
--spec delete(name(), key(), revisionreq(), options()) -> op_result().
+-spec delete(name(), key(), revisionreq(), write_options()) -> op_result().
 delete(Name, Key, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
@@ -174,8 +211,11 @@ delete(Name, Key, ExpectedRevision, Opts) ->
 
 -type multi_ops() :: [multi_op()].
 -type multi_op() :: {add, key(), value()}
+                  | {add, key(), value(), key_options()}
                   | {set, key(), value()}
+                  | {set, key(), value(), key_options()}
                   | {set, key(), value(), revisionreq()}
+                  | {set, key(), value(), revisionreq(), key_options()}
                   | {delete, key()}
                   | {delete, key(), revisionreq()}.
 
@@ -183,9 +223,10 @@ delete(Name, Key, ExpectedRevision, Opts) ->
 multi(Name, Updates) ->
     multi(Name, Updates, #{}).
 
--spec multi(name(), multi_ops(), options()) -> op_result().
+-spec multi(name(), multi_ops(), write_options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
+    check_updates_key_opts(Name, TxnUpdates),
     submit_transaction(Name, TxnConditions, TxnUpdates,
                        get_timeout(Name, Opts)).
 
@@ -200,14 +241,26 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
             multi_to_txn_loop(Updates,
                               [{missing, Key} | TxnConditions],
                               [{set, Key, Value} | TxnUpdates]);
+        {add, Key, Value, KeyOpts} ->
+            multi_to_txn_loop(Updates,
+                              [{missing, Key} | TxnConditions],
+                              [{set, Key, Value, KeyOpts} | TxnUpdates]);
         {set, Key, Value} ->
             multi_to_txn_loop(Updates,
                               TxnConditions,
                               [{set, Key, Value} | TxnUpdates]);
+        {set, Key, Value, KeyOpts} when is_map(KeyOpts) ->
+            multi_to_txn_loop(Updates,
+                              TxnConditions,
+                              [{set, Key, Value, KeyOpts} | TxnUpdates]);
         {set, Key, Value, Revision} ->
             multi_to_txn_loop(Updates,
                               [{revision, Key, Revision} | TxnConditions],
                               [{set, Key, Value} | TxnUpdates]);
+        {set, Key, Value, Revision, KeyOpts} ->
+            multi_to_txn_loop(Updates,
+                              [{revision, Key, Revision} | TxnConditions],
+                              [{set, Key, Value, KeyOpts} | TxnUpdates]);
         {delete, Key} ->
             multi_to_txn_loop(Updates,
                               TxnConditions,
@@ -219,10 +272,15 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
     end.
 
 -type snapshot() :: #{key() => {value(), revision()}}.
+%% Entries carry key options only when the key has some
+-type full_snapshot() :: #{key() => {value(), revision()}
+                                   | {value(), revision(), key_options()}}.
 -type txn_ops() :: [txn_op()].
 -type txn_op() :: {set, key(), value()}
-                | {delete, key()}.
--type txn_options() :: options() | #{retries => non_neg_integer()}.
+                | {set, key(), value(), key_options()}
+                | {delete, key()}
+                | {expire, key()}.
+-type txn_options() :: read_options() | #{retries => non_neg_integer()}.
 -type txn_fun(Data) :: fun ((Data) ->
                                {commit, txn_ops()} |
                                {commit, txn_ops(), Extra::any()} |
@@ -251,6 +309,24 @@ transaction(Name, Keys, Fun, Opts) ->
 
 -spec txn_get(key(), txn_opaque()) -> get_result().
 txn_get(Key, Txn) ->
+    case txn_get_entry(Key, Txn) of
+        {ok, Entry} ->
+            {ok, value_rev(Entry)};
+        {error, not_found} = Error ->
+            Error
+    end.
+
+-spec txn_get_key_opts(key(), txn_opaque()) ->
+          {ok, key_options()} | {error, not_found}.
+txn_get_key_opts(Key, Txn) ->
+    case txn_get_entry(Key, Txn) of
+        {ok, Entry} ->
+            {ok, key_opts(Entry)};
+        {error, not_found} = Error ->
+            Error
+    end.
+
+txn_get_entry(Key, Txn) ->
     case Txn of
         {txn_fast, Table, TableSeqno} ->
             txn_get_from_table(Key, Table, TableSeqno);
@@ -280,6 +356,7 @@ txn(Name, Fun, Opts) ->
     BuildTxn = fun (TRef, TxnOpts) ->
                        case prepare_txn(Name, Fun, TRef, TxnOpts) of
                            {ok, {TxnResult, Conditions, _Revision}} ->
+                               check_txn_max_ttl(Name, TxnResult),
                                {ok, {TxnResult, Conditions}};
                            Other ->
                                Other
@@ -370,7 +447,7 @@ submit_transaction(Name, Conditions, Updates, Timeout) ->
 ro_txn(Name, Fun) ->
     ro_txn(Name, Fun, #{}).
 
--spec ro_txn(name(), ro_txn_fun(), options()) -> ro_txn_result().
+-spec ro_txn(name(), ro_txn_fun(), read_options()) -> ro_txn_result().
 ro_txn(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Name, Opts)),
     case prepare_txn(Name, Fun, TRef, Opts) of
@@ -386,7 +463,7 @@ ro_txn(Name, Fun, Opts) ->
 get(Name, Key) ->
     get(Name, Key, #{}).
 
--spec get(name(), key(), options()) -> get_result().
+-spec get(name(), key(), read_options()) -> get_result().
 get(Name, Key, Opts) ->
     optimistic_query(
       Name, {get, Key}, get_timeout(Name, Opts), Opts,
@@ -440,12 +517,14 @@ rewrite(Name, Fun, Opts) ->
     perform_txn(Name, BuildTxn, Opts).
 
 -type get_snapshot_result() :: {ok, {snapshot(), revision()}}.
+-type get_full_snapshot_result() :: {ok, {full_snapshot(), revision()}}.
 
--spec get_full_snapshot(name()) -> get_snapshot_result().
+-spec get_full_snapshot(name()) -> get_full_snapshot_result().
 get_full_snapshot(Name) ->
     get_full_snapshot(Name, #{}).
 
--spec get_full_snapshot(name(), options()) -> get_snapshot_result().
+-spec get_full_snapshot(name(), read_options()) ->
+          get_full_snapshot_result().
 get_full_snapshot(Name, Opts) ->
     submit_query(Name, get_full_snapshot, get_timeout(Name, Opts), Opts).
 
@@ -453,7 +532,8 @@ get_full_snapshot(Name, Opts) ->
 get_snapshot(Name, Keys) ->
     get_snapshot(Name, Keys, #{}).
 
--spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
+-spec get_snapshot(name(), [key()], read_options()) ->
+          get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
     optimistic_query(
       Name, {get_snapshot, Keys}, get_timeout(Name, Opts), Opts,
@@ -529,6 +609,26 @@ sync(Name, Type, Timeout) ->
             chronicle_rsm:sync(Name, Timeout)
     end.
 
+-type touch_result() :: ok
+                      | {error, not_found
+                              | no_ttl
+                              | expiring
+                              | {conflict, revision()}}.
+
+%% Restarts the ttl of each key on the leader without writing to the quorum.
+%% A key that the leader is already expiring can't be touched
+-spec touch(name(), [{key(), revisionreq()}]) ->
+          {ok, #{key() => touch_result()}}.
+touch(Name, Keys) ->
+    touch(Name, Keys, #{}).
+
+-spec touch(name(), [{key(), revisionreq()}], write_options()) ->
+          {ok, #{key() => touch_result()}}.
+touch(Name, Keys, Opts) ->
+    check_ttl_supported(),
+    TRef = start_timeout(get_timeout(Name, Opts)),
+    chronicle_rsm:leader_query(Name, {touch, Keys}, TRef).
+
 %% callbacks
 specs(Name, _Args) ->
     EventName = event_manager_name(Name),
@@ -537,7 +637,12 @@ specs(Name, _Args) ->
              restart => permanent,
              shutdown => brutal_kill,
              type => worker},
-    [Spec].
+    ExpirySpec = #{id => chronicle_kv_expiry,
+                   start => {chronicle_kv_expiry, start_link, [Name]},
+                   restart => permanent,
+                   shutdown => brutal_kill,
+                   type => worker},
+    [Spec, ExpirySpec].
 
 init(Name, []) ->
     %% In order to prevent client from reading from not fully initialized ets
@@ -557,18 +662,30 @@ post_init(_Revision, _State, #data{kv_table = KvTable} = Data) ->
     publish_kv_table(KvTable, Data),
     {ok, Data#data{initialized = true}}.
 
-state_enter(_, _, _, Data) ->
-    {ok, Data}.
+state_enter(leader, _, State, #data{name = Name} = Data) ->
+    chronicle_kv_expiry:activate(Name, ttl_keys(State)),
+    {ok, Data#data{is_leader = true}};
+state_enter(_, _, _, #data{name = Name} = Data) ->
+    chronicle_kv_expiry:deactivate(Name),
+    {ok, Data#data{is_leader = false}}.
 
 apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
                #data{name = Name,
                      kv_table = OldKvTable,
-                     initialized = Initialized} = Data) ->
+                     initialized = Initialized,
+                     is_leader = IsLeader} = Data) ->
     KvTable = create_kv_table(Name),
     chronicle_utils:maps_foreach(
-      fun (Key, ValueRev) ->
-              true = ets:insert_new(KvTable, {Key, ValueRev})
+      fun (Key, Entry) ->
+              true = ets:insert_new(KvTable, {Key, Entry})
       end, SnapshotState),
+
+    case IsLeader of
+        true ->
+            chronicle_kv_expiry:activate(Name, ttl_keys(SnapshotState));
+        false ->
+            ok
+    end,
 
     case Initialized of
         true ->
@@ -596,14 +713,23 @@ handle_query({get_snapshot, Keys}, StateRevision, State, Data) ->
     handle_get_snapshot(Keys, StateRevision, State, Data);
 handle_query({prepare_txn, Fun}, StateRevision, State, Data) ->
     handle_prepare_txn(Fun, StateRevision, State, Data);
+handle_query({touch, Keys}, _StateRevision, State, Data) ->
+    handle_touch(Keys, State, Data);
 handle_query(_, _, _, Data) ->
     {reply, {error, unknown_query}, Data}.
 
 apply_command(_, {add, Key, Value}, Revision, StateRevision, State, Data) ->
-    apply_add(Key, Value, Revision, StateRevision, State, Data);
+    apply_add(Key, Value, #{}, Revision, StateRevision, State, Data);
+apply_command(_, {add, Key, Value, KeyOpts}, Revision,
+              StateRevision, State, Data) ->
+    apply_add(Key, Value, KeyOpts, Revision, StateRevision, State, Data);
 apply_command(_, {set, Key, Value, ExpectedRevision}, Revision,
               StateRevision, State, Data) ->
-    apply_set(Key, Value, ExpectedRevision,
+    apply_set(Key, Value, #{}, ExpectedRevision,
+              Revision, StateRevision, State, Data);
+apply_command(_, {set, Key, Value, ExpectedRevision, KeyOpts}, Revision,
+              StateRevision, State, Data) ->
+    apply_set(Key, Value, KeyOpts, ExpectedRevision,
               Revision, StateRevision, State, Data);
 apply_command(_, {delete, Key, ExpectedRevision}, Revision,
               StateRevision, State, Data) ->
@@ -619,8 +745,8 @@ handle_config(ConfigEntry, Revision, _StateRevision, State, Data) ->
     #log_entry{value = Config} = ConfigEntry,
     case chronicle_config:get_branch_opaque(Config) of
         {ok, Opaque} ->
-            NewState = handle_update('$failover_opaque',
-                                     Opaque, Revision, State, Data),
+            NewState = handle_update('$failover_opaque', Opaque,
+                                     #{}, Revision, State, Data),
             {ok, NewState, Data, []};
         no_branch ->
             {ok, State, Data, []}
@@ -672,13 +798,163 @@ handle_read_consistency(Name, Timeout, Opts) ->
     Consistency = maps:get(read_consistency, Opts, local),
     sync(Name, Consistency, Timeout).
 
+with_key_opts(Name, Command, KeyOpts) ->
+    check_key_opts(Name, KeyOpts),
+
+    %% Commands without key options keep their original form, so old nodes
+    %% can still apply them
+    case map_size(KeyOpts) of
+        0 ->
+            Command;
+        _ ->
+            erlang:append_element(Command, KeyOpts)
+    end.
+
+check_key_opts(Name, KeyOpts) ->
+    case valid_key_opts(KeyOpts) of
+        true ->
+            ok;
+        false ->
+            error({bad_key_opts, KeyOpts})
+    end,
+    check_max_ttl(Name, KeyOpts).
+
+check_updates_key_opts(Name, Updates) ->
+    lists:foreach(
+      fun ({set, _Key, _Value, KeyOpts}) ->
+              check_key_opts(Name, KeyOpts);
+          (_) ->
+              ok
+      end, Updates).
+
+valid_key_opts(KeyOpts) when is_map(KeyOpts) ->
+    lists:all(fun valid_key_opt/1, maps:to_list(KeyOpts));
+valid_key_opts(_) ->
+    false.
+
+valid_key_opt({ttl, TTL}) when is_integer(TTL), TTL > 0 ->
+    true;
+valid_key_opt(_) ->
+    false.
+
+%% Checked before submitting rather than on apply, as the setting may differ
+%% between nodes
+check_max_ttl(Name, #{ttl := TTL} = KeyOpts) ->
+    case TTL =< get_opt_default(Name, max_ttl, ?DEFAULT_MAX_TTL) of
+        true ->
+            ok;
+        false ->
+            error({bad_key_opts, KeyOpts})
+    end;
+check_max_ttl(_Name, _KeyOpts) ->
+    ok.
+
+check_updates_max_ttl(Name, Updates) when is_list(Updates) ->
+    lists:foreach(
+      fun ({set, _Key, _Value, KeyOpts}) ->
+              check_max_ttl(Name, KeyOpts);
+          (_) ->
+              ok
+      end, Updates);
+check_updates_max_ttl(_Name, _Updates) ->
+    ok.
+
+check_txn_max_ttl(Name, TxnResult) ->
+    case TxnResult of
+        {commit, Updates} ->
+            check_updates_max_ttl(Name, Updates);
+        {commit, Updates, _Extra} ->
+            check_updates_max_ttl(Name, Updates);
+        {abort, _} ->
+            ok
+    end.
+
+-type expire_handler() :: fun (([{key(), revision()}], txn_opaque()) ->
+                                     txn_ops()).
+
+%% Runs on the leader. The handler builds the updates so that an RSM can
+%% change other keys in the same transaction as the expiry
+-spec expire(name(), [{key(), revision()}], timeout()) -> txn_result().
+expire(Name, Keys, Timeout) ->
+    Handler = get_expire_handler(Name),
+    txn(Name,
+        fun (Txn) ->
+                case Handler(Keys, Txn) of
+                    [] ->
+                        {abort, {ok, nothing_to_expire}};
+                    Updates ->
+                        {commit, Updates}
+                end
+        end, #{timeout => Timeout}).
+
+-spec get_expire_handler(name()) -> expire_handler().
+get_expire_handler(Name) ->
+    case chronicle_env:kv_expire_handler(Name) of
+        {ok, Handler} ->
+            Handler;
+        undefined ->
+            fun expire_updates/2;
+        {error, Error} ->
+            error(Error)
+    end.
+
+%% Expires the keys that haven't been rewritten since they were picked
+-spec expire_updates([{key(), revision()}], txn_opaque()) -> txn_ops().
+expire_updates(Keys, Txn) ->
+    lists:filtermap(
+      fun ({Key, Revision}) ->
+              case txn_get(Key, Txn) of
+                  {ok, {_, Revision}} ->
+                      {true, {expire, Key}};
+                  _ ->
+                      false
+              end
+      end, Keys).
+
 submit_command(Name, Command, Timeout) ->
+    check_command_supported(Command),
     TRef = start_timeout(Timeout),
     case chronicle_rsm:command(Name, Command, TRef) of
         {error, {raise, Error}} ->
             error(Error);
         Other ->
             Other
+    end.
+
+%% Old nodes reject ttl commands whilst new nodes apply them, so they are
+%% refused until the cluster compat version shows every node supports them
+check_command_supported(Command) ->
+    case is_ttl_command(Command) of
+        true ->
+            check_ttl_supported();
+        false ->
+            ok
+    end.
+
+is_ttl_command({add, _Key, _Value, _KeyOpts}) ->
+    true;
+is_ttl_command({set, _Key, _Value, _ExpectedRevision, _KeyOpts}) ->
+    true;
+is_ttl_command({transaction, _Conditions, Updates}) when is_list(Updates) ->
+    lists:any(fun is_ttl_update/1, Updates);
+is_ttl_command(_Command) ->
+    false.
+
+is_ttl_update({set, _Key, _Value, _KeyOpts}) ->
+    true;
+is_ttl_update({expire, _Key}) ->
+    true;
+is_ttl_update(_Update) ->
+    false.
+
+check_ttl_supported() ->
+    #metadata{committed_config = ConfigEntry} = chronicle_agent:get_metadata(),
+    Version = chronicle_config:get_compat_version(ConfigEntry#log_entry.value),
+    case Version >= ?TTL_COMPAT_VERSION of
+        true ->
+            ok;
+        false ->
+            error({unsupported_compat_version, Version, ?TTL_COMPAT_VERSION})
     end.
 
 handle_rewrite(Fun, StateRevision, State, Data) ->
@@ -696,17 +972,19 @@ handle_rewrite(Fun, StateRevision, State, Data) ->
 
 build_rewrite_updates(Fun, State) ->
     maps:fold(
-      fun (Key, {Value, _Rev}, Acc) ->
+      fun (Key, Entry, Acc) ->
+              {Value, _Rev} = value_rev(Entry),
+              KeyOpts = key_opts(Entry),
               case Fun(Key, Value) of
                   {update, NewValue} ->
-                      [{set, Key, NewValue} | Acc];
+                      [set_update(Key, NewValue, KeyOpts) | Acc];
                   {update, NewKey, NewValue} ->
                       case Key =:= NewKey of
                           true ->
-                              [{set, Key, NewValue} | Acc];
+                              [set_update(Key, NewValue, KeyOpts) | Acc];
                           false ->
                               [{delete, Key},
-                               {set, NewKey, NewValue} | Acc]
+                               set_update(NewKey, NewValue, KeyOpts) | Acc]
                       end;
                   keep ->
                       Acc;
@@ -715,22 +993,58 @@ build_rewrite_updates(Fun, State) ->
               end
       end, [], State).
 
+%% Preserve key options so that a rewrite doesn't drop a ttl
+set_update(Key, Value, KeyOpts) when map_size(KeyOpts) =:= 0 ->
+    {set, Key, Value};
+set_update(Key, Value, KeyOpts) ->
+    {set, Key, Value, KeyOpts}.
+
 handle_get(Key, State, Data) ->
     Reply =
         case maps:find(Key, State) of
-            {ok, _} = Ok ->
-                Ok;
+            {ok, Entry} ->
+                {ok, value_rev(Entry)};
             error ->
                 {error, not_found}
         end,
 
     {reply, Reply, Data}.
 
+%% The expiry server is called rather than cast to, so that it has seen every
+%% key tracked so far and the reply reflects the touch
+handle_touch(Keys, State, #data{name = Name} = Data) ->
+    {Results, ToTouch} =
+        lists:foldl(
+          fun ({Key, ExpectedRevision}, {AccResults, AccToTouch}) ->
+                  case check_touch(Key, ExpectedRevision, State) of
+                      {ok, Revision} ->
+                          {AccResults, [{Key, Revision} | AccToTouch]};
+                      {error, _} = Error ->
+                          {AccResults#{Key => Error}, AccToTouch}
+                  end
+          end, {#{}, []}, Keys),
+    Touched = chronicle_kv_expiry:touch(Name, ToTouch),
+    {reply, {ok, maps:merge(Results, Touched)}, Data}.
+
+check_touch(Key, ExpectedRevision, State) ->
+    case maps:find(Key, State) of
+        {ok, {_, Revision, #{ttl := _}}} when ExpectedRevision =:= any;
+                                               ExpectedRevision =:= Revision ->
+            {ok, Revision};
+        {ok, {_, Revision, #{ttl := _}}} ->
+            {error, {conflict, Revision}};
+        {ok, _} ->
+            {error, no_ttl};
+        error ->
+            {error, not_found}
+    end.
+
 handle_get_full_snapshot(StateRevision, State, Data) ->
     {reply, {ok, {State, StateRevision}}, Data}.
 
 handle_get_snapshot(Keys, StateRevision, State, Data) ->
-    Snapshot = maps:with(Keys, State),
+    Snapshot = maps:map(fun (_, Entry) -> value_rev(Entry) end,
+                        maps:with(Keys, State)),
     {reply, {ok, {Snapshot, StateRevision}}, Data}.
 
 handle_prepare_txn(Fun, StateRevision, State, Data) ->
@@ -745,21 +1059,24 @@ handle_prepare_txn(Fun, StateRevision, State, Data) ->
 
     {reply, Result, Data}.
 
-apply_add(Key, Value, Revision, StateRevision, State, Data) ->
+apply_add(Key, Value, KeyOpts, Revision, StateRevision, State, Data) ->
     case check_condition({missing, Key}, Revision, StateRevision, State) of
         ok ->
-            NewState = handle_update(Key, Value, Revision, State, Data),
+            NewState =
+                handle_update(Key, Value, KeyOpts, Revision, State, Data),
             Reply = {ok, Revision},
             {reply, Reply, NewState, Data};
         {error, _} = Error ->
             {reply, Error, State, Data}
     end.
 
-apply_set(Key, Value, ExpectedRevision, Revision, StateRevision, State, Data) ->
+apply_set(Key, Value, KeyOpts, ExpectedRevision,
+          Revision, StateRevision, State, Data) ->
     case check_condition({revision, Key, ExpectedRevision},
                          Revision, StateRevision, State) of
         ok ->
-            NewState = handle_update(Key, Value, Revision, State, Data),
+            NewState =
+                handle_update(Key, Value, KeyOpts, Revision, State, Data),
             Reply = {ok, Revision},
             {reply, Reply, NewState, Data};
         {error, _} = Error ->
@@ -809,6 +1126,10 @@ check_transaction_updates(Updates) ->
                                   true;
                               {set, _, _} ->
                                   true;
+                              {set, _, _, KeyOpts} ->
+                                  valid_key_opts(KeyOpts);
+                              {expire, _} ->
+                                  true;
                               _ ->
                                   false
                           end
@@ -840,9 +1161,19 @@ apply_transaction_updates(Updates, Revision, State, Data) ->
       fun (Update, AccState) ->
               case Update of
                   {set, Key, Value} ->
-                      handle_update(Key, Value, Revision, AccState, Data);
+                      handle_update(Key, Value, #{}, Revision, AccState, Data);
+                  {set, Key, Value, KeyOpts} ->
+                      handle_update(Key, Value, KeyOpts, Revision,
+                                    AccState, Data);
                   {delete, Key} ->
-                      handle_delete(Key, Revision, AccState, Data)
+                      handle_delete(Key, Revision, AccState, Data);
+                  {expire, Key} ->
+                      case maps:is_key(Key, AccState) of
+                          true ->
+                              handle_delete(Key, Revision, AccState, Data);
+                          false ->
+                              AccState
+                      end
               end
       end, State, Updates).
 
@@ -862,7 +1193,8 @@ condition_holds({revision, _Key, any}, _StateRevision, _State) ->
     true;
 condition_holds({revision, Key, Revision}, _StateRevision, State) ->
     case maps:find(Key, State) of
-        {ok, {_, OurRevision}} ->
+        {ok, Entry} ->
+            {_, OurRevision} = value_rev(Entry),
             OurRevision =:= Revision;
         error ->
             false
@@ -871,16 +1203,65 @@ condition_holds({revision, Key, Revision}, _StateRevision, State) ->
 event_manager_name(Name) ->
     list_to_atom(atom_to_list(Name) ++ "-events").
 
-handle_update(Key, Value, Revision, State, #data{kv_table = Table} = Data) ->
-    ValueRev = {Value, Revision},
-    ets:insert(Table, {Key, ValueRev}),
+%% State entries carry key options only when there are some, so states
+%% without them keep the format older nodes understand
+make_entry(Value, Revision, KeyOpts) when map_size(KeyOpts) =:= 0 ->
+    {Value, Revision};
+make_entry(Value, Revision, KeyOpts) ->
+    {Value, Revision, KeyOpts}.
+
+value_rev({_Value, _Revision} = ValueRev) ->
+    ValueRev;
+value_rev({Value, Revision, _KeyOpts}) ->
+    {Value, Revision}.
+
+key_opts({_Value, _Revision}) ->
+    #{};
+key_opts({_Value, _Revision, KeyOpts}) ->
+    KeyOpts.
+
+ttl_keys(State) ->
+    maps:fold(
+      fun (Key, {_, Revision, #{ttl := TTL}}, Acc) ->
+              Acc#{Key => {Revision, TTL}};
+          (_, _, Acc) ->
+              Acc
+      end, #{}, State).
+
+handle_update(Key, Value, KeyOpts, Revision, State,
+              #data{kv_table = Table} = Data) ->
+    Entry = make_entry(Value, Revision, KeyOpts),
+    ets:insert(Table, {Key, Entry}),
     notify_updated(Key, Revision, Value, Data),
-    maps:put(Key, ValueRev, State).
+    case maps:find(ttl, KeyOpts) of
+        {ok, TTL} ->
+            track_ttl(Key, Revision, TTL, Data);
+        error ->
+            untrack_ttl(Key, State, Data)
+    end,
+    maps:put(Key, Entry, State).
 
 handle_delete(Key, Revision, State, #data{kv_table = Table} = Data) ->
     ets:delete(Table, Key),
     notify_deleted(Key, Revision, Data),
+    untrack_ttl(Key, State, Data),
     maps:remove(Key, State).
+
+track_ttl(Key, Revision, TTL, #data{is_leader = true, name = Name}) ->
+    chronicle_kv_expiry:track(Name, Key, Revision, TTL);
+track_ttl(_Key, _Revision, _TTL, _Data) ->
+    ok.
+
+%% State is from before the update, as only a key that had a ttl is tracked
+untrack_ttl(Key, State, #data{is_leader = true, name = Name}) ->
+    case maps:find(Key, State) of
+        {ok, {_, _, #{ttl := _}}} ->
+            chronicle_kv_expiry:untrack(Name, Key);
+        _ ->
+            ok
+    end;
+untrack_ttl(_Key, _State, _Data) ->
+    ok.
 
 notify(Event, #data{initialized = true, event_mgr = Mgr}) ->
     gen_event:notify(Mgr, Event);
@@ -905,10 +1286,12 @@ notify_snapshot_installed(Revision, Data) ->
 notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
                      #data{initialized = true, event_mgr = Mgr}) ->
     chronicle_utils:maps_foreach(
-      fun (Key, {Value, Rev}) ->
+      fun (Key, Entry) ->
+              {Value, Rev} = value_rev(Entry),
               Notify =
                   case maps:find(Key, OldSnapshot) of
-                      {ok, {_OldValue, OldRev}} ->
+                      {ok, OldEntry} ->
+                          {_OldValue, OldRev} = value_rev(OldEntry),
                           Rev =/= OldRev;
                       error ->
                           true
@@ -941,19 +1324,34 @@ notify_snapshot_diff(_, _, _, _) ->
     ok.
 
 -ifdef(TEST).
+is_ttl_command_test() ->
+    ?assert(is_ttl_command({add, k, v, #{ttl => 1}})),
+    ?assert(is_ttl_command({set, k, v, any, #{ttl => 1}})),
+    ?assert(is_ttl_command({transaction, [], [{set, k, v, #{}}]})),
+    ?assert(is_ttl_command({transaction, [], [{delete, k}, {expire, k}]})),
+    ?assertNot(is_ttl_command({add, k, v})),
+    ?assertNot(is_ttl_command({set, k, v, any})),
+    ?assertNot(is_ttl_command({delete, k, any})),
+    ?assertNot(is_ttl_command({transaction, [], [{set, k, v}, {delete, k}]})).
+
 notify_snapshot_diff_test() ->
     Rev = {<<"history">>, 10},
     OldSnapshot = #{unchanged => {a, {<<"history">>, 1}},
                     changed => {b, {<<"history">>, 2}},
-                    deleted => {c, {<<"history">>, 3}}},
+                    deleted => {c, {<<"history">>, 3}},
+                    ttl_unchanged => {e, {<<"history">>, 4}, #{ttl => 1000}},
+                    ttl_changed => {f, {<<"history">>, 5}, #{ttl => 1000}}},
     NewSnapshot = #{unchanged => {a, {<<"history">>, 1}},
                     changed => {b2, {<<"history">>, 8}},
-                    added => {d, {<<"history">>, 9}}},
+                    added => {d, {<<"history">>, 9}},
+                    ttl_unchanged => {e, {<<"history">>, 4}, #{ttl => 1000}},
+                    ttl_changed => {f2, {<<"history">>, 7}, #{ttl => 1000}}},
 
     notify_snapshot_diff(Rev, NewSnapshot, OldSnapshot,
                          #data{initialized = true, event_mgr = self()}),
 
     ?assertEqual(lists:sort([{{key, changed}, Rev, {updated, b2}},
+                             {{key, ttl_changed}, Rev, {updated, f2}},
                              {{key, added}, Rev, {updated, d}},
                              {{key, deleted}, Rev, deleted}]),
                  lists:sort(collect_notify_events())).
@@ -983,19 +1381,28 @@ publish_kv_table(KvTable, #data{meta_table = MetaTable}) ->
     ets:insert(MetaTable, {table, KvTable}).
 
 get_from_kv_table(Table, Key) ->
+    case get_entry_from_kv_table(Table, Key) of
+        {ok, Entry} ->
+            {ok, value_rev(Entry)};
+        {error, _} = Error ->
+            Error
+    end.
+
+get_entry_from_kv_table(Table, Key) ->
     try ets:lookup(Table, Key) of
         [] ->
             {error, not_found};
-        [{_, ValueRev}] ->
-            {ok, ValueRev}
+        [{_, Entry}] ->
+            {ok, Entry}
     catch
         error:badarg ->
             {error, no_table}
     end.
 
 txn_get_from_table(Key, Table, TableSeqno) ->
-    case get_from_kv_table(Table, Key) of
-        {ok, {_Value, {_HistoryId, Seqno} = Revision}} = Ok ->
+    case get_entry_from_kv_table(Table, Key) of
+        {ok, Entry} = Ok ->
+            {_Value, {_HistoryId, Seqno} = Revision} = value_rev(Entry),
             case Seqno =< TableSeqno of
                 true ->
                     txn_require_revision(Key, Revision),
@@ -1010,7 +1417,8 @@ txn_get_from_table(Key, Table, TableSeqno) ->
 
 txn_get_from_map(Key, Map) ->
     case maps:find(Key, Map) of
-        {ok, {_, Revision}} = Ok ->
+        {ok, Entry} = Ok ->
+            {_, Revision} = value_rev(Entry),
             txn_require_revision(Key, Revision),
             Ok;
         error ->
@@ -1022,8 +1430,8 @@ txn_get_from_map_many(Keys, Map) ->
     lists:foldl(
       fun (Key, Acc) ->
               case txn_get_from_map(Key, Map) of
-                  {ok, ValueRev} ->
-                      Acc#{Key => ValueRev};
+                  {ok, Entry} ->
+                      Acc#{Key => value_rev(Entry)};
                   {error, not_found} ->
                       Acc
               end
@@ -1032,8 +1440,8 @@ txn_get_from_map_many(Keys, Map) ->
 txn_get_from_table_many(Keys, Table, TableSeqno) ->
     lists:foldl(
       fun (Key, Acc) ->
-              {ok, ValueRev} = txn_get_from_table(Key, Table, TableSeqno),
-              Acc#{Key => ValueRev}
+              {ok, Entry} = txn_get_from_table(Key, Table, TableSeqno),
+              Acc#{Key => value_rev(Entry)}
       end, #{}, Keys).
 
 -define(TXN_CONDITIONS, '$txn_conditions').

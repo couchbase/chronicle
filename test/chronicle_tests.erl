@@ -18,7 +18,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("chronicle.hrl").
 
--export([debug_log/4]).
+-export([debug_log/4, ttl_test_expire_updates/2,
+         ttl_retry_test_expire_updates/2]).
 
 debug_log(Level, Fmt, Args, _Info) ->
     Time = format_time(os:timestamp()),
@@ -362,6 +363,281 @@ leader_transfer_test__(Nodes) ->
            end),
 
     ok.
+
+ttl_test_() ->
+    Nodes = [a, b, c],
+
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun teardown_vnet/1,
+     {timeout, 60, fun () -> ttl_test__(Nodes) end}}.
+
+ttl_test__(Nodes) ->
+    Machines = [{kv, chronicle_kv, []}],
+    ok = rpc_node(a,
+                  fun () ->
+                          chronicle:provision(Machines)
+                  end),
+    add_voters(a, Nodes -- [a]),
+    {ok, Leader} =
+        rpc_node(a,
+                 fun () ->
+                         {L, _} = chronicle_leader:wait_for_leader(),
+                         {ok, L}
+                 end),
+
+    ok = rpc_node(
+           Leader,
+           fun () ->
+                   Start = erlang:monotonic_time(millisecond),
+                   {ok, _} = chronicle_kv:set(kv, expires, 1, any,
+                                              #{ttl => 500}, #{}),
+                   {ok, _} = chronicle_kv:add(kv, overwritten, 1,
+                                              #{ttl => 500}, #{}),
+                   {ok, _} = chronicle_kv:set(kv, overwritten, 2),
+                   {ok, _} = chronicle_kv:set(kv, extended, 1, any,
+                                              #{ttl => 500}, #{}),
+                   {ok, _} = chronicle_kv:set(kv, extended, 2, any,
+                                              #{ttl => 60000}, #{}),
+                   {ok, _} = chronicle_kv:set(kv, rewritten, 1, any,
+                                              #{ttl => 500}, #{}),
+                   {ok, _} = chronicle_kv:multi(
+                               kv, [{add, multi, 1, #{ttl => 500}}]),
+                   {ok, _} = chronicle_kv:txn(
+                               kv,
+                               fun (_) ->
+                                       {commit, [{set, txn, 1,
+                                                  #{ttl => 500}}]}
+                               end),
+                   {ok, _} = chronicle_kv:rewrite(
+                               kv,
+                               fun (rewritten, V) ->
+                                       {update, V + 1};
+                                   (_, _) ->
+                                       keep
+                               end),
+
+                   %% Key options are only visible to readers in full snapshots
+                   {ok, {1, _}} = chronicle_kv:get(kv, expires),
+                   {ok, {Snapshot, _}} = chronicle_kv:get_full_snapshot(kv),
+                   {1, _, #{ttl := 500}} = maps:get(expires, Snapshot),
+                   {ok, {#{multi := {1, _}}, _}} =
+                       chronicle_kv:get_snapshot(kv, [multi]),
+
+                   %% Transactions can read them
+                   {ok, {{{ok, #{ttl := 60000}}, {ok, #{}}}, _}} =
+                       chronicle_kv:ro_txn(
+                         kv,
+                         fun (Txn) ->
+                                 {chronicle_kv:txn_get_key_opts(extended, Txn),
+                                  chronicle_kv:txn_get_key_opts(overwritten,
+                                                                Txn)}
+                         end),
+                   {ok, {{error, not_found}, _}} =
+                       chronicle_kv:ro_txn(
+                         kv,
+                         fun (Txn) ->
+                                 chronicle_kv:txn_get_key_opts(missing, Txn)
+                         end),
+
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:set(kv, bad, 1, any,
+                                                 #{ttl => 0}, #{})),
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:add(kv, bad, 1,
+                                                 #{tll => 1000}, #{})),
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:multi(
+                                  kv, [{add, bad, 1, #{ttl => 0}}])),
+                   ?assertError({bad_updates, _},
+                                chronicle_kv:txn(
+                                  kv,
+                                  fun (_) ->
+                                          {commit, [{set, bad, 1,
+                                                     #{ttl => -1}}]}
+                                  end)),
+
+                   %% A ttl over the max_ttl setting is refused
+                   ok = chronicle_settings:set_local_settings(
+                          #{{chronicle_kv, kv, max_ttl} => 1000}),
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:set(kv, bad, 1, any,
+                                                 #{ttl => 1001}, #{})),
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:multi(
+                                  kv, [{set, bad, 1, #{ttl => 1001}}])),
+                   ?assertError({bad_key_opts, _},
+                                chronicle_kv:txn(
+                                  kv,
+                                  fun (_) ->
+                                          {commit, [{set, bad, 1,
+                                                     #{ttl => 1001}}]}
+                                  end)),
+                   ok = chronicle_settings:set_local_settings(#{}),
+                   {error, not_found} = chronicle_kv:get(kv, bad),
+
+                   ok = wait_for_keys_gone([expires, multi, txn, rewritten],
+                                           10000),
+                   ?assert(erlang:monotonic_time(millisecond) - Start >= 500),
+
+                   {ok, {2, _}} = chronicle_kv:get(kv, overwritten),
+                   {ok, {2, _}} = chronicle_kv:get(kv, extended),
+
+                   ok
+           end),
+
+    %% A handler can change other keys in the same transaction as the expiry
+    ok = rpc_nodes(Nodes,
+                   fun () ->
+                           chronicle_env:set_env(
+                             kv_expire_handlers,
+                             #{kv => {?MODULE, ttl_test_expire_updates}})
+                   end),
+    ok = rpc_node(
+           Leader,
+           fun () ->
+                   {ok, _} = chronicle_kv:set(kv, handled, 1, any,
+                                              #{ttl => 500}, #{}),
+                   ok = wait_for_keys_gone([handled], 10000),
+                   {ok, {true, _}} = chronicle_kv:get(kv, {expired, handled}),
+                   ok
+           end),
+
+    %% A touch from a follower is run on the leader, and keeps a key alive
+    %% without a write
+    [Other | _] = Nodes -- [Leader],
+    ok = rpc_node(
+           Other,
+           fun () ->
+                   {ok, {HistoryId, Seqno} = Rev} =
+                       chronicle_kv:set(kv, touched, 1, any,
+                                        #{ttl => 1000}, #{}),
+                   {ok, _} = chronicle_kv:set(kv, untouched, 1),
+                   ok = touch_for(touched, 3000),
+                   {ok, {1, Rev}} =
+                       chronicle_kv:get(kv, touched,
+                                        #{read_consistency => quorum}),
+
+                   {ok, #{touched := {error, {conflict, Rev}},
+                          untouched := {error, no_ttl},
+                          missing := {error, not_found}}} =
+                       chronicle_kv:touch(
+                         kv, [{touched, {HistoryId, Seqno + 1}},
+                              {untouched, any},
+                              {missing, any}]),
+
+                   ok = wait_for_keys_gone([touched], 10000),
+                   {ok, #{touched := {error, not_found}}} =
+                       chronicle_kv:touch(kv, [{touched, Rev}]),
+                   ok
+           end),
+
+    ok = rpc_node(Other,
+                  fun () ->
+                          {ok, _} = chronicle_kv:set(kv, takeover, 1, any,
+                                                     #{ttl => 3000}, #{}),
+                          ok = chronicle:remove_peer(Leader),
+                          {ok, {1, _}} =
+                              chronicle_kv:get(kv, takeover,
+                                               #{read_consistency => quorum}),
+                          ok = wait_for_keys_gone([takeover], 20000),
+                          {ok, {2, _}} = chronicle_kv:get(kv, extended),
+
+                          %% The new leader takes touches
+                          {ok, _} = chronicle_kv:set(kv, retouched, 1, any,
+                                                     #{ttl => 1000}, #{}),
+                          ok = touch_for(retouched, 2000),
+                          {ok, {1, _}} =
+                              chronicle_kv:get(kv, retouched,
+                                               #{read_consistency => quorum}),
+                          ok
+                  end).
+
+ttl_test_expire_updates(Keys, Txn) ->
+    Updates = chronicle_kv:expire_updates(Keys, Txn),
+    Updates ++ [{set, {expired, Key}, true} || {expire, Key} <- Updates].
+
+touch_for(Key, Duration) when Duration > 0 ->
+    {ok, #{Key := ok}} = chronicle_kv:touch(kv, [{Key, any}]),
+    timer:sleep(250),
+    touch_for(Key, Duration - 250);
+touch_for(_Key, _Duration) ->
+    ok.
+
+wait_for_keys_gone(Keys, Timeout) when Timeout > 0 ->
+    Gone = lists:all(
+             fun (Key) ->
+                     {error, not_found} =:=
+                         chronicle_kv:get(kv, Key,
+                                          #{read_consistency => quorum})
+             end, Keys),
+    case Gone of
+        true ->
+            ok;
+        false ->
+            timer:sleep(100),
+            wait_for_keys_gone(Keys, Timeout - 100)
+    end;
+wait_for_keys_gone(Keys, _Timeout) ->
+    {timeout, Keys}.
+
+ttl_retry_test_() ->
+    Nodes = [a],
+    {setup,
+     fun () -> setup_vnet(Nodes) end,
+     fun (Sups) ->
+             %% The handler is in the app env, so outlives the vnet
+             ok = rpc_node(a,
+                           fun () ->
+                                   chronicle_env:set_env(kv_expire_handlers,
+                                                         #{})
+                           end),
+             teardown_vnet(Sups)
+     end,
+     {timeout, 30, fun ttl_retry_test__/0}}.
+
+%% Writes during the backoff after a failed expiry don't retry it early
+ttl_retry_test__() ->
+    true = register(ttl_retry_test, self()),
+    ok = rpc_node(
+           a,
+           fun () ->
+                   ok = chronicle:provision([{kv, chronicle_kv, []}]),
+                   chronicle_env:set_env(
+                     kv_expire_handlers,
+                     #{kv => {?MODULE, ttl_retry_test_expire_updates}}),
+                   ok = chronicle_settings:set_local_settings(
+                          #{{kv_expiry, retry_after} => 60000}),
+                   {ok, _} = chronicle_kv:set(kv, failing, 1, any,
+                                              #{ttl => 100}, #{}),
+                   ok
+           end),
+    receive
+        expire_attempt ->
+            ok
+    after 10000 ->
+            error(no_expire_attempt)
+    end,
+
+    ok = rpc_node(
+           a,
+           fun () ->
+                   lists:foreach(
+                     fun (I) ->
+                             {ok, _} = chronicle_kv:set(kv, {key, I}, 1, any,
+                                                        #{ttl => 60000}, #{})
+                     end, lists:seq(1, 10))
+           end),
+    receive
+        expire_attempt ->
+            error(early_retry)
+    after 1000 ->
+            ok
+    end.
+
+ttl_retry_test_expire_updates(_Keys, _Txn) ->
+    ttl_retry_test ! expire_attempt,
+    error(expire_failed).
 
 failover_recovery_test_() ->
     Nodes = [a, b, c],
